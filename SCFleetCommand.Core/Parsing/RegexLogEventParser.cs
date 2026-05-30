@@ -14,6 +14,7 @@ public sealed class RegexLogEventParser : ILogEventParser
         new(FleetEventType.PlayerExitedShip, new Regex(@"<SHUDEvent_OnNotification>\s+Added notification ""[^""]*(?:left|é€€|退出)[^""]*(?:channel|é¢‘é“|频道)\s+'(?<ship>[^:']+)\s+:\s+(?<player>[^']+)'", Options), PlayerIsShipOwner: true),
         new(FleetEventType.PlayerOnline, new Regex(@"nickname=""(?<player>[^""]+)""\s+playerGEID\s*=?\s*""?(?<playerId>\d+)?", Options)),
         new(FleetEventType.PlayerOffline, new Regex(@"PLAYER_OFFLINE\s+player=""?(?<player>[^""\s]+)""?", Options)),
+        new(FleetEventType.PlayerLocationChanged, new Regex(@"<RequestLocationInventory>\s+Player\[(?<player>[^\]]+)\]\s+requested inventory for Location\[(?<location>[A-Za-z0-9_]+)\]", Options)),
         new(FleetEventType.PlayerEnteredShip, new Regex(@"PLAYER_ENTER_SHIP\s+player=""?(?<player>[^""\s]+)""?\s+ship=""?(?<ship>[^""]+?)""?$", Options)),
         new(FleetEventType.PlayerExitedShip, new Regex(@"PLAYER_EXIT_SHIP\s+player=""?(?<player>[^""\s]+)""?\s+ship=""?(?<ship>[^""]+?)""?$", Options)),
         new(FleetEventType.PlayerLocationChanged, new Regex(@"PLAYER_LOCATION\s+player=""?(?<player>[^""\s]+)""?\s+location=""?(?<location>[^""]+?)""?$", Options)),
