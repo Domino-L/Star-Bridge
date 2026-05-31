@@ -2,6 +2,8 @@
 
 Prototype verification build for the Star Citizen fleet command concept.
 
+Current test version: `0.2.1`.
+
 ## Current Prototype
 
 This version proves the first core loop:

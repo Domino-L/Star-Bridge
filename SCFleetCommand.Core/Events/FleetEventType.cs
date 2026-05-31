@@ -11,6 +11,7 @@ public enum FleetEventType
     PlayerShipControlSignal,
     PlayerStoppedDrivingShip,
     PlayerLocationChanged,
+    PlayerNavigationTargetChanged,
     CombatStateChanged,
     NetworkStateChanged
 }

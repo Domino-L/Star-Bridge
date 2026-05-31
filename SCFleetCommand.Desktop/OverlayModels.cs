@@ -109,6 +109,8 @@ public sealed class SquadRow : System.ComponentModel.INotifyPropertyChanged
 
     public string Description { get; set; } = "No squad briefing yet.";
 
+    public string Type { get; set; } = "Assault";
+
     public string? EmblemPath
     {
         get => _emblemPath;

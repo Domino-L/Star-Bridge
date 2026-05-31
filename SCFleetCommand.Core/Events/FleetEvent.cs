@@ -10,4 +10,9 @@ public sealed record FleetEvent(
     DateTimeOffset? Timestamp = null,
     string? SourceLine = null,
     string? PlayerId = null,
-    string? ShipOwner = null);
+    string? ShipOwner = null,
+    string? ShipInstanceId = null,
+    string? NavigationTarget = null,
+    int LocationEvidenceScore = 0,
+    string? LocationEvidence = null,
+    bool ClearsShipState = false);

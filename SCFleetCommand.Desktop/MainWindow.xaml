@@ -932,71 +932,191 @@
             <TabItem x:Name="MySquadTab" Header="My Squad">
                 <Grid Margin="0,14,0,0">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="230" />
+                        <RowDefinition Height="260" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="300" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
 
                     <Border Grid.Row="0"
+                            Grid.RowSpan="2"
+                            Grid.Column="0"
                             Style="{StaticResource HudPanel}"
-                            Padding="24">
+                            Padding="18">
                         <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="220" />
-                                <ColumnDefinition Width="*" />
-                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="44" />
+                                <RowDefinition Height="44" />
+                                <RowDefinition Height="28" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
 
-                            <Border Grid.Column="0"
-                                    Width="172"
-                                    Height="172"
-                                    HorizontalAlignment="Left"
-                                    VerticalAlignment="Center"
-                                    BorderBrush="{StaticResource AccentBrush}"
-                                    BorderThickness="1"
-                                    Background="{StaticResource FieldBackBrush}"
-                                    Cursor="Hand"
-                                    MouseLeftButtonUp="MySquadEmblem_MouseLeftButtonUp">
-                                <Grid Width="172" Height="172">
-                                    <Image x:Name="MySquadEmblemImage"
-                                           Stretch="UniformToFill" />
-                                    <StackPanel VerticalAlignment="Center">
-                                        <TextBlock x:Name="MySquadIconText"
-                                                   Text="A"
-                                                   FontSize="44"
-                                                   FontWeight="SemiBold"
-                                                   Foreground="{StaticResource AccentBrush}"
-                                                   HorizontalAlignment="Center" />
-                                        <TextBlock x:Name="MySquadEmblemHintText"
-                                                   Text="Click to change"
-                                                   Foreground="{StaticResource MutedTextBrush}"
-                                                   HorizontalAlignment="Center"
-                                                   Margin="0,8,0,0" />
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
+                            <Button x:Name="CreateSquadButton"
+                                    Content="创建小队"
+                                    Style="{StaticResource PrimaryButton}"
+                                    Click="CreateSquad_Click" />
+                            <Button Grid.Row="1"
+                                    x:Name="JoinSquadButton"
+                                    Content="加入小队"
+                                    Style="{StaticResource SecondaryButton}"
+                                    Margin="0,10,0,0"
+                                    IsEnabled="False"
+                                    Click="JoinSquad_Click" />
+                            <TextBlock Grid.Row="2"
+                                       x:Name="JoinSquadHintText"
+                                       Text="请选择一个小队"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="11"
+                                       VerticalAlignment="Center" />
+                            <Grid Grid.Row="3"
+                                  Margin="0,8,0,0">
+                                <ListBox x:Name="SquadSelectionList"
+                                         Background="{StaticResource FieldBackBrush}"
+                                         BorderBrush="{StaticResource AccentDimBrush}"
+                                         Foreground="{StaticResource PrimaryTextBrush}"
+                                         SelectionChanged="SquadSelectionList_SelectionChanged">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Padding="10"
+                                                    Margin="0,0,0,8"
+                                                    BorderBrush="{StaticResource AccentDimBrush}"
+                                                    BorderThickness="1"
+                                                    Background="{StaticResource PanelBackBrush}">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="44" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Width="34"
+                                                            Height="34"
+                                                            BorderBrush="{StaticResource AccentBrush}"
+                                                            BorderThickness="1"
+                                                            Background="{StaticResource FieldBackBrush}">
+                                                        <Grid>
+                                                            <Image Source="{Binding EmblemPath}" Stretch="UniformToFill" />
+                                                            <TextBlock Text="{Binding Icon}"
+                                                                       Foreground="{StaticResource AccentBrush}"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Center" />
+                                                        </Grid>
+                                                    </Border>
+                                                    <StackPanel Grid.Column="1">
+                                                        <TextBlock Text="{Binding Name}"
+                                                                   Foreground="{StaticResource PrimaryTextBrush}"
+                                                                   FontWeight="SemiBold" />
+                                                        <TextBlock Text="{Binding SummaryLine}"
+                                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                                   FontSize="11" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
 
-                            <Grid Grid.Column="1"
-                                  Margin="24,0,0,0">
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="42" />
-                                    <RowDefinition Height="36" />
-                                    <RowDefinition Height="*" />
-                                </Grid.RowDefinitions>
+                                <StackPanel x:Name="NoSquadsPanel"
+                                            VerticalAlignment="Center"
+                                            Margin="12">
+                                    <TextBlock Text="没有小队？"
+                                               Foreground="{StaticResource PrimaryTextBrush}"
+                                               FontSize="18"
+                                               FontWeight="SemiBold"
+                                               HorizontalAlignment="Center" />
+                                    <TextBlock Text="成为小队指挥官"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               HorizontalAlignment="Center"
+                                               Margin="0,8,0,18" />
+                                    <Button Content="创建小队"
+                                            Style="{StaticResource PrimaryButton}"
+                                            Height="42"
+                                            Click="CreateSquad_Click" />
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+                    </Border>
 
-                                <TextBlock x:Name="MySquadNameText"
-                                           Text="Alpha"
-                                           FontSize="28"
+                    <Border Grid.Row="0"
+                            Grid.Column="1"
+                            Style="{StaticResource HudPanel}"
+                            Padding="24"
+                            Margin="14,0,0,0">
+                        <Grid>
+                            <Grid x:Name="MySquadEmptyDetailPanel">
+                                <TextBlock Text="未选择小队"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="24"
                                            FontWeight="SemiBold"
-                                           Foreground="{StaticResource AccentBrush}" />
-                                <TextBlock Grid.Row="1"
-                                           x:Name="MySquadCommanderText"
-                                           Text="Commander / Unassigned"
-                                           Style="{StaticResource HudCaptionText}" />
-                                <Border Grid.Row="2"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Grid>
+
+                            <Grid x:Name="MySquadDetailPanel"
+                                  Visibility="Collapsed">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="210" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="360" />
+                                </Grid.ColumnDefinitions>
+
+                                <Border Grid.Column="0"
+                                        Width="172"
+                                        Height="172"
+                                        HorizontalAlignment="Left"
+                                        VerticalAlignment="Center"
+                                        BorderBrush="{StaticResource AccentBrush}"
+                                        BorderThickness="1"
+                                        Background="{StaticResource FieldBackBrush}"
+                                        Cursor="Hand"
+                                        MouseLeftButtonUp="MySquadEmblem_MouseLeftButtonUp">
+                                    <Grid Width="172" Height="172">
+                                        <Image x:Name="MySquadEmblemImage"
+                                               Stretch="UniformToFill" />
+                                        <StackPanel VerticalAlignment="Center">
+                                            <TextBlock x:Name="MySquadIconText"
+                                                       Text="?"
+                                                       FontSize="44"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource AccentBrush}"
+                                                       HorizontalAlignment="Center" />
+                                            <TextBlock x:Name="MySquadEmblemHintText"
+                                                       Text="Click to change"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       HorizontalAlignment="Center"
+                                                       Margin="0,8,0,0" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+
+                                <StackPanel Grid.Column="1"
+                                            Margin="20,0,24,0"
+                                            VerticalAlignment="Center">
+                                    <TextBlock x:Name="MySquadNameText"
+                                               Text="No Squad"
+                                               FontSize="28"
+                                               FontWeight="SemiBold"
+                                               Foreground="{StaticResource AccentBrush}" />
+                                    <TextBlock x:Name="MySquadCommanderText"
+                                               Text="Commander / Unassigned"
+                                               Style="{StaticResource HudCaptionText}"
+                                               Margin="0,8,0,0" />
+                                    <TextBlock x:Name="MySquadMemberCountText"
+                                               Text="0/0 Online"
+                                               Style="{StaticResource HudCaptionText}"
+                                               Margin="0,8,0,0" />
+                                    <TextBlock x:Name="MySquadTypeText"
+                                               Text="Type / Assault"
+                                               Style="{StaticResource HudCaptionText}"
+                                               Margin="0,8,0,0" />
+                                </StackPanel>
+
+                                <Border Grid.Column="2"
                                         BorderBrush="{StaticResource AccentDimBrush}"
                                         BorderThickness="1"
                                         Background="{StaticResource FieldBackBrush}"
-                                        Padding="18"
-                                        Margin="0,8,0,0">
+                                        Padding="18">
                                     <TextBox x:Name="MySquadDescriptionBox"
                                              Text="No squad briefing yet."
                                              AcceptsReturn="True"
@@ -1011,8 +1131,9 @@
                     </Border>
 
                     <ListView Grid.Row="1"
+                              Grid.Column="1"
                               x:Name="MySquadMembersList"
-                              Margin="0,14,0,0"
+                              Margin="14,14,0,0"
                               Background="{StaticResource FieldBackBrush}"
                               Foreground="{StaticResource PrimaryTextBrush}"
                               BorderBrush="{StaticResource AccentDimBrush}">
@@ -1065,6 +1186,7 @@
 
                     <Border x:Name="SquadRequiresFleetPanel"
                             Grid.RowSpan="2"
+                            Grid.ColumnSpan="2"
                             Panel.ZIndex="20"
                             Background="{StaticResource PageBackgroundBrush}"
                             BorderBrush="{StaticResource AccentDimBrush}"
@@ -1107,6 +1229,84 @@
                                         Click="FleetCreateButton_Click" />
                             </Grid>
                         </StackPanel>
+                    </Border>
+
+                    <Border x:Name="CreateSquadPanel"
+                            Grid.RowSpan="2"
+                            Grid.ColumnSpan="2"
+                            Panel.ZIndex="30"
+                            Visibility="Collapsed"
+                            Background="#CC02070D">
+                        <Border Width="560"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Style="{StaticResource HudPanel}"
+                                Padding="28">
+                            <StackPanel>
+                                <TextBlock Text="创建小队"
+                                           FontSize="24"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource AccentBrush}" />
+                                <TextBlock x:Name="CreateSquadValidationText"
+                                           Text=""
+                                           Foreground="#FFFF5C5C"
+                                           Margin="0,8,0,0" />
+                                <TextBlock Text="小队名称"
+                                           Style="{StaticResource HudCaptionText}"
+                                           Margin="0,18,0,6" />
+                                <TextBox x:Name="CreateSquadNameBox"
+                                         MaxLength="24" />
+                                <TextBlock Text="小队类型"
+                                           Style="{StaticResource HudCaptionText}"
+                                           Margin="0,14,0,6" />
+                                <ComboBox x:Name="CreateSquadTypeBox"
+                                          SelectionChanged="CreateSquadTypeBox_SelectionChanged"
+                                          SelectedIndex="0">
+                                    <ComboBoxItem Content="突击" />
+                                    <ComboBoxItem Content="支援" />
+                                    <ComboBoxItem Content="侦察" />
+                                    <ComboBoxItem Content="护航" />
+                                    <ComboBoxItem Content="防空" />
+                                    <ComboBoxItem Content="地面FPS" />
+                                    <ComboBoxItem Content="地面支援" />
+                                    <ComboBoxItem Content="后勤" />
+                                    <ComboBoxItem Content="医疗" />
+                                    <ComboBoxItem Content="采矿" />
+                                    <ComboBoxItem Content="贸易" />
+                                    <ComboBoxItem Content="自定义" />
+                                </ComboBox>
+                                <TextBox x:Name="CreateSquadCustomTypeBox"
+                                         MaxLength="5"
+                                         Visibility="Collapsed"
+                                         Margin="0,8,0,0" />
+                                <TextBlock Text="简述"
+                                           Style="{StaticResource HudCaptionText}"
+                                           Margin="0,14,0,6" />
+                                <TextBox x:Name="CreateSquadDescriptionBox"
+                                         Height="110"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         Text="No squad briefing yet." />
+                                <Grid Margin="0,22,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Button Grid.Column="0"
+                                            Content="取消"
+                                            Style="{StaticResource SecondaryButton}"
+                                            Height="42"
+                                            Margin="0,0,8,0"
+                                            Click="CreateSquadCancel_Click" />
+                                    <Button Grid.Column="1"
+                                            Content="创建"
+                                            Style="{StaticResource PrimaryButton}"
+                                            Height="42"
+                                            Margin="8,0,0,0"
+                                            Click="CreateSquadConfirm_Click" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
                     </Border>
                 </Grid>
             </TabItem>

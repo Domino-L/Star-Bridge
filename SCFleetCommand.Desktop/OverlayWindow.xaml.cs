@@ -318,7 +318,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
                 Members.Add(new OverlayMemberRow(
                     FormatMemberName(player, settings.MemberNameMode),
                     player.Status,
-                    player.Ship,
+                    player.ShipInfo,
                     player.Location));
             }
         }

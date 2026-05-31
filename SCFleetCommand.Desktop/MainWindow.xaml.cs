@@ -37,6 +37,8 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<PlayerRow> _players = [];
     private readonly ObservableCollection<SquadRow> _squads = [];
     private readonly ObservableCollection<SquadMemberStatusRow> _mySquadMembers = [];
+    private SquadRow? _selectedSquad;
+    private SquadRow? _joinedSquad;
     private readonly GridViewColumn PlayerNameColumn = new();
     private readonly GridViewColumn PlayerStatusColumn = new();
     private readonly GridViewColumn PlayerShipColumn = new();
@@ -79,6 +81,7 @@ public partial class MainWindow : Window
         NavigateToMyFleet();
         PlayersList.ItemsSource = _players;
         SquadsList.ItemsSource = _squads;
+        SquadSelectionList.ItemsSource = _squads;
         MySquadMembersList.ItemsSource = _mySquadMembers;
 
         _isLoadingSettings = true;
@@ -101,7 +104,6 @@ public partial class MainWindow : Window
         LoadAvatarPreview();
         _isLoadingSettings = false;
 
-        SeedSquads();
         UpdateFleetEntryPanels();
         Loaded += (_, _) =>
         {
@@ -394,13 +396,14 @@ public partial class MainWindow : Window
 
         if (output)
         {
-            AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""} | {fleetEvent.Location ?? ""}");
+            AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""} | {fleetEvent.Location ?? fleetEvent.NavigationTarget ?? ""}");
         }
     }
 
     private void RenderState()
     {
         _isGameProcessRunning = IsStarCitizenRunning();
+        _fleetState.RefreshShipInferences(DateTimeOffset.Now);
         _players.Clear();
 
         foreach (var player in _fleetState.Players)
@@ -408,12 +411,13 @@ public partial class MainWindow : Window
             var isLocalPlayer = !string.IsNullOrWhiteSpace(_localPlayer) &&
                                 player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase);
             var online = player.Online && (!isLocalPlayer || _isGameProcessRunning);
-            var primarySquad = _squads.FirstOrDefault();
+            var primarySquad = _joinedSquad;
             _players.Add(new PlayerRow(
                 player.Name,
                 online ? "Online" : "Offline",
                 player.Ship,
-                player.Location,
+                FormatShipInference(player.Ship, player.ShipConfidence),
+                FormatLocation(player.Location, player.NavigationTarget),
                 IsLocalPlayer(player.Name) ? _callsign : null,
                 IsLocalPlayer(player.Name) ? _avatarPath : null,
                 GetInitials(player.Name),
@@ -444,6 +448,28 @@ public partial class MainWindow : Window
                 $"Location: {local.Location}{Environment.NewLine}" +
                 $"Status: {local.Status}";
         }
+    }
+
+    private static string FormatShipInference(string ship, string confidence)
+    {
+        if (string.IsNullOrWhiteSpace(ship) ||
+            ship.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Ship: Unknown";
+        }
+
+        return $"Ship: {ship} [{confidence}]";
+    }
+
+    private static string FormatLocation(string location, string navigationTarget)
+    {
+        if (string.IsNullOrWhiteSpace(navigationTarget) ||
+            navigationTarget.Equals("None", StringComparison.OrdinalIgnoreCase))
+        {
+            return location;
+        }
+
+        return $"{location} -> {navigationTarget}";
     }
 
     private void UpdateLocalOnlineStateFromGameProcess()
@@ -895,7 +921,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var squad = _squads.FirstOrDefault();
+        var squad = _selectedSquad;
         if (squad is null)
         {
             return;
@@ -904,6 +930,145 @@ public partial class MainWindow : Window
         squad.Description = MySquadDescriptionBox.Text.Trim();
         squad.RefreshComputed();
         RefreshOverlayWindow();
+    }
+
+    private void CreateSquad_Click(object sender, RoutedEventArgs e)
+    {
+        if (_joinedSquad is not null &&
+            _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
+        {
+            JoinSquadHintText.Text = "每人只能创建一个小队";
+            return;
+        }
+
+        CreateSquadPanel.Visibility = Visibility.Visible;
+        CreateSquadValidationText.Text = "";
+        CreateSquadNameBox.Text = "";
+        CreateSquadTypeBox.SelectedIndex = 0;
+        CreateSquadCustomTypeBox.Text = "";
+        CreateSquadCustomTypeBox.Visibility = Visibility.Collapsed;
+        CreateSquadDescriptionBox.Text = "No squad briefing yet.";
+        CreateSquadNameBox.Focus();
+    }
+
+    private void CreateSquadCancel_Click(object sender, RoutedEventArgs e)
+    {
+        CreateSquadPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void CreateSquadConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (_joinedSquad is not null &&
+            _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
+        {
+            CreateSquadValidationText.Text = "每人只能创建一个小队。";
+            return;
+        }
+
+        var name = CreateSquadNameBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            CreateSquadValidationText.Text = "请输入小队名称。";
+            return;
+        }
+
+        if (_squads.Any(squad => squad.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+        {
+            CreateSquadValidationText.Text = "已经存在同名小队。";
+            return;
+        }
+
+        var squadType = GetCreateSquadType();
+        if (string.IsNullOrWhiteSpace(squadType))
+        {
+            CreateSquadValidationText.Text = "请输入自定义小队类型。";
+            return;
+        }
+
+        if (IsCustomSquadTypeSelected() && !IsValidChineseText(squadType, maxLength: 5))
+        {
+            CreateSquadValidationText.Text = "自定义类型仅限 5 个中文字以内。";
+            return;
+        }
+
+        var squad = new SquadRow
+        {
+            Name = name,
+            Icon = GetInitials(name),
+            Commander = FormatCommanderName(_callsign, _localPlayer),
+            Type = squadType,
+            Description = string.IsNullOrWhiteSpace(CreateSquadDescriptionBox.Text)
+                ? "No squad briefing yet."
+                : CreateSquadDescriptionBox.Text.Trim()
+        };
+
+        _squads.Add(squad);
+        _selectedSquad = squad;
+        _joinedSquad = squad;
+        SquadSelectionList.SelectedItem = squad;
+        CreateSquadPanel.Visibility = Visibility.Collapsed;
+        JoinSquadHintText.Text = $"已创建并加入 {squad.Name}";
+        RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
+    }
+
+    private void CreateSquadTypeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (CreateSquadCustomTypeBox is null)
+        {
+            return;
+        }
+
+        CreateSquadCustomTypeBox.Visibility = IsCustomSquadTypeSelected()
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private string GetCreateSquadType()
+    {
+        return IsCustomSquadTypeSelected()
+            ? CreateSquadCustomTypeBox.Text.Trim()
+            : (CreateSquadTypeBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "突击";
+    }
+
+    private bool IsCustomSquadTypeSelected()
+    {
+        return string.Equals(
+            (CreateSquadTypeBox.SelectedItem as ComboBoxItem)?.Content?.ToString(),
+            "自定义",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsValidChineseText(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > maxLength)
+        {
+            return false;
+        }
+
+        return value.All(character => character >= '\u4e00' && character <= '\u9fff');
+    }
+
+    private void JoinSquad_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSquad is null)
+        {
+            JoinSquadHintText.Text = "请选择一个小队";
+            return;
+        }
+
+        _joinedSquad = _selectedSquad;
+        JoinSquadHintText.Text = $"已加入 {_joinedSquad.Name}";
+        RenderState();
+    }
+
+    private void SquadSelectionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _selectedSquad = SquadSelectionList.SelectedItem as SquadRow;
+        JoinSquadButton.IsEnabled = _selectedSquad is not null;
+        JoinSquadHintText.Text = _selectedSquad is null ? "请选择一个小队" : "可以加入所选小队";
+        RenderMySquad();
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -1054,7 +1219,7 @@ public partial class MainWindow : Window
 
     private void MySquadEmblem_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        ChooseSquadEmblem(_squads.FirstOrDefault());
+        ChooseSquadEmblem(_selectedSquad);
     }
 
     private void ChooseSquadEmblem(SquadRow? squad)
@@ -1534,8 +1699,6 @@ public partial class MainWindow : Window
         {
             return;
         }
-
-        _squads.Add(new SquadRow { Name = "Alpha", Icon = "A", Commander = "Unassigned" });
     }
 
     private void RenderSquads()
@@ -1543,36 +1706,42 @@ public partial class MainWindow : Window
         foreach (var squad in _squads)
         {
             squad.Members.Clear();
-            foreach (var player in _players)
+            if (ReferenceEquals(squad, _joinedSquad))
             {
-                squad.Members.Add(new MemberAvatarRow(player.Name, GetInitials(player.Name), player.Status));
+                foreach (var player in _players)
+                {
+                    squad.Members.Add(new MemberAvatarRow(player.Name, GetInitials(player.Name), player.Status));
+                }
             }
 
             squad.RefreshComputed();
         }
+
+        NoSquadsPanel.Visibility = _squads.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SquadSelectionList.Visibility = _squads.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void RenderMySquad()
     {
-        var squad = _squads.FirstOrDefault();
+        var squad = _selectedSquad;
         if (squad is null)
         {
-            MySquadNameText.Text = "No Squad";
-            MySquadCommanderText.Text = "Commander / Unassigned";
+            MySquadEmptyDetailPanel.Visibility = Visibility.Visible;
+            MySquadDetailPanel.Visibility = Visibility.Collapsed;
             if (!MySquadDescriptionBox.IsKeyboardFocusWithin)
             {
-                MySquadDescriptionBox.Text = "Create or join a squad to see squad details here.";
+                MySquadDescriptionBox.Text = "";
             }
-            MySquadIconText.Text = "?";
-            MySquadIconText.Visibility = Visibility.Visible;
-            MySquadEmblemImage.Source = null;
-            MySquadEmblemHintText.Visibility = Visibility.Visible;
             _mySquadMembers.Clear();
             return;
         }
 
+        MySquadEmptyDetailPanel.Visibility = Visibility.Collapsed;
+        MySquadDetailPanel.Visibility = Visibility.Visible;
         MySquadNameText.Text = squad.Name;
         MySquadCommanderText.Text = $"Commander / {squad.Commander}";
+        MySquadMemberCountText.Text = $"{squad.Members.Count(member => member.Status == "Online")}/{squad.Members.Count} Online";
+        MySquadTypeText.Text = $"Type / {squad.Type}";
         if (!MySquadDescriptionBox.IsKeyboardFocusWithin)
         {
             MySquadDescriptionBox.Text = squad.Description;
@@ -1581,17 +1750,20 @@ public partial class MainWindow : Window
         LoadMySquadEmblem(squad.EmblemPath);
 
         _mySquadMembers.Clear();
-        foreach (var player in _players)
+        if (ReferenceEquals(squad, _joinedSquad))
         {
-            _mySquadMembers.Add(new SquadMemberStatusRow(
-                GetInitials(player.Name),
-                player.AvatarPath,
-                player.Role,
-                player.Callsign ?? "-",
-                player.Name,
-                player.Status,
-                player.Ship,
-                player.Location));
+            foreach (var player in _players)
+            {
+                _mySquadMembers.Add(new SquadMemberStatusRow(
+                    GetInitials(player.Name),
+                    player.AvatarPath,
+                    player.Role,
+                    player.Callsign ?? "-",
+                    player.Name,
+                    player.Status,
+                    player.Ship,
+                    player.Location));
+            }
         }
     }
 
@@ -1637,6 +1809,7 @@ public sealed record PlayerRow(
     string Name,
     string Status,
     string Ship,
+    string ShipInfo,
     string Location,
     string? Callsign = null,
     string? AvatarPath = null,
