@@ -1,10 +1,11 @@
 using System.Collections.ObjectModel;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Brushes = System.Windows.Media.Brushes;
 
@@ -20,21 +21,38 @@ public partial class OverlayWindow : Window
     private const int WsExToolWindow = 0x00000080;
     private const int WsExNoActivate = 0x08000000;
 
+    private readonly IEnumerable<OverlayLayoutItem> _layout;
     private readonly OverlayViewModel _viewModel;
-    private readonly IReadOnlyDictionary<string, OverlayLayoutItem> _layout;
 
-    public OverlayWindow(IEnumerable<SquadRow> squads, IEnumerable<PlayerRow> players, IEnumerable<OverlayLayoutItem> layout, OverlayDisplaySettings settings, string language)
+    public OverlayWindow(
+        IEnumerable<SquadRow> squads,
+        IEnumerable<PlayerRow> players,
+        IEnumerable<OverlayLayoutItem> layout,
+        OverlayDisplaySettings settings,
+        string language,
+        bool hasFleet)
     {
         InitializeComponent();
         Left = SystemParameters.VirtualScreenLeft;
         Top = SystemParameters.VirtualScreenTop;
         Width = SystemParameters.VirtualScreenWidth;
         Height = SystemParameters.VirtualScreenHeight;
-        _layout = layout.ToDictionary(item => item.Key, StringComparer.OrdinalIgnoreCase);
-        _viewModel = new OverlayViewModel(squads, players, settings, language);
+        _layout = layout;
+        _viewModel = new OverlayViewModel(squads, players, settings, language, hasFleet);
         DataContext = _viewModel;
         Loaded += (_, _) => ApplyLayout();
         SizeChanged += (_, _) => ApplyLayout();
+    }
+
+    public void Refresh(
+        IEnumerable<SquadRow> squads,
+        IEnumerable<PlayerRow> players,
+        OverlayDisplaySettings settings,
+        string language,
+        bool hasFleet)
+    {
+        _viewModel.Refresh(squads, players, settings, language, hasFleet);
+        ApplyLayout();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -66,7 +84,9 @@ public partial class OverlayWindow : Window
 
     private void ApplyPanel(string key, FrameworkElement panel)
     {
-        if (!_layout.TryGetValue(key, out var item))
+        var item = _layout.FirstOrDefault(layoutItem =>
+            layoutItem.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+        if (item is null)
         {
             return;
         }
@@ -119,53 +139,29 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
 {
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private int _noticeSecondsRemaining = 15;
+    private string _fleetNoticeTitle = "";
+    private string _squadsTitle = "";
+    private string _missionTitle = "";
+    private string _membersTitle = "";
+    private string _hotkeyToggleLabel = "";
+    private string _fleetNotice = "";
+    private string _fleetMission = "";
+    private string _squadMission = "";
+    private string _rallyPoint = "";
+    private Visibility _missionVisibility = Visibility.Visible;
+    private Visibility _squadsVisibility = Visibility.Visible;
+    private Visibility _membersVisibility = Visibility.Visible;
+    private bool _showNotice = true;
+    private double _overlayOpacity = 0.85;
 
-    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
-
-    public OverlayViewModel(IEnumerable<SquadRow> squads, IEnumerable<PlayerRow> players, OverlayDisplaySettings settings, string language)
+    public OverlayViewModel(
+        IEnumerable<SquadRow> squads,
+        IEnumerable<PlayerRow> players,
+        OverlayDisplaySettings settings,
+        string language,
+        bool hasFleet)
     {
-        var zh = string.Equals(language, "zh", StringComparison.OrdinalIgnoreCase);
-        var squadArray = squads.ToArray();
-        Squads = new ObservableCollection<OverlaySquadRow>(
-            squadArray.Select(squad => new OverlaySquadRow(
-                squad.Name,
-                squad.Icon,
-                squad.CommanderLine,
-                squad.EmblemPath,
-                settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible)));
-
-        var playerRows = settings.HideOfflineMembers
-            ? players.Where(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase))
-            : players;
-        Members = new ObservableCollection<OverlayMemberRow>(
-            playerRows.Select(player => new OverlayMemberRow(
-                FormatMemberName(player, settings.MemberNameMode),
-                player.Status,
-                player.Ship,
-                player.Location)));
-
-        if (Members.Count == 0)
-        {
-            Members.Add(new OverlayMemberRow(zh ? "未分配" : "Unassigned", zh ? "离线" : "Offline", zh ? "未知" : "Unknown", zh ? "未知" : "Unknown"));
-        }
-
-        var primarySquad = squadArray.FirstOrDefault();
-        FleetNoticeTitle = zh ? "舰队通知" : "FLEET NOTICE";
-        SquadsTitle = zh ? "舰队 / 小队" : "FLEET / SQUADS";
-        MissionTitle = zh ? "任务包" : "MISSION PACKAGE";
-        MembersTitle = zh ? "小队成员" : "SQUAD MEMBERS";
-        HotkeyToggleLabel = zh ? "热键切换" : "HOTKEY TOGGLE";
-        FleetNotice = zh ? "前往指定集结点，等待小队任务。" : "Rally at assigned marker. Await squad-specific tasking.";
-        FleetMission = zh ? "舰队任务 / 待命" : "Fleet Task / Standby";
-        SquadMission = zh
-            ? $"小队任务 / {primarySquad?.Mission ?? "待命"}"
-            : $"Squad Task / {primarySquad?.Mission ?? "Standby"}";
-        RallyPoint = zh
-            ? $"集结点 / {primarySquad?.RallyPoint ?? "未分配"}"
-            : $"Rally / {primarySquad?.RallyPoint ?? "Unassigned"}";
-        MissionVisibility = settings.HideMissionWhenIdle && IsMissionIdle(primarySquad)
-            ? Visibility.Collapsed
-            : Visibility.Visible;
+        Refresh(squads, players, settings, language, hasFleet);
 
         _timer.Tick += (_, _) =>
         {
@@ -183,39 +179,201 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         _timer.Start();
     }
 
-    public ObservableCollection<OverlaySquadRow> Squads { get; }
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 
-    public ObservableCollection<OverlayMemberRow> Members { get; }
+    public ObservableCollection<OverlaySquadRow> Squads { get; } = [];
 
-    public string FleetNoticeTitle { get; }
+    public ObservableCollection<OverlayMemberRow> Members { get; } = [];
 
-    public string SquadsTitle { get; }
+    public string FleetNoticeTitle
+    {
+        get => _fleetNoticeTitle;
+        private set => SetProperty(ref _fleetNoticeTitle, value);
+    }
 
-    public string MissionTitle { get; }
+    public string SquadsTitle
+    {
+        get => _squadsTitle;
+        private set => SetProperty(ref _squadsTitle, value);
+    }
 
-    public string MembersTitle { get; }
+    public string MissionTitle
+    {
+        get => _missionTitle;
+        private set => SetProperty(ref _missionTitle, value);
+    }
 
-    public string HotkeyToggleLabel { get; }
+    public string MembersTitle
+    {
+        get => _membersTitle;
+        private set => SetProperty(ref _membersTitle, value);
+    }
 
-    public string FleetNotice { get; }
+    public string HotkeyToggleLabel
+    {
+        get => _hotkeyToggleLabel;
+        private set => SetProperty(ref _hotkeyToggleLabel, value);
+    }
 
-    public string FleetMission { get; }
+    public string FleetNotice
+    {
+        get => _fleetNotice;
+        private set => SetProperty(ref _fleetNotice, value);
+    }
 
-    public string SquadMission { get; }
+    public string FleetMission
+    {
+        get => _fleetMission;
+        private set => SetProperty(ref _fleetMission, value);
+    }
 
-    public string RallyPoint { get; }
+    public string SquadMission
+    {
+        get => _squadMission;
+        private set => SetProperty(ref _squadMission, value);
+    }
 
-    public Visibility MissionVisibility { get; }
+    public string RallyPoint
+    {
+        get => _rallyPoint;
+        private set => SetProperty(ref _rallyPoint, value);
+    }
+
+    public Visibility MissionVisibility
+    {
+        get => _missionVisibility;
+        private set => SetProperty(ref _missionVisibility, value);
+    }
+
+    public Visibility SquadsVisibility
+    {
+        get => _squadsVisibility;
+        private set => SetProperty(ref _squadsVisibility, value);
+    }
+
+    public Visibility MembersVisibility
+    {
+        get => _membersVisibility;
+        private set => SetProperty(ref _membersVisibility, value);
+    }
+
+    public double OverlayOpacity
+    {
+        get => _overlayOpacity;
+        private set => SetProperty(ref _overlayOpacity, value);
+    }
 
     public string NoticeTimerLabel => $"{_noticeSecondsRemaining}s";
 
-    public Visibility NotificationVisibility => _noticeSecondsRemaining > 0
+    public Visibility NotificationVisibility => _showNotice && _noticeSecondsRemaining > 0
         ? Visibility.Visible
         : Visibility.Collapsed;
+
+    public void Refresh(
+        IEnumerable<SquadRow> squads,
+        IEnumerable<PlayerRow> players,
+        OverlayDisplaySettings settings,
+        string language,
+        bool hasFleet)
+    {
+        var zh = string.Equals(language, "zh", StringComparison.OrdinalIgnoreCase);
+        var squadArray = hasFleet ? squads.ToArray() : [];
+        _showNotice = settings.ShowNotice;
+        OverlayOpacity = settings.Opacity;
+        SquadsVisibility = settings.ShowSquads ? Visibility.Visible : Visibility.Collapsed;
+        MembersVisibility = settings.ShowMembers ? Visibility.Visible : Visibility.Collapsed;
+
+        Squads.Clear();
+        if (!hasFleet)
+        {
+            Squads.Add(new OverlaySquadRow(
+                zh ? "无舰队" : "No Fleet",
+                "!",
+                zh ? "请先加入或创建舰队" : "Join or create a fleet first",
+                null,
+                settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible));
+        }
+        else
+        {
+            foreach (var squad in squadArray)
+            {
+                Squads.Add(new OverlaySquadRow(
+                    squad.Name,
+                    squad.Icon,
+                    squad.CommanderLine,
+                    squad.EmblemPath,
+                    settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible));
+            }
+        }
+
+        Members.Clear();
+        if (hasFleet)
+        {
+            var playerRows = settings.HideOfflineMembers
+                ? players.Where(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase))
+                : players;
+
+            foreach (var player in playerRows)
+            {
+                Members.Add(new OverlayMemberRow(
+                    FormatMemberName(player, settings.MemberNameMode),
+                    player.Status,
+                    player.Ship,
+                    player.Location));
+            }
+        }
+
+        if (Members.Count == 0)
+        {
+            Members.Add(new OverlayMemberRow(
+                hasFleet ? zh ? "未分配" : "Unassigned" : zh ? "无舰队" : "No Fleet",
+                hasFleet ? zh ? "离线" : "Offline" : "-",
+                hasFleet ? zh ? "未知" : "Unknown" : "-",
+                hasFleet ? zh ? "未知" : "Unknown" : "-"));
+        }
+
+        var primarySquad = squadArray.FirstOrDefault();
+        FleetNoticeTitle = zh ? "舰队通知" : "FLEET NOTICE";
+        SquadsTitle = zh ? "舰队 / 小队" : "FLEET / SQUADS";
+        MissionTitle = zh ? "任务包" : "MISSION PACKAGE";
+        MembersTitle = zh ? "小队成员" : "SQUAD MEMBERS";
+        HotkeyToggleLabel = zh ? "热键切换" : "HOTKEY TOGGLE";
+        FleetNotice = hasFleet
+            ? zh ? "前往指定集结点，等待小队任务。" : "Rally at assigned marker. Await squad-specific tasking."
+            : zh ? "无舰队。请先加入或创建舰队。" : "No fleet. Join or create a fleet first.";
+        FleetMission = hasFleet
+            ? zh ? "舰队任务 / 待命" : "Fleet Task / Standby"
+            : zh ? "舰队任务 / 无舰队" : "Fleet Task / No Fleet";
+        SquadMission = hasFleet
+            ? zh
+                ? $"小队任务 / {primarySquad?.Mission ?? "待命"}"
+                : $"Squad Task / {primarySquad?.Mission ?? "Standby"}"
+            : zh ? "小队任务 / 无小队" : "Squad Task / No Squad";
+        RallyPoint = hasFleet
+            ? zh
+                ? $"集结点 / {primarySquad?.RallyPoint ?? "未分配"}"
+                : $"Rally / {primarySquad?.RallyPoint ?? "Unassigned"}"
+            : zh ? "集结点 / 无" : "Rally / None";
+        MissionVisibility = !settings.ShowMission || hasFleet && settings.HideMissionWhenIdle && IsMissionIdle(primarySquad)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        OnChanged(nameof(NotificationVisibility));
+    }
 
     private void OnChanged(string propertyName)
     {
         PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(propertyName));
+    }
+
+    private void SetProperty<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return;
+        }
+
+        field = value;
+        OnChanged(propertyName);
     }
 
     private static string FormatMemberName(PlayerRow player, OverlayMemberNameMode mode)
@@ -247,7 +405,12 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
     }
 }
 
-public sealed record OverlaySquadRow(string Name, string Icon, string CommanderLine, string? EmblemPath, Visibility IconVisibility);
+public sealed record OverlaySquadRow(
+    string Name,
+    string Icon,
+    string CommanderLine,
+    string? EmblemPath,
+    Visibility IconVisibility);
 
 public sealed record OverlayMemberRow(string DisplayName, string Status, string Ship, string Location)
 {

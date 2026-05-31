@@ -1976,7 +1976,7 @@ public sealed class MainForm : Form
         try
         {
             LocalIdentity? identity = null;
-            foreach (var line in File.ReadLines(logPath))
+            foreach (var line in ReadSharedLines(logPath))
             {
                 var fleetEvent = _parser.TryParse(line);
                 if (fleetEvent?.Type == FleetEventType.PlayerOnline &&
@@ -1991,6 +1991,21 @@ public sealed class MainForm : Form
         catch
         {
             return null;
+        }
+    }
+
+    private static IEnumerable<string> ReadSharedLines(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
         }
     }
 

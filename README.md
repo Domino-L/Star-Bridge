@@ -1,6 +1,6 @@
-# Star Citizen Fleet Command System
+# Star Bridge
 
-Prototype verification build for the fleet command concept.
+Prototype verification build for the Star Citizen fleet command concept.
 
 ## Current Prototype
 

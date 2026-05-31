@@ -1,4 +1,4 @@
-using Microsoft.Win32;
+﻿using Microsoft.Win32;
 using SCFleetCommand.Core.Events;
 using SCFleetCommand.Core.LogWatching;
 using SCFleetCommand.Core.Parsing;
@@ -6,6 +6,7 @@ using SCFleetCommand.Core.State;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -23,10 +24,23 @@ namespace SCFleetCommand.Desktop;
 
 public partial class MainWindow : Window
 {
+    private const int OverlayHotkeyId = 0x5343;
+    private const int WmHotkey = 0x0312;
+    private const uint ModAlt = 0x0001;
+    private const uint ModControl = 0x0002;
+    private const uint ModShift = 0x0004;
+    private const uint ModWin = 0x0008;
+    private const uint ModNoRepeat = 0x4000;
+
     private readonly RegexLogEventParser _parser = new();
     private readonly FleetState _fleetState = new();
     private readonly ObservableCollection<PlayerRow> _players = [];
     private readonly ObservableCollection<SquadRow> _squads = [];
+    private readonly ObservableCollection<SquadMemberStatusRow> _mySquadMembers = [];
+    private readonly GridViewColumn PlayerNameColumn = new();
+    private readonly GridViewColumn PlayerStatusColumn = new();
+    private readonly GridViewColumn PlayerShipColumn = new();
+    private readonly GridViewColumn PlayerLocationColumn = new();
     private readonly List<OverlayLayoutItem> _overlayLayout = [];
     private readonly DispatcherTimer _gameProcessTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private GameLogWatcher? _watcher;
@@ -34,6 +48,16 @@ public partial class MainWindow : Window
     private string? _localPlayer;
     private string? _localPlayerId;
     private string? _avatarPath;
+    private string? _fleetLogoPath;
+    private string _fleetName = "No Fleet";
+    private string _fleetCode = "N/A";
+    private string _fleetChiefCommander = "Unassigned";
+    private string _fleetDeputyCommander = "Unassigned";
+    private string _fleetActionTitle = "";
+    private string _fleetActionContent = "";
+    private DateTime? _fleetActionStartTime;
+    private bool _fleetActionNotifyMembers;
+    private bool _joinActionNotifyMe;
     private string? _callsign;
     private OverlayWindow? _overlayWindow;
     private OverlayLayoutItem? _activeOverlayItem;
@@ -44,6 +68,10 @@ public partial class MainWindow : Window
     private string _language = "en";
     private bool _isGameProcessRunning;
     private bool _isLoadingSettings;
+    private HwndSource? _hotkeySource;
+    private bool _hotkeyRegistered;
+    private bool _hasFleet;
+    private bool _isCreatingFleet;
 
     public MainWindow()
     {
@@ -51,6 +79,7 @@ public partial class MainWindow : Window
         NavigateToMyFleet();
         PlayersList.ItemsSource = _players;
         SquadsList.ItemsSource = _squads;
+        MySquadMembersList.ItemsSource = _mySquadMembers;
 
         _isLoadingSettings = true;
         var config = DesktopAppConfig.Load();
@@ -60,16 +89,20 @@ public partial class MainWindow : Window
         _avatarPath = config.AvatarPath;
         _callsign = config.Callsign;
         _language = NormalizeLanguage(config.Language);
-        _overlaySettings = OverlayDisplaySettings.Parse(config.OverlaySettings);
-        LoadOverlayLayout(config.OverlayLayout);
+        _overlaySettings = OverlayDisplaySettings.Parse(DesktopAppConfig.LoadOverlaySettings() ?? config.OverlaySettings);
+        LoadOverlayLayout(DesktopAppConfig.LoadOverlayLayout() ?? config.OverlayLayout);
         ApplyOverlaySettingsToControls();
         ApplyLanguageToControls();
+        OverlayHotkeyBox.Text = string.IsNullOrWhiteSpace(config.OverlayHotkey)
+            ? "Ctrl+Shift+O"
+            : config.OverlayHotkey;
         CallsignBox.Text = _callsign ?? "";
         RenderCachedIdentity();
         LoadAvatarPreview();
         _isLoadingSettings = false;
 
         SeedSquads();
+        UpdateFleetEntryPanels();
         Loaded += (_, _) =>
         {
             RenderOverlayEditor();
@@ -81,6 +114,14 @@ public partial class MainWindow : Window
         _gameProcessTimer.Tick += (_, _) => UpdateLocalOnlineStateFromGameProcess();
         _gameProcessTimer.Start();
         AppendOutput("Designer WPF shell ready. Select Game.log to start.");
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        _hotkeySource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+        _hotkeySource?.AddHook(MainWindowProc);
+        RegisterOverlayHotkey();
     }
 
     private void FindFleetNav_Click(object sender, RoutedEventArgs e)
@@ -96,8 +137,7 @@ public partial class MainWindow : Window
 
     private void MySquadNav_Click(object sender, RoutedEventArgs e)
     {
-        MainTabs.SelectedItem = FleetTab;
-        FleetSubTabs.SelectedItem = SquadsTab;
+        MainTabs.SelectedItem = MySquadTab;
         SetActiveNav(MySquadNavButton);
     }
 
@@ -117,7 +157,150 @@ public partial class MainWindow : Window
     {
         MainTabs.SelectedItem = FleetTab;
         FleetSubTabs.SelectedItem = AllPlayersTab;
+        UpdateFleetEntryPanels();
         SetActiveNav(MyFleetNavButton);
+    }
+
+    private void FleetFindButton_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = FindFleetTab;
+        SetActiveNav(FindFleetNavButton);
+    }
+
+    private void FleetCreateButton_Click(object sender, RoutedEventArgs e)
+    {
+        _isCreatingFleet = true;
+        MainTabs.SelectedItem = FleetTab;
+        SetActiveNav(MyFleetNavButton);
+        UpdateFleetEntryPanels();
+        CreateFleetNameBox.Focus();
+    }
+
+    private void CreateFleetCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _isCreatingFleet = false;
+        UpdateFleetEntryPanels();
+    }
+
+    private void CreateFleetSubmit_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ValidateCreateFleetForm())
+        {
+            return;
+        }
+
+        _hasFleet = true;
+        _isCreatingFleet = false;
+        _fleetName = CreateFleetNameBox.Text.Trim();
+        _fleetCode = CreateFleetCodeBox.Text.Trim();
+        _fleetChiefCommander = FormatCommanderName(_callsign, _localPlayer);
+        _fleetDeputyCommander = "Unassigned";
+        LocalFleetText.Text = $"{CreateFleetNameBox.Text.Trim()} [{CreateFleetCodeBox.Text.Trim()}]";
+        RefreshFleetHeader();
+        UpdateFleetEntryPanels();
+    }
+
+    private void CreateFleetField_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (CreateFleetValidationText is null)
+        {
+            return;
+        }
+
+        ValidateCreateFleetForm(showRequiredErrors: false);
+    }
+
+    private void UpdateFleetEntryPanels()
+    {
+        if (FleetEmptyPanel is null || FleetCreatePanel is null)
+        {
+            return;
+        }
+
+        FleetCreatePanel.Visibility = !_hasFleet && _isCreatingFleet
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        FleetEmptyPanel.Visibility = !_hasFleet && !_isCreatingFleet
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        if (SquadRequiresFleetPanel is not null)
+        {
+            SquadRequiresFleetPanel.Visibility = _hasFleet
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
+
+        RefreshOverlayWindow();
+    }
+
+    private bool ValidateCreateFleetForm(bool showRequiredErrors = true)
+    {
+        var name = CreateFleetNameBox.Text.Trim();
+        var code = CreateFleetCodeBox.Text.Trim();
+        var activeFrom = CreateFleetOnlineFromBox.Text.Trim();
+        var activeTo = CreateFleetOnlineToBox.Text.Trim();
+        var nameValid = name.Length <= 30 && IsEnglishFleetText(name, allowSpaces: true);
+        var codeValid = code.Length <= 10 && IsEnglishFleetText(code, allowSpaces: false);
+        var activeFromValid = IsValidTime24(activeFrom);
+        var activeToValid = IsValidTime24(activeTo);
+
+        var message = "";
+        if (showRequiredErrors && string.IsNullOrWhiteSpace(name))
+        {
+            message = "请输入舰队名称。";
+        }
+        else if (showRequiredErrors && string.IsNullOrWhiteSpace(code))
+        {
+            message = "请输入舰队简称。";
+        }
+        else if (!nameValid)
+        {
+            message = "舰队名称仅允许英文、数字、空格、-、_，最多 30 个字符。";
+        }
+        else if (!codeValid)
+        {
+            message = "舰队简称仅允许英文、数字、-、_，最多 10 个字符。";
+        }
+        else if (!activeFromValid || !activeToValid)
+        {
+            message = "活动时间段必须使用 24 小时制 HH:mm，例如 20:00 到 23:59。";
+        }
+
+        CreateFleetValidationText.Text = message;
+        return string.IsNullOrWhiteSpace(message) &&
+               !string.IsNullOrWhiteSpace(name) &&
+               !string.IsNullOrWhiteSpace(code) &&
+               activeFromValid &&
+               activeToValid;
+    }
+
+    private static bool IsEnglishFleetText(string value, bool allowSpaces)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        return value.All(character =>
+            character is >= 'A' and <= 'Z' ||
+            character is >= 'a' and <= 'z' ||
+            character is >= '0' and <= '9' ||
+            character is '-' or '_' ||
+            allowSpaces && character == ' ');
+    }
+
+    private static bool IsValidTime24(string value)
+    {
+        if (value.Length != 5 || value[2] != ':')
+        {
+            return false;
+        }
+
+        return int.TryParse(value[..2], out var hour) &&
+               int.TryParse(value[3..], out var minute) &&
+               hour is >= 0 and <= 23 &&
+               minute is >= 0 and <= 59;
     }
 
     private void SetActiveNav(System.Windows.Controls.Button activeButton)
@@ -132,6 +315,10 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        UnregisterOverlayHotkey();
+        _hotkeySource?.RemoveHook(MainWindowProc);
+        _hotkeySource = null;
+        CloseOverlayWindow();
         _watcher?.Dispose();
         _gameProcessTimer.Stop();
         base.OnClosed(e);
@@ -162,7 +349,7 @@ public partial class MainWindow : Window
         SaveCurrentConfig();
         AppendOutput($"Watching: {logPath}");
 
-        foreach (var line in File.ReadLines(logPath))
+        foreach (var line in ReadSharedLines(logPath))
         {
             ApplyLine(line, output: false);
         }
@@ -207,7 +394,7 @@ public partial class MainWindow : Window
 
         if (output)
         {
-            AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""}");
+            AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""} | {fleetEvent.Location ?? ""}");
         }
     }
 
@@ -221,18 +408,32 @@ public partial class MainWindow : Window
             var isLocalPlayer = !string.IsNullOrWhiteSpace(_localPlayer) &&
                                 player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase);
             var online = player.Online && (!isLocalPlayer || _isGameProcessRunning);
+            var primarySquad = _squads.FirstOrDefault();
             _players.Add(new PlayerRow(
                 player.Name,
                 online ? "Online" : "Offline",
                 player.Ship,
                 player.Location,
-                IsLocalPlayer(player.Name) ? _callsign : null));
+                IsLocalPlayer(player.Name) ? _callsign : null,
+                IsLocalPlayer(player.Name) ? _avatarPath : null,
+                GetInitials(player.Name),
+                primarySquad?.Name ?? "Unassigned",
+                "Member"));
         }
 
         TotalMembersText.Text = _players.Count.ToString();
         OnlineMembersText.Text = _players.Count(player => player.Status == "Online").ToString();
-        SquadCountText.Text = _squads.Count.ToString();
+        FleetShipCountText.Text = _players
+            .Select(player => player.Ship)
+            .Where(ship => !string.IsNullOrWhiteSpace(ship) &&
+                           !ship.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count()
+            .ToString();
+        RefreshFleetHeader();
         RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
 
         var local = _players.FirstOrDefault(player =>
             player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
@@ -291,6 +492,21 @@ public partial class MainWindow : Window
             });
     }
 
+    private static IEnumerable<string> ReadSharedLines(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
+        }
+    }
+
     private void AppendOutput(string message)
     {
         OutputBox.AppendText(message + Environment.NewLine);
@@ -326,20 +542,26 @@ public partial class MainWindow : Window
 
     private void SaveCurrentConfig()
     {
+        var overlaySettings = _overlaySettings.Serialize();
+        var overlayLayout = SerializeOverlayLayout();
         DesktopAppConfig.Save(new DesktopAppConfig(
             _logPath,
             _localPlayer,
             _localPlayerId,
             _avatarPath,
             OverlayHotkeyBox.Text,
-            SerializeOverlayLayout(),
+            overlayLayout,
             _callsign,
-            _overlaySettings.Serialize(),
+            overlaySettings,
             _language));
+        DesktopAppConfig.SaveOverlaySettings(overlaySettings);
+        DesktopAppConfig.SaveOverlayLayout(overlayLayout);
     }
 
     private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        SaveCurrentConfig();
+        CloseOverlayWindow();
     }
 
     private void MainWindow_StateChanged(object? sender, EventArgs e)
@@ -352,6 +574,7 @@ public partial class MainWindow : Window
         {
             _language = NormalizeLanguage(language);
             ApplyLanguageToControls();
+            RefreshOverlayWindow();
             if (!_isLoadingSettings)
             {
                 SaveCurrentConfig();
@@ -373,14 +596,20 @@ public partial class MainWindow : Window
             return;
         }
 
-        OverlayHotkeyBox.Text = key.ToString();
+        OverlayHotkeyBox.Text = FormatHotkey(Keyboard.Modifiers, key);
         if (!_isLoadingSettings)
         {
+            RegisterOverlayHotkey();
             SaveCurrentConfig();
         }
     }
 
     private void OpenOverlay_Click(object sender, RoutedEventArgs e)
+    {
+        ToggleOverlayWindow();
+    }
+
+    private void ToggleOverlayWindow()
     {
         RenderSquads();
         if (_overlayWindow is { IsVisible: true })
@@ -389,14 +618,187 @@ public partial class MainWindow : Window
             return;
         }
 
-        _overlayWindow = new OverlayWindow(_squads, _players, _overlayLayout, _overlaySettings, _language);
+        _overlayWindow = new OverlayWindow(_squads, _players, _overlayLayout, _overlaySettings, _language, _hasFleet);
+        _overlayWindow.Owner = this;
         _overlayWindow.Closed += (_, _) => _overlayWindow = null;
         _overlayWindow.Show();
+    }
+
+    private IntPtr MainWindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmHotkey && wParam.ToInt32() == OverlayHotkeyId)
+        {
+            handled = true;
+            ToggleOverlayWindow();
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void RegisterOverlayHotkey()
+    {
+        UnregisterOverlayHotkey();
+
+        if (!TryParseHotkey(OverlayHotkeyBox.Text, out var modifiers, out var key))
+        {
+            AppendOutput($"HOTKEY | invalid={OverlayHotkeyBox.Text}");
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        var virtualKey = KeyInterop.VirtualKeyFromKey(key);
+        if (handle == IntPtr.Zero || virtualKey == 0)
+        {
+            return;
+        }
+
+        _hotkeyRegistered = RegisterHotKey(handle, OverlayHotkeyId, modifiers | ModNoRepeat, (uint)virtualKey);
+        if (!_hotkeyRegistered)
+        {
+            AppendOutput($"HOTKEY | register failed={OverlayHotkeyBox.Text} | error={Marshal.GetLastWin32Error()}");
+            return;
+        }
+
+        AppendOutput($"HOTKEY | registered={OverlayHotkeyBox.Text}");
+    }
+
+    private void UnregisterOverlayHotkey()
+    {
+        if (!_hotkeyRegistered)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
+        {
+            UnregisterHotKey(handle, OverlayHotkeyId);
+        }
+
+        _hotkeyRegistered = false;
+    }
+
+    private static string FormatHotkey(ModifierKeys modifiers, Key key)
+    {
+        var parts = new List<string>();
+        if (modifiers.HasFlag(ModifierKeys.Control))
+        {
+            parts.Add("Ctrl");
+        }
+
+        if (modifiers.HasFlag(ModifierKeys.Alt))
+        {
+            parts.Add("Alt");
+        }
+
+        if (modifiers.HasFlag(ModifierKeys.Shift))
+        {
+            parts.Add("Shift");
+        }
+
+        if (modifiers.HasFlag(ModifierKeys.Windows))
+        {
+            parts.Add("Win");
+        }
+
+        parts.Add(key.ToString());
+        return string.Join("+", parts);
+    }
+
+    private static bool TryParseHotkey(string? text, out uint modifiers, out Key key)
+    {
+        modifiers = 0;
+        key = Key.None;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        foreach (var part in text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (part.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) ||
+                part.Equals("Control", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModControl;
+                continue;
+            }
+
+            if (part.Equals("Alt", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModAlt;
+                continue;
+            }
+
+            if (part.Equals("Shift", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModShift;
+                continue;
+            }
+
+            if (part.Equals("Win", StringComparison.OrdinalIgnoreCase) ||
+                part.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModWin;
+                continue;
+            }
+
+            if (!Enum.TryParse(part, ignoreCase: true, out key))
+            {
+                return false;
+            }
+        }
+
+        return key is not Key.None
+            and not Key.LeftCtrl
+            and not Key.RightCtrl
+            and not Key.LeftAlt
+            and not Key.RightAlt
+            and not Key.LeftShift
+            and not Key.RightShift
+            and not Key.LWin
+            and not Key.RWin;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr handle, int id, uint modifiers, uint virtualKey);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr handle, int id);
+
+    private void CloseOverlayWindow()
+    {
+        var overlayWindow = _overlayWindow;
+        if (overlayWindow is null)
+        {
+            return;
+        }
+
+        _overlayWindow = null;
+        try
+        {
+            overlayWindow.Close();
+        }
+        catch (Exception exception)
+        {
+            App.WriteCrashLog(exception);
+        }
+    }
+
+    private void RefreshOverlayWindow()
+    {
+        if (_overlayWindow is not { IsVisible: true })
+        {
+            return;
+        }
+
+        RenderSquads();
+        _overlayWindow.Refresh(_squads, _players, _overlaySettings, _language, _hasFleet);
     }
 
     private void SaveOverlayLayout_Click(object sender, RoutedEventArgs e)
     {
         SaveCurrentConfig();
+        RefreshOverlayWindow();
         AppendOutput("Overlay layout saved.");
     }
 
@@ -406,6 +808,7 @@ public partial class MainWindow : Window
         _overlayLayout.AddRange(CreateDefaultOverlayLayout());
         RenderOverlayEditor();
         SaveCurrentConfig();
+        RefreshOverlayWindow();
         AppendOutput("Overlay layout reset.");
     }
 
@@ -416,6 +819,24 @@ public partial class MainWindow : Window
 
     private void OverlaySetting_Changed(object sender, RoutedEventArgs e)
     {
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        if (HideMissionWhenIdleCheck is null ||
+            HideOfflineMembersCheck is null ||
+            HideSquadIconsCheck is null ||
+            TrayModeCheck is null ||
+            OverlayOpacitySlider is null ||
+            ShowNoticePanelCheck is null ||
+            ShowSquadsPanelCheck is null ||
+            ShowMissionPanelCheck is null ||
+            ShowMembersPanelCheck is null)
+        {
+            return;
+        }
+
         var mode = ShowCallsignOnlyRadio.IsChecked == true
             ? OverlayMemberNameMode.CallsignOnly
             : ShowGameNameOnlyRadio.IsChecked == true
@@ -427,12 +848,30 @@ public partial class MainWindow : Window
             mode,
             HideOfflineMembersCheck.IsChecked == true,
             HideSquadIconsCheck.IsChecked == true,
-            TrayModeCheck.IsChecked == true);
+            TrayModeCheck.IsChecked == true,
+            Math.Clamp(OverlayOpacitySlider.Value / 100.0, 0.15, 1.0),
+            ShowNoticePanelCheck.IsChecked == true,
+            ShowSquadsPanelCheck.IsChecked == true,
+            ShowMissionPanelCheck.IsChecked == true,
+            ShowMembersPanelCheck.IsChecked == true);
 
-        if (!_isLoadingSettings)
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+    }
+
+    private void OverlayOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (OverlayOpacityValueText is not null)
         {
-            SaveCurrentConfig();
+            OverlayOpacityValueText.Text = $"{Math.Round(OverlayOpacitySlider.Value)}%";
         }
+
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        OverlaySetting_Changed(sender, new RoutedEventArgs());
     }
 
     private void CallsignBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -449,14 +888,234 @@ public partial class MainWindow : Window
         RenderState();
     }
 
+    private void MySquadDescriptionBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_isLoadingSettings || MySquadDescriptionBox is null)
+        {
+            return;
+        }
+
+        var squad = _squads.FirstOrDefault();
+        if (squad is null)
+        {
+            return;
+        }
+
+        squad.Description = MySquadDescriptionBox.Text.Trim();
+        squad.RefreshComputed();
+        RefreshOverlayWindow();
+    }
+
+    private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        OpenActionPlanEditor();
+    }
+
+    private void OpenActionPlanEditor()
+    {
+        ActionPlanTitleBox.Text = _fleetActionTitle;
+        ActionPlanContentBox.Text = _fleetActionContent;
+        var start = _fleetActionStartTime ?? DateTime.Now.AddHours(1);
+        ActionPlanDatePicker.SelectedDate = start.Date;
+        ActionPlanTimeBox.Text = start.ToString("HH:mm");
+        ActionPlanNotifyFleetCheck.IsChecked = _fleetActionNotifyMembers;
+        ActionPlanValidationText.Text = "";
+        ActionPlanEditorPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CancelActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        ActionPlanEditorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void PublishActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        var title = ActionPlanTitleBox.Text.Trim();
+        var content = ActionPlanContentBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            ActionPlanValidationText.Text = "请输入行动标题。";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            ActionPlanValidationText.Text = "请输入行动内容。";
+            return;
+        }
+
+        if (!TryReadActionPlanStartTime(out var startTime, out var message))
+        {
+            ActionPlanValidationText.Text = message;
+            return;
+        }
+
+        _fleetActionTitle = title;
+        _fleetActionContent = content;
+        _fleetActionStartTime = startTime;
+        _fleetActionNotifyMembers = ActionPlanNotifyFleetCheck.IsChecked == true;
+        ActionPlanEditorPanel.Visibility = Visibility.Collapsed;
+        RefreshActionPlanCard();
+    }
+
+    private bool TryReadActionPlanStartTime(out DateTime startTime, out string message)
+    {
+        startTime = default;
+        message = "";
+        if (ActionPlanDatePicker.SelectedDate is not { } selectedDate)
+        {
+            message = "请选择行动日期。";
+            return false;
+        }
+
+        if (!IsValidTime24(ActionPlanTimeBox.Text.Trim()))
+        {
+            message = "行动时间必须使用 24 小时制 HH:mm。";
+            return false;
+        }
+
+        var hour = int.Parse(ActionPlanTimeBox.Text[..2]);
+        var minute = int.Parse(ActionPlanTimeBox.Text[3..]);
+        startTime = selectedDate.Date.AddHours(hour).AddMinutes(minute);
+        var now = DateTime.Now;
+        if (startTime < now)
+        {
+            message = "行动时间不能早于当前时间。";
+            return false;
+        }
+
+        if (startTime > now.AddDays(7))
+        {
+            message = "行动时间只能设定在现在开始的 7 天之内。";
+            return false;
+        }
+
+        return true;
+    }
+
+    private void JoinFleetActionButton_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        JoinActionPlanTitleText.Text = string.IsNullOrWhiteSpace(_fleetActionTitle)
+            ? "行动计划"
+            : _fleetActionTitle;
+        JoinActionNotifyCheck.IsChecked = _joinActionNotifyMe;
+        JoinActionPlanPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CancelJoinActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        JoinActionPlanPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void ConfirmJoinActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        _joinActionNotifyMe = JoinActionNotifyCheck.IsChecked == true;
+        JoinActionPlanPanel.Visibility = Visibility.Collapsed;
+        AppendOutput(_joinActionNotifyMe
+            ? "Action joined. Email reminder requested for 5 minutes before start."
+            : "Action joined.");
+    }
+
     private void ChooseAvatar_Click(object sender, RoutedEventArgs e)
     {
-        AppendOutput("Avatar selection is not available in this shell.");
+        var croppedPath = ChooseAndCropImage("Choose player avatar", "player-avatar.png");
+        if (croppedPath is null)
+        {
+            return;
+        }
+
+        _avatarPath = croppedPath;
+        SaveCurrentConfig();
+        LoadAvatarPreview();
+        RenderState();
+        AppendOutput("Profile avatar updated.");
+    }
+
+    private void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
+    {
+        var croppedPath = ChooseAndCropImage("Choose fleet logo", "fleet-logo.png");
+        if (croppedPath is null)
+        {
+            return;
+        }
+
+        _fleetLogoPath = croppedPath;
+        LoadCreateFleetLogoPreview();
+        LoadFleetHeaderLogoPreview();
+        AppendOutput("Fleet logo updated.");
     }
 
     private void ChooseSquadEmblem_Click(object sender, RoutedEventArgs e)
     {
-        AppendOutput("Squad emblem selection is not available in this shell.");
+        var squad = (sender as FrameworkElement)?.Tag as SquadRow ?? _squads.FirstOrDefault();
+        ChooseSquadEmblem(squad);
+    }
+
+    private void MySquadEmblem_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        ChooseSquadEmblem(_squads.FirstOrDefault());
+    }
+
+    private void ChooseSquadEmblem(SquadRow? squad)
+    {
+        if (squad is null)
+        {
+            return;
+        }
+
+        var safeName = string.Concat(squad.Name.Select(character =>
+            Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
+        var croppedPath = ChooseAndCropImage("Choose squad emblem", $"squad-{safeName}-emblem.png");
+        if (croppedPath is null)
+        {
+            return;
+        }
+
+        squad.EmblemPath = croppedPath;
+        squad.RefreshComputed();
+        RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
+        AppendOutput($"Squad emblem updated: {squad.Name}");
+    }
+
+    private string? ChooseAndCropImage(string title, string fileName)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = title,
+            Filter = "Image files (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return null;
+        }
+
+        var cropWindow = new SquadEmblemCropWindow(dialog.FileName)
+        {
+            Owner = this
+        };
+
+        if (cropWindow.ShowDialog() != true || cropWindow.CroppedImage is null)
+        {
+            return null;
+        }
+
+        var directory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SCFleetCommand",
+            "Images");
+        Directory.CreateDirectory(directory);
+
+        var outputPath = Path.Combine(directory, fileName);
+        using var stream = File.Create(outputPath);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(cropWindow.CroppedImage));
+        encoder.Save(stream);
+        return outputPath;
     }
 
     private void RenderOverlayEditor()
@@ -607,6 +1266,7 @@ public partial class MainWindow : Window
         _activeOverlayEditorElement = null;
         _isOverlayResize = false;
         SaveCurrentConfig();
+        RefreshOverlayWindow();
     }
 
     private static FrameworkElement? FindParentEditorPanel(DependencyObject element)
@@ -643,6 +1303,12 @@ public partial class MainWindow : Window
         HideOfflineMembersCheck.IsChecked = _overlaySettings.HideOfflineMembers;
         HideSquadIconsCheck.IsChecked = _overlaySettings.HideSquadIcons;
         TrayModeCheck.IsChecked = _overlaySettings.EnableTrayMode;
+        ShowNoticePanelCheck.IsChecked = _overlaySettings.ShowNotice;
+        ShowSquadsPanelCheck.IsChecked = _overlaySettings.ShowSquads;
+        ShowMissionPanelCheck.IsChecked = _overlaySettings.ShowMission;
+        ShowMembersPanelCheck.IsChecked = _overlaySettings.ShowMembers;
+        OverlayOpacitySlider.Value = Math.Clamp(_overlaySettings.Opacity, 0.15, 1.0) * 100.0;
+        OverlayOpacityValueText.Text = $"{Math.Round(OverlayOpacitySlider.Value)}%";
         ShowCallsignOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignOnly;
         ShowGameNameOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.GameNameOnly;
         ShowCallsignAndNameRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignAndGameName;
@@ -651,7 +1317,7 @@ public partial class MainWindow : Window
     private void ApplyLanguageToControls()
     {
         var zh = _language == "zh";
-        Title = zh ? "SC 舰队指挥设计器" : "SC Fleet Command Designer";
+        Title = zh ? "星海舰桥" : "Star Bridge";
 
         LanguageBox.SelectionChanged -= LanguageBox_SelectionChanged;
         LanguageBox.SelectedIndex = zh ? 1 : 0;
@@ -670,6 +1336,7 @@ public partial class MainWindow : Window
         SelectLogButton.Content = zh ? "选择日志" : "Select Log";
         ToggleOverlayButton.Content = zh ? "切换 Overlay" : "Toggle Overlay";
         FleetTab.Header = zh ? "舰队" : "Fleet";
+        MySquadTab.Header = zh ? "我的小队" : "My Squad";
         AllPlayersTab.Header = zh ? "全成员" : "All Players";
         SquadsTab.Header = zh ? "小队" : "Squads";
         OverlayEditTab.Header = zh ? "Overlay 编辑" : "Overlay Edit";
@@ -677,12 +1344,20 @@ public partial class MainWindow : Window
         MonitorTab.Header = zh ? "监控" : "Monitor";
         TotalMembersLabel.Text = zh ? "总人数" : "TOTAL MEMBERS";
         OnlineLabel.Text = zh ? "在线" : "ONLINE";
-        ActiveTasksLabel.Text = zh ? "执行中任务" : "ACTIVE TASKS";
-        SquadsMetricLabel.Text = zh ? "小队" : "SQUADS";
+        FleetShipsLabel.Text = zh ? "舰船数量" : "SHIPS";
+        FleetActionPlanLabel.Text = zh ? "行动计划" : "ACTION PLAN";
         PlayerNameColumn.Header = zh ? "游戏名" : "Name";
         PlayerStatusColumn.Header = zh ? "状态" : "Status";
         PlayerShipColumn.Header = zh ? "飞船" : "Ship";
         PlayerLocationColumn.Header = zh ? "位置" : "Location";
+        MySquadEmblemHintText.Text = zh ? "点击更换" : "Click to change";
+        MySquadAvatarColumn.Header = zh ? "头像" : "Avatar";
+        MySquadRoleColumn.Header = zh ? "职位" : "Role";
+        MySquadCallsignColumn.Header = zh ? "呼号" : "Callsign";
+        MySquadGameIdColumn.Header = zh ? "游戏 ID" : "Game ID";
+        MySquadOnlineColumn.Header = zh ? "在线状态" : "Online";
+        MySquadShipColumn.Header = zh ? "飞船状态" : "Ship Status";
+        MySquadLocationColumn.Header = zh ? "地点信息" : "Location";
         OverlayEditHintText.Text = zh
             ? "拖拽面板移动位置，拖拽右下角手柄缩放。保存后的布局会应用到全屏 Overlay。"
             : "Drag panels to move. Drag the lower-right handle to resize. Saved layout is applied to fullscreen Overlay.";
@@ -737,6 +1412,116 @@ public partial class MainWindow : Window
         AvatarPlaceholderText.Visibility = Visibility.Collapsed;
     }
 
+    private void LoadCreateFleetLogoPreview()
+    {
+        if (CreateFleetLogoImage is null || CreateFleetLogoText is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetLogoPath) || !File.Exists(_fleetLogoPath))
+        {
+            CreateFleetLogoImage.Source = null;
+            CreateFleetLogoText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(_fleetLogoPath);
+        image.EndInit();
+        image.Freeze();
+
+        CreateFleetLogoImage.Source = image;
+        CreateFleetLogoText.Visibility = Visibility.Collapsed;
+    }
+
+    private void LoadFleetHeaderLogoPreview()
+    {
+        if (FleetHeaderLogoImage is null || FleetHeaderLogoText is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetLogoPath) || !File.Exists(_fleetLogoPath))
+        {
+            FleetHeaderLogoImage.Source = null;
+            FleetHeaderLogoText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(_fleetLogoPath);
+        image.EndInit();
+        image.Freeze();
+
+        FleetHeaderLogoImage.Source = image;
+        FleetHeaderLogoText.Visibility = Visibility.Collapsed;
+    }
+
+    private void RefreshFleetHeader()
+    {
+        if (FleetHeaderNameText is null)
+        {
+            return;
+        }
+
+        FleetHeaderNameText.Text = _hasFleet ? _fleetName : "No Fleet";
+        FleetHeaderCodeText.Text = _hasFleet ? _fleetCode : "N/A";
+        FleetCommanderText.Text = $"首席指挥官 / {FormatCommanderName(_callsign, _localPlayer, _fleetChiefCommander)}";
+        FleetDeputyCommanderText.Text = $"副指挥官 / {_fleetDeputyCommander}";
+        FleetTypeSummaryText.Text = _hasFleet
+            ? $"活动时间 / {CreateFleetOnlineFromBox.Text.Trim()} - {CreateFleetOnlineToBox.Text.Trim()} UTC+8"
+            : "活动时间 / 未设置";
+        RefreshActionPlanCard();
+
+        LoadFleetHeaderLogoPreview();
+    }
+
+    private static string FormatCommanderName(string? callsign, string? gameName, string fallback = "Unassigned")
+    {
+        if (string.IsNullOrWhiteSpace(gameName))
+        {
+            return string.IsNullOrWhiteSpace(callsign) ? fallback : callsign.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(callsign) ||
+            callsign.Equals(gameName, StringComparison.OrdinalIgnoreCase))
+        {
+            return gameName.Trim();
+        }
+
+        return $"{callsign.Trim()} ({gameName.Trim()})";
+    }
+
+    private void RefreshActionPlanCard()
+    {
+        if (FleetActionPlanTitleText is null)
+        {
+            return;
+        }
+
+        var hasAction = !string.IsNullOrWhiteSpace(_fleetActionTitle);
+        if (!hasAction)
+        {
+            FleetActionPlanTitleText.Text = "暂无行动计划，等待下一步指挥";
+            FleetActionPlanSummaryText.Text = "";
+            FleetActionPlanTimeText.Text = "";
+            JoinFleetActionButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        FleetActionPlanTitleText.Text = _fleetActionTitle;
+        FleetActionPlanSummaryText.Text = _fleetActionContent;
+        FleetActionPlanTimeText.Text = _fleetActionStartTime is null
+            ? ""
+            : $"开始时间 / {_fleetActionStartTime:yyyy-MM-dd HH:mm}";
+        JoinFleetActionButton.Visibility = Visibility.Visible;
+    }
+
     private bool IsLocalPlayer(string playerName)
     {
         return !string.IsNullOrWhiteSpace(_localPlayer) &&
@@ -767,11 +1552,76 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RenderMySquad()
+    {
+        var squad = _squads.FirstOrDefault();
+        if (squad is null)
+        {
+            MySquadNameText.Text = "No Squad";
+            MySquadCommanderText.Text = "Commander / Unassigned";
+            if (!MySquadDescriptionBox.IsKeyboardFocusWithin)
+            {
+                MySquadDescriptionBox.Text = "Create or join a squad to see squad details here.";
+            }
+            MySquadIconText.Text = "?";
+            MySquadIconText.Visibility = Visibility.Visible;
+            MySquadEmblemImage.Source = null;
+            MySquadEmblemHintText.Visibility = Visibility.Visible;
+            _mySquadMembers.Clear();
+            return;
+        }
+
+        MySquadNameText.Text = squad.Name;
+        MySquadCommanderText.Text = $"Commander / {squad.Commander}";
+        if (!MySquadDescriptionBox.IsKeyboardFocusWithin)
+        {
+            MySquadDescriptionBox.Text = squad.Description;
+        }
+        MySquadIconText.Text = squad.Icon;
+        LoadMySquadEmblem(squad.EmblemPath);
+
+        _mySquadMembers.Clear();
+        foreach (var player in _players)
+        {
+            _mySquadMembers.Add(new SquadMemberStatusRow(
+                GetInitials(player.Name),
+                player.AvatarPath,
+                player.Role,
+                player.Callsign ?? "-",
+                player.Name,
+                player.Status,
+                player.Ship,
+                player.Location));
+        }
+    }
+
     private static string GetInitials(string name)
     {
         return string.IsNullOrWhiteSpace(name)
             ? "?"
             : name.Length >= 2 ? name[..2].ToUpperInvariant() : name[..1].ToUpperInvariant();
+    }
+
+    private void LoadMySquadEmblem(string? emblemPath)
+    {
+        if (string.IsNullOrWhiteSpace(emblemPath) || !File.Exists(emblemPath))
+        {
+            MySquadEmblemImage.Source = null;
+            MySquadIconText.Visibility = Visibility.Visible;
+            MySquadEmblemHintText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(emblemPath);
+        image.EndInit();
+        image.Freeze();
+
+        MySquadEmblemImage.Source = image;
+        MySquadIconText.Visibility = Visibility.Collapsed;
+        MySquadEmblemHintText.Visibility = Visibility.Collapsed;
     }
 
     private static IEnumerable<OverlayLayoutItem> CreateDefaultOverlayLayout()
@@ -783,4 +1633,24 @@ public partial class MainWindow : Window
     }
 }
 
-public sealed record PlayerRow(string Name, string Status, string Ship, string Location, string? Callsign = null);
+public sealed record PlayerRow(
+    string Name,
+    string Status,
+    string Ship,
+    string Location,
+    string? Callsign = null,
+    string? AvatarPath = null,
+    string Initials = "?",
+    string SquadName = "Unassigned",
+    string Role = "Member");
+
+public sealed record SquadMemberStatusRow(
+    string Avatar,
+    string? AvatarPath,
+    string Role,
+    string Callsign,
+    string GameId,
+    string OnlineStatus,
+    string ShipStatus,
+    string Location);
+

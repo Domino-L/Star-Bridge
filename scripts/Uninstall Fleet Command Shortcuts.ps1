@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$desktopShortcut = Join-Path ([Environment]::GetFolderPath("DesktopDirectory")) "SC Fleet Command.lnk"
-$startMenuShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\SC Fleet Command.lnk"
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath("DesktopDirectory")) "Star Bridge.lnk"
+$startMenuShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\Star Bridge.lnk"
 
 foreach ($shortcutPath in @($desktopShortcut, $startMenuShortcut)) {
     if (Test-Path -LiteralPath $shortcutPath) {
@@ -9,4 +9,4 @@ foreach ($shortcutPath in @($desktopShortcut, $startMenuShortcut)) {
     }
 }
 
-Write-Host "SC Fleet Command shortcuts removed."
+Write-Host "Star Bridge shortcuts removed."

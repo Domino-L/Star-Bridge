@@ -18,8 +18,12 @@ internal sealed record DesktopAppConfig(
         "SCFleetCommand");
 
     private static readonly string ConfigPath = Path.Combine(ConfigDirectory, "desktop.config");
+    private static readonly string OverlaySettingsPath = Path.Combine(ConfigDirectory, "overlay.settings");
+    private static readonly string OverlayLayoutPath = Path.Combine(ConfigDirectory, "overlay.layout");
     private static readonly string FallbackConfigDirectory = Path.Combine(AppContext.BaseDirectory, "config");
     private static readonly string FallbackConfigPath = Path.Combine(FallbackConfigDirectory, "desktop.config");
+    private static readonly string FallbackOverlaySettingsPath = Path.Combine(FallbackConfigDirectory, "overlay.settings");
+    private static readonly string FallbackOverlayLayoutPath = Path.Combine(FallbackConfigDirectory, "overlay.layout");
 
     public static DesktopAppConfig Load()
     {
@@ -82,8 +86,55 @@ internal sealed record DesktopAppConfig(
         }
     }
 
+    public static string? LoadOverlaySettings()
+    {
+        return ReadOptionalText(OverlaySettingsPath) ?? ReadOptionalText(FallbackOverlaySettingsPath);
+    }
+
+    public static void SaveOverlaySettings(string value)
+    {
+        WriteTextWithFallback(OverlaySettingsPath, FallbackOverlaySettingsPath, value);
+    }
+
+    public static string? LoadOverlayLayout()
+    {
+        return ReadOptionalText(OverlayLayoutPath) ?? ReadOptionalText(FallbackOverlayLayoutPath);
+    }
+
+    public static void SaveOverlayLayout(string value)
+    {
+        WriteTextWithFallback(OverlayLayoutPath, FallbackOverlayLayoutPath, value);
+    }
+
     private static string? EmptyToNull(string value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string? ReadOptionalText(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? EmptyToNull(File.ReadAllText(path)) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void WriteTextWithFallback(string path, string fallbackPath, string value)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, value);
+            return;
+        }
+        catch
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(fallbackPath)!);
+            File.WriteAllText(fallbackPath, value);
+        }
     }
 }

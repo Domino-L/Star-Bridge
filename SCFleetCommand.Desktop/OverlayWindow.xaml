@@ -34,7 +34,7 @@
         </Style>
     </Window.Resources>
 
-    <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False">
+    <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False" Opacity="{Binding OverlayOpacity}">
         <Border x:Name="NoticePanel"
                 Style="{StaticResource OverlayPanel}"
                 Visibility="{Binding NotificationVisibility}">
@@ -56,7 +56,7 @@
             </Grid>
         </Border>
 
-        <Border x:Name="SquadsPanel" Style="{StaticResource OverlayPanel}">
+        <Border x:Name="SquadsPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding SquadsVisibility}">
             <StackPanel>
                 <TextBlock Text="{Binding SquadsTitle}" Style="{StaticResource OverlayTitle}" />
                 <ItemsControl ItemsSource="{Binding Squads}" Margin="0,12,0,0">
@@ -99,7 +99,7 @@
             </StackPanel>
         </Border>
 
-        <Border x:Name="MembersPanel" Style="{StaticResource OverlayPanel}">
+        <Border x:Name="MembersPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding MembersVisibility}">
             <StackPanel>
                 <TextBlock Text="{Binding MembersTitle}" Style="{StaticResource OverlayTitle}" />
                 <ItemsControl ItemsSource="{Binding Members}" Margin="0,10,0,0">

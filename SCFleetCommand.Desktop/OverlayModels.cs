@@ -17,14 +17,24 @@ public sealed record OverlayDisplaySettings(
     OverlayMemberNameMode MemberNameMode,
     bool HideOfflineMembers,
     bool HideSquadIcons,
-    bool EnableTrayMode)
+    bool EnableTrayMode,
+    double Opacity,
+    bool ShowNotice,
+    bool ShowSquads,
+    bool ShowMission,
+    bool ShowMembers)
 {
     public static OverlayDisplaySettings Default { get; } = new(
         HideMissionWhenIdle: false,
         MemberNameMode: OverlayMemberNameMode.CallsignAndGameName,
         HideOfflineMembers: false,
         HideSquadIcons: false,
-        EnableTrayMode: false);
+        EnableTrayMode: false,
+        Opacity: 0.85,
+        ShowNotice: true,
+        ShowSquads: true,
+        ShowMission: true,
+        ShowMembers: true);
 
     public string Serialize()
     {
@@ -34,7 +44,12 @@ public sealed record OverlayDisplaySettings(
             MemberNameMode,
             HideOfflineMembers ? "1" : "0",
             HideSquadIcons ? "1" : "0",
-            EnableTrayMode ? "1" : "0");
+            EnableTrayMode ? "1" : "0",
+            Opacity.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            ShowNotice ? "1" : "0",
+            ShowSquads ? "1" : "0",
+            ShowMission ? "1" : "0",
+            ShowMembers ? "1" : "0");
     }
 
     public static OverlayDisplaySettings Parse(string? value)
@@ -55,13 +70,21 @@ public sealed record OverlayDisplaySettings(
             Enum.TryParse<OverlayMemberNameMode>(parts[1], out var mode) ? mode : OverlayMemberNameMode.CallsignAndGameName,
             parts[2] == "1",
             parts[3] == "1",
-            parts[4] == "1");
+            parts[4] == "1",
+            parts.Length > 5 && double.TryParse(parts[5], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var opacity)
+                ? Math.Clamp(opacity, 0.15, 1.0)
+                : Default.Opacity,
+            parts.Length <= 6 || parts[6] == "1",
+            parts.Length <= 7 || parts[7] == "1",
+            parts.Length <= 8 || parts[8] == "1",
+            parts.Length <= 9 || parts[9] == "1");
     }
 }
 
 public sealed class SquadRow : System.ComponentModel.INotifyPropertyChanged
 {
     private string _commander = "Unassigned";
+    private string? _emblemPath;
 
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 
@@ -84,7 +107,17 @@ public sealed class SquadRow : System.ComponentModel.INotifyPropertyChanged
 
     public string RallyPoint { get; set; } = "Use Global";
 
-    public string? EmblemPath { get; set; }
+    public string Description { get; set; } = "No squad briefing yet.";
+
+    public string? EmblemPath
+    {
+        get => _emblemPath;
+        set
+        {
+            _emblemPath = value;
+            OnChanged(nameof(EmblemPath));
+        }
+    }
 
     public ObservableCollection<MemberAvatarRow> Members { get; } = [];
 

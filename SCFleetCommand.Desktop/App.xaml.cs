@@ -26,7 +26,7 @@ public partial class App : System.Windows.Application
         WriteCrashLog(e.Exception);
         MessageBox.Show(
             $"Application error captured. Details were written to:\n{GetCrashLogPath()}\n\n{e.Exception.Message}",
-            "SC Fleet Command",
+            "Star Bridge",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
         e.Handled = true;

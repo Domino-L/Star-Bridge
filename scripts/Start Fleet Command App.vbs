@@ -9,12 +9,12 @@ env("DOTNET_CLI_HOME") = root & "\.dotnet-home"
 env("APPDATA") = root & "\.appdata"
 env("LOCALAPPDATA") = root & "\.localappdata"
 
-publishedExe = root & "\SCFleetCommand.App\bin\Release\net8.0-windows\win-x64\publish\SC Fleet Command.exe"
+publishedExe = root & "\SCFleetCommand.Desktop\bin\Release\net8.0-windows\win-x64\publish\Star Bridge.exe"
 
 If fso.FileExists(publishedExe) Then
     command = """" & publishedExe & """"
 Else
-    command = "dotnet run --project """ & root & "\SCFleetCommand.App\SCFleetCommand.App.csproj" & """"
+    command = "dotnet run --project """ & root & "\SCFleetCommand.Desktop\SCFleetCommand.Desktop.csproj" & """"
 End If
 
 shell.CurrentDirectory = root
