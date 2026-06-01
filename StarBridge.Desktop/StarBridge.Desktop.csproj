@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\StarBridge.Core\StarBridge.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>Star Bridge</AssemblyName>
+    <Product>Star Bridge</Product>
+    <Version>0.2.2</Version>
+    <FileVersion>0.2.2.0</FileVersion>
+    <AssemblyVersion>0.2.2.0</AssemblyVersion>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetPlatformVersion>10.0</TargetPlatformVersion>
+    <TargetPlatformMoniker>Windows,Version=10.0</TargetPlatformMoniker>
+    <TargetPlatformDisplayName>Windows</TargetPlatformDisplayName>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationIcon>Assets\Brand\StarBridge_AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\Brand\StarBridge_logo.png" />
+    <Resource Include="Assets\Brand\StarBridge_AppIcon.png" />
+    <Resource Include="Assets\Brand\StarBridge_AppIcon.ico" />
+    <Resource Include="Assets\Navigation\SearchFleet.png" />
+    <Resource Include="Assets\Navigation\SearchFleet_Nav.png" />
+    <Resource Include="Assets\Navigation\MyFleet_Nav.png" />
+    <Resource Include="Assets\Navigation\MySquad_Nav.png" />
+    <Resource Include="Assets\Navigation\Overlay_Nav.png" />
+    <Resource Include="Assets\Navigation\Personal_Nav.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Data\ship-names-zh.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

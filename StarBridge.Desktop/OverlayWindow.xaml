@@ -1,0 +1,152 @@
+﻿<Window x:Class="StarBridge.Desktop.OverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Fleet Overlay"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="Manual"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        Focusable="False"
+        ShowActivated="False"
+        ShowInTaskbar="False"
+        KeyDown="OverlayWindow_KeyDown">
+    <Window.Resources>
+        <Style x:Key="OverlayPanel" TargetType="Border">
+            <Setter Property="Background" Value="#B0050A11" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12" />
+        </Style>
+        <Style x:Key="OverlayTitle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style x:Key="OverlayText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+        <Style x:Key="OverlayMuted" TargetType="TextBlock" BasedOn="{StaticResource OverlayText}">
+            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+            <Setter Property="FontSize" Value="10" />
+        </Style>
+    </Window.Resources>
+
+    <Canvas x:Name="OverlayCanvas" IsHitTestVisible="False" Opacity="{Binding OverlayOpacity}">
+        <Border x:Name="NoticePanel"
+                Style="{StaticResource OverlayPanel}"
+                Visibility="{Binding NotificationVisibility}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="120" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="{Binding FleetNoticeTitle}" Style="{StaticResource OverlayTitle}" />
+                    <TextBlock Text="{Binding FleetNotice}" Style="{StaticResource OverlayText}" Margin="0,6,0,0" />
+                </StackPanel>
+                <TextBlock Grid.Column="1"
+                           Text="{Binding NoticeTimerLabel}"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Center"
+                           Foreground="#FFFFF000"
+                           FontWeight="SemiBold" />
+            </Grid>
+        </Border>
+
+        <Border x:Name="SquadsPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding SquadsVisibility}">
+            <StackPanel>
+                <TextBlock Text="{Binding SquadsTitle}" Style="{StaticResource OverlayTitle}" />
+                <ItemsControl ItemsSource="{Binding Squads}" Margin="0,12,0,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <DockPanel Margin="0,0,0,12">
+                                <Border Width="38"
+                                        Height="38"
+                                        Margin="0,0,10,0"
+                                        DockPanel.Dock="Left"
+                                        Visibility="{Binding IconVisibility}"
+                                        Background="{StaticResource FieldBackBrush}"
+                                        BorderBrush="{StaticResource AccentBrush}"
+                                        BorderThickness="1">
+                                    <Grid>
+                                        <Image Source="{Binding EmblemPath}" Stretch="UniformToFill" />
+                                        <TextBlock Text="{Binding Icon}"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   FontWeight="SemiBold" />
+                                    </Grid>
+                                </Border>
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Name}" Style="{StaticResource OverlayText}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding CommanderLine}" Style="{StaticResource OverlayMuted}" />
+                                </StackPanel>
+                            </DockPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <Border x:Name="MissionPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding MissionVisibility}">
+            <StackPanel>
+                <TextBlock Text="{Binding MissionTitle}" Style="{StaticResource OverlayTitle}" />
+                <TextBlock Text="{Binding FleetMission}" Style="{StaticResource OverlayText}" Margin="0,12,0,0" />
+                <TextBlock Text="{Binding SquadMission}" Style="{StaticResource OverlayText}" Margin="0,6,0,0" />
+                <TextBlock Text="{Binding RallyPoint}" Foreground="#FFFFF000" FontSize="12" Margin="0,6,0,0" />
+            </StackPanel>
+        </Border>
+
+        <Border x:Name="MembersPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding MembersVisibility}">
+            <StackPanel>
+                <TextBlock Text="{Binding MembersTitle}" Style="{StaticResource OverlayTitle}" />
+                <ItemsControl ItemsSource="{Binding Members}" Margin="0,10,0,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,0,0,9">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="76" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding DisplayName}" Style="{StaticResource OverlayText}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding Status}"
+                                           Foreground="{Binding StatusBrush}"
+                                           FontSize="11"
+                                           HorizontalAlignment="Center"
+                                           TextAlignment="Center" />
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding Location}"
+                                           Style="{StaticResource OverlayMuted}"
+                                           TextTrimming="CharacterEllipsis"
+                                           HorizontalAlignment="Right"
+                                           TextAlignment="Right" />
+                                <TextBlock Grid.Row="1"
+                                           Grid.ColumnSpan="3"
+                                           Text="{Binding Ship}"
+                                           Style="{StaticResource OverlayMuted}"
+                                           TextTrimming="CharacterEllipsis"
+                                           Margin="0,2,0,0" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <TextBlock Canvas.Left="0"
+                   Canvas.Bottom="16"
+                   Width="{Binding ActualWidth, ElementName=OverlayCanvas}"
+                   Text="{Binding HotkeyToggleLabel}"
+                   TextAlignment="Center"
+                   Foreground="#6689DFFF"
+                   FontSize="10" />
+    </Canvas>
+</Window>

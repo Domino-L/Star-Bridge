@@ -1,90 +1,121 @@
-# Star Bridge
+# 星海舰桥 Star Bridge
 
-Prototype verification build for the Star Citizen fleet command concept.
+星海舰桥是一个面向《星际公民》的舰队辅助工具。
 
-Current test version: `0.2.1`.
+它的目标不是替代游戏，也不是修改游戏，而是补上游戏内暂时缺少的舰队管理能力：舰队、成员、小队、任务、集结点、Overlay 状态显示，以及基于 `Game.log` 的本地状态辅助识别。
 
-## Current Prototype
+当前测试版本：`0.2.2`
 
-This version proves the first core loop:
+## 现阶段定位
+
+星海舰桥可以帮助舰队更清晰地组织成员，让玩家更深度地参与到舰队行动中。
+
+目前重点能力：
+
+- 创建或加入舰队
+- 创建、加入和同步小队
+- 查看舰队成员、小队成员、在线状态、飞船状态、地点信息
+- 发布舰队任务、集结点和行动计划
+- 通过 Overlay 在游戏画面上方显示舰队与小队信息
+- 读取 Star Citizen `Game.log`，辅助判断玩家身份、飞船和位置
+- 局域网 Relay Server 联网测试，让同一舰队成员共享基础状态
+
+## 合规原则
+
+星海舰桥只读取日志、显示信息、同步用户主动上报或日志推断出的状态。
+
+它不会：
+
+- 注入游戏
+- Hook 渲染或输入
+- 读取游戏内存
+- 自动操作游戏
+- 修改游戏文件
+
+## 用户测试安装包
+
+当前用户用安装包：
 
 ```text
-Game.log
-  -> log watcher
-  -> event parser
-  -> fleet state
-  -> live command display
+dist/StarBridge-0.2.2-win-x64-setup.exe
 ```
 
-It does not use injection, hooks, memory reading, or game automation. It only reads a log file and renders the interpreted fleet state.
+这是完整 Windows 安装包，不要求用户额外安装 .NET Desktop Runtime。
 
-## Run
+## 联网测试
 
-Desktop app:
+先在作为主机的电脑上启动 Relay Server：
+
+```text
+scripts/Start Star Bridge Relay Server.cmd
+```
+
+服务器默认监听：
+
+```text
+http://0.0.0.0:5058
+```
+
+同一台电脑测试时，在星海舰桥联网测试页面填写：
+
+```text
+http://127.0.0.1:5058
+```
+
+局域网测试时，其他电脑填写主机的局域网 IP，例如：
+
+```text
+http://192.168.1.20:5058
+```
+
+当前联网测试仍属于第一阶段：没有账号系统、权限系统、房间密码和公网安全模型。请只在可信局域网内与测试成员使用。
+
+## 使用流程
+
+1. 安装并打开星海舰桥。
+2. 选择 Star Citizen 的 `Game.log`。
+3. 进入游戏，让软件从日志中识别玩家游戏名。
+4. 创建舰队或在“寻找舰队”中加入局域网内其他人发布的舰队。
+5. 创建或加入小队。
+6. 在“Overlay”页面调整显示布局。
+7. 打开 Overlay，在游戏中查看舰队任务、小队和成员状态。
+
+## 开发与打包
+
+从源码运行桌面应用：
 
 ```powershell
 .\scripts\Start Fleet Command Designer.cmd
 ```
 
-Install normal Windows shortcuts:
-
-```powershell
-.\scripts\Install Fleet Command Shortcuts.ps1
-```
-
-The shortcut opens the published desktop app when available and falls back to the development build if needed.
-
-To adjust the current app colors and visual style, edit:
+构建完整安装包：
 
 ```text
-SCFleetCommand.Desktop/MainWindow.xaml
-SCFleetCommand.Desktop/Themes/AppTheme.xaml
+scripts/Build Star Bridge Inno Installer.cmd
 ```
 
-Design notes live in `docs/FRONTEND_DESIGN.md`.
-
-The older Windows Forms prototype remains in `SCFleetCommand.App` for reference.
-
-Console prototype:
-
-```powershell
-$env:DOTNET_CLI_HOME = "$PWD\.dotnet-home"
-dotnet run --project .\SCFleetCommand.Console -- --replay
-```
-
-On first launch, the prototype asks you to paste the full Star Citizen `Game.log` path. It stores that path in `fleet-command.config` and reads from the same log on future launches.
-
-To choose a different log file:
-
-```powershell
-$env:DOTNET_CLI_HOME = "$PWD\.dotnet-home"
-dotnet run --project .\SCFleetCommand.Console -- --select-log --replay
-```
-
-To watch a custom log file:
-
-```powershell
-$env:DOTNET_CLI_HOME = "$PWD\.dotnet-home"
-dotnet run --project .\SCFleetCommand.Console -- --log "C:\Path\To\Game.log" --replay
-```
-
-## Prototype Log Format
-
-The first parser accepts simple verification lines:
+生成结果：
 
 ```text
-PLAYER_ONLINE player="domino_CN"
-PLAYER_ENTER_SHIP player="domino_CN" ship="RSI Polaris"
-PLAYER_LOCATION player="domino_CN" location="Stanton"
-COMBAT_STATE player="domino_CN" state="Combat"
-PLAYER_OFFLINE player="domino_CN"
+dist/StarBridge-0.2.2-win-x64-setup.exe
 ```
 
-The parser also includes a few human-readable fallback patterns so real `Game.log` samples can be mapped incrementally.
+构建完整安装包需要：
 
-## Next Milestone
+- .NET 8 SDK
+- Inno Setup 6
+- 首次 self-contained 发布时需要联网下载 .NET runtime packs
 
-1. Collect real Star Citizen `Game.log` samples.
-2. Add dedicated parsers: player, ship, location, combat, network.
-3. Add a local host mode or SignalR server for multi-client sync.
-4. Add a WPF commander dashboard after the event pipeline is stable.
+如果打包时报 `NU1100`，说明本机缺少 .NET 运行时包缓存，请在联网状态下重新运行打包脚本。
+
+## 项目状态
+
+星海舰桥仍处于原型验证阶段。当前版本适合小范围测试舰队管理、日志识别、Overlay 布局和局域网同步，不适合开放公网或大规模正式使用。
+
+下一阶段重点：
+
+- 完善联网权限与身份系统
+- 增强舰队与小队数据同步
+- 继续收集真实 `Game.log` 样本
+- 改进飞船、位置和上下船状态推断
+- 优化 Overlay 与桌面端交互体验

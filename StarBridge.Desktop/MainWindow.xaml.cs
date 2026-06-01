@@ -1,0 +1,2906 @@
+﻿using Microsoft.Win32;
+using StarBridge.Core.Events;
+using StarBridge.Core.LogWatching;
+using StarBridge.Core.Parsing;
+using StarBridge.Core.State;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using Brushes = System.Windows.Media.Brushes;
+using Color = System.Windows.Media.Color;
+using Cursors = System.Windows.Input.Cursors;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+
+namespace StarBridge.Desktop;
+
+public enum FleetInfoPanelKind
+{
+    Notice,
+    CurrentTask,
+    ActionPlan
+}
+
+public sealed record NetworkPlayerSnapshot(
+    string Name,
+    string? Callsign,
+    string? Fleet,
+    string? Squad,
+    bool Online,
+    string? Ship,
+    string? ShipConfidence,
+    string? Location,
+    string? LocationConfidence,
+    DateTimeOffset LastUpdated);
+
+public sealed record NetworkFleetSnapshot(
+    string Name,
+    string Code,
+    string? Commander,
+    string? Description,
+    string? Type,
+    string? ActiveTime,
+    string? JoinPolicy,
+    string? LogoText,
+    NetworkSquadSnapshot[]? Squads,
+    int OnlineMembers,
+    int TotalMembers,
+    DateTimeOffset LastUpdated);
+
+public sealed record NetworkSquadSnapshot(
+    string Name,
+    string? Commander,
+    string? Type,
+    string? Description);
+
+public sealed class ImagePathConverter : IValueConverter
+{
+    public object? Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        if (value is not string path || string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var bytes = File.ReadAllBytes(path);
+            using var stream = new MemoryStream(bytes);
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        return System.Windows.Data.Binding.DoNothing;
+    }
+}
+
+public partial class MainWindow : Window
+{
+    private const int OverlayHotkeyId = 0x5343;
+    private const int WmHotkey = 0x0312;
+    private const uint ModAlt = 0x0001;
+    private const uint ModControl = 0x0002;
+    private const uint ModShift = 0x0004;
+    private const uint ModWin = 0x0008;
+    private const uint ModNoRepeat = 0x4000;
+
+    private readonly RegexLogEventParser _parser = new();
+    private readonly FleetState _fleetState = new();
+    private readonly ObservableCollection<PlayerRow> _players = [];
+    private readonly ObservableCollection<SquadRow> _squads = [];
+    private readonly ObservableCollection<SquadMemberStatusRow> _mySquadMembers = [];
+    private readonly ObservableCollection<NetworkFleetCard> _networkFleets = [];
+    private readonly Dictionary<string, NetworkPlayerSnapshot> _networkSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private SquadRow? _selectedSquad;
+    private SquadRow? _joinedSquad;
+    private readonly GridViewColumn PlayerNameColumn = new();
+    private readonly GridViewColumn PlayerStatusColumn = new();
+    private readonly GridViewColumn PlayerShipColumn = new();
+    private readonly GridViewColumn PlayerLocationColumn = new();
+    private readonly List<OverlayLayoutItem> _overlayLayout = [];
+    private readonly DispatcherTimer _gameProcessTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private readonly DispatcherTimer _networkSyncTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private readonly HttpClient _networkClient = new() { Timeout = TimeSpan.FromSeconds(4) };
+    private GameLogWatcher? _watcher;
+    private string? _logPath;
+    private string? _localPlayer;
+    private string? _localPlayerId;
+    private string? _avatarPath;
+    private string? _fleetLogoPath;
+    private string _fleetName = "No Fleet";
+    private string _fleetCode = "N/A";
+    private string _fleetChiefCommander = "Unassigned";
+    private string _fleetDeputyCommander = "Unassigned";
+    private string _fleetDescription = "No fleet description.";
+    private string _fleetType = "Combat";
+    private string _fleetJoinPolicy = "Open";
+    private string _fleetActiveTime = "20:00 - 23:59 UTC+8";
+    private FleetInfoPanelKind _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
+    private string _fleetNoticeTitle = "";
+    private string _fleetNoticeContent = "";
+    private string _fleetCurrentTaskTitle = "";
+    private string _fleetCurrentTaskBrief = "";
+    private string _fleetCurrentTaskParticipants = "";
+    private string _fleetCurrentTaskRally = "";
+    private string _fleetCurrentTaskShip = "";
+    private bool _fleetCurrentTaskEmailCall;
+    private DateTime? _fleetCurrentTaskTime;
+    private string _fleetActionTitle = "";
+    private string _fleetActionContent = "";
+    private DateTime? _fleetActionStartTime;
+    private bool _fleetActionNotifyMembers;
+    private bool _joinActionNotifyMe;
+    private string? _callsign;
+    private OverlayWindow? _overlayWindow;
+    private OverlayLayoutItem? _activeOverlayItem;
+    private FrameworkElement? _activeOverlayEditorElement;
+    private bool _isOverlayResize;
+    private System.Windows.Point _lastOverlayEditorPoint;
+    private OverlayDisplaySettings _overlaySettings = OverlayDisplaySettings.Default;
+    private string _language = "zh";
+    private bool _isGameProcessRunning;
+    private bool _isLoadingSettings;
+    private HwndSource? _hotkeySource;
+    private bool _hotkeyRegistered;
+    private bool _hasFleet;
+    private bool _isCreatingFleet;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        WindowTitleText.Text = $"星海舰桥 V{GetAppVersion()}";
+        NavigateToMyFleet();
+        PlayersList.ItemsSource = _players;
+        SquadsList.ItemsSource = _squads;
+        SquadSelectionList.ItemsSource = _squads;
+        MySquadMembersList.ItemsSource = _mySquadMembers;
+        FindFleetResults.ItemsSource = _networkFleets;
+
+        _isLoadingSettings = true;
+        var config = DesktopAppConfig.Load();
+        _logPath = config.LogPath;
+        _localPlayer = config.PlayerName;
+        _localPlayerId = config.PlayerId;
+        _avatarPath = config.AvatarPath;
+        _callsign = config.Callsign;
+        _language = "zh";
+        _overlaySettings = OverlayDisplaySettings.Parse(DesktopAppConfig.LoadOverlaySettings() ?? config.OverlaySettings);
+        LoadOverlayLayout(DesktopAppConfig.LoadOverlayLayout() ?? config.OverlayLayout);
+        ApplyOverlaySettingsToControls();
+        ApplyLanguageToControls();
+        OverlayHotkeyBox.Text = string.IsNullOrWhiteSpace(config.OverlayHotkey)
+            ? "Ctrl+Shift+O"
+            : config.OverlayHotkey;
+        CallsignBox.Text = _callsign ?? "";
+        RenderCachedIdentity();
+        LoadAvatarPreview();
+        _isLoadingSettings = false;
+
+        UpdateFleetEntryPanels();
+        Loaded += (_, _) =>
+        {
+            RenderOverlayEditor();
+            if (!string.IsNullOrWhiteSpace(_logPath) && File.Exists(_logPath))
+            {
+                StartWatching(_logPath);
+            }
+        };
+        _gameProcessTimer.Tick += (_, _) => UpdateLocalOnlineStateFromGameProcess();
+        _gameProcessTimer.Start();
+        _networkSyncTimer.Tick += async (_, _) => await NetworkAutoSyncAsync();
+        AppendOutput("Designer WPF shell ready. Select Game.log to start.");
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        _hotkeySource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+        _hotkeySource?.AddHook(MainWindowProc);
+        RegisterOverlayHotkey();
+    }
+
+    private void FindFleetNav_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = FindFleetTab;
+        SetActiveNav(FindFleetNavButton);
+        _ = PullNetworkFleetsAsync(silent: true);
+    }
+
+    private void MyFleetNav_Click(object sender, RoutedEventArgs e)
+    {
+        NavigateToMyFleet();
+    }
+
+    private void MySquadNav_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = MySquadTab;
+        SetActiveNav(MySquadNavButton);
+    }
+
+    private void OverlayNav_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = OverlayEditTab;
+        SetActiveNav(OverlayNavButton);
+    }
+
+    private void PersonalNav_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = PersonalTab;
+        SetActiveNav(PersonalNavButton);
+    }
+
+    private void NetworkTestNav_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = MonitorTab;
+        SetActiveNav(null);
+    }
+
+    private void NavigateToMyFleet()
+    {
+        MainTabs.SelectedItem = FleetTab;
+        FleetSubTabs.SelectedItem = AllPlayersTab;
+        UpdateFleetEntryPanels();
+        SetActiveNav(MyFleetNavButton);
+    }
+
+    private void FleetFindButton_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = FindFleetTab;
+        SetActiveNav(FindFleetNavButton);
+    }
+
+    private void FleetCreateButton_Click(object sender, RoutedEventArgs e)
+    {
+        _isCreatingFleet = true;
+        MainTabs.SelectedItem = FleetTab;
+        SetActiveNav(MyFleetNavButton);
+        UpdateFleetEntryPanels();
+        CreateFleetNameBox.Focus();
+    }
+
+    private void CreateFleetCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _isCreatingFleet = false;
+        UpdateFleetEntryPanels();
+    }
+
+    private void CreateFleetSubmit_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ValidateCreateFleetForm())
+        {
+            return;
+        }
+
+        _hasFleet = true;
+        _isCreatingFleet = false;
+        _fleetName = CreateFleetNameBox.Text.Trim();
+        _fleetCode = CreateFleetCodeBox.Text.Trim();
+        _fleetChiefCommander = FormatCommanderName(_callsign, _localPlayer);
+        _fleetDeputyCommander = "Unassigned";
+        _fleetDescription = NormalizeOptionalField(CreateFleetIntroBox.Text);
+        _fleetType = GetSelectedRadioContent("FleetType") ?? "Combat";
+        _fleetJoinPolicy = GetSelectedRadioContent("FleetJoinPolicy") ?? "Open";
+        _fleetActiveTime = $"{CreateFleetOnlineFromBox.Text.Trim()} - {CreateFleetOnlineToBox.Text.Trim()} UTC+8";
+        LocalFleetText.Text = $"{CreateFleetNameBox.Text.Trim()} [{CreateFleetCodeBox.Text.Trim()}]";
+        RefreshFleetHeader();
+        UpdateFleetEntryPanels();
+        _ = PushFleetDirectoryAsync(silent: true);
+        _ = PushLocalSnapshotAsync(silent: true);
+    }
+
+    private void CreateFleetField_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (CreateFleetValidationText is null)
+        {
+            return;
+        }
+
+        ValidateCreateFleetForm(showRequiredErrors: false);
+    }
+
+    private void UpdateFleetEntryPanels()
+    {
+        if (FleetEmptyPanel is null || FleetCreatePanel is null)
+        {
+            return;
+        }
+
+        FleetCreatePanel.Visibility = !_hasFleet && _isCreatingFleet
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        FleetEmptyPanel.Visibility = !_hasFleet && !_isCreatingFleet
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        if (SquadRequiresFleetPanel is not null)
+        {
+            SquadRequiresFleetPanel.Visibility = _hasFleet
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
+
+        RefreshOverlayWindow();
+    }
+
+    private bool ValidateCreateFleetForm(bool showRequiredErrors = true)
+    {
+        var name = CreateFleetNameBox.Text.Trim();
+        var code = CreateFleetCodeBox.Text.Trim();
+        var activeFrom = CreateFleetOnlineFromBox.Text.Trim();
+        var activeTo = CreateFleetOnlineToBox.Text.Trim();
+        var nameValid = name.Length <= 30 && IsEnglishFleetText(name, allowSpaces: true);
+        var codeValid = code.Length <= 10 && IsEnglishFleetText(code, allowSpaces: false);
+        var activeFromValid = IsValidTime24(activeFrom);
+        var activeToValid = IsValidTime24(activeTo);
+
+        var message = "";
+        if (showRequiredErrors && string.IsNullOrWhiteSpace(name))
+        {
+            message = "请输入舰队名称。";
+        }
+        else if (showRequiredErrors && string.IsNullOrWhiteSpace(code))
+        {
+            message = "请输入舰队简称。";
+        }
+        else if (!nameValid)
+        {
+            message = "舰队名称仅允许英文、数字、空格、-、_，最多 30 个字符。";
+        }
+        else if (!codeValid)
+        {
+            message = "舰队简称仅允许英文、数字、-、_，最多 10 个字符。";
+        }
+        else if (!activeFromValid || !activeToValid)
+        {
+            message = "活动时间段必须使用 24 小时制 HH:mm，例如 20:00 到 23:59。";
+        }
+
+        CreateFleetValidationText.Text = message;
+        return string.IsNullOrWhiteSpace(message) &&
+               !string.IsNullOrWhiteSpace(name) &&
+               !string.IsNullOrWhiteSpace(code) &&
+               activeFromValid &&
+               activeToValid;
+    }
+
+    private static bool IsEnglishFleetText(string value, bool allowSpaces)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        return value.All(character =>
+            character is >= 'A' and <= 'Z' ||
+            character is >= 'a' and <= 'z' ||
+            character is >= '0' and <= '9' ||
+            character is '-' or '_' ||
+            allowSpaces && character == ' ');
+    }
+
+    private static bool IsValidTime24(string value)
+    {
+        if (value.Length != 5 || value[2] != ':')
+        {
+            return false;
+        }
+
+        return int.TryParse(value[..2], out var hour) &&
+               int.TryParse(value[3..], out var minute) &&
+               hour is >= 0 and <= 23 &&
+               minute is >= 0 and <= 59;
+    }
+
+    private string? GetSelectedRadioContent(string groupName)
+    {
+        return FindVisualChildren<System.Windows.Controls.RadioButton>(this)
+            .FirstOrDefault(radio => radio.GroupName == groupName && radio.IsChecked == true)
+            ?.Content
+            ?.ToString();
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(DependencyObject parent)
+        where T : DependencyObject
+    {
+        if (parent is null)
+        {
+            yield break;
+        }
+
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T typedChild)
+            {
+                yield return typedChild;
+            }
+
+            foreach (var descendant in FindVisualChildren<T>(child))
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    private void SetActiveNav(System.Windows.Controls.Button? activeButton)
+    {
+        FindFleetNavButton.Tag = null;
+        MyFleetNavButton.Tag = null;
+        MySquadNavButton.Tag = null;
+        OverlayNavButton.Tag = null;
+        PersonalNavButton.Tag = null;
+        if (activeButton is not null)
+        {
+            activeButton.Tag = "Active";
+        }
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        UnregisterOverlayHotkey();
+        _hotkeySource?.RemoveHook(MainWindowProc);
+        _hotkeySource = null;
+        CloseOverlayWindow();
+        _watcher?.Dispose();
+        _gameProcessTimer.Stop();
+        base.OnClosed(e);
+    }
+
+    private void SelectLog_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select Star Citizen Game.log",
+            Filter = "Star Citizen Game.log|Game.log|Log files (*.log)|*.log|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        StartWatching(dialog.FileName);
+    }
+
+    private void StartWatching(string logPath)
+    {
+        _watcher?.Dispose();
+        _logPath = logPath;
+        LogPathBox.Text = logPath;
+        SaveCurrentConfig();
+        AppendOutput($"Watching: {logPath}");
+
+        foreach (var line in ReadSharedLines(logPath))
+        {
+            ApplyLine(line, output: false);
+        }
+
+        RenderState();
+
+        _watcher = new GameLogWatcher(logPath, replayExistingLines: false, line =>
+        {
+            Dispatcher.Invoke(() => ApplyLine(line, output: true));
+        });
+        _watcher.Start();
+    }
+
+    private void ApplyLine(string line, bool output)
+    {
+        var fleetEvent = _parser.TryParse(line);
+        if (fleetEvent is null)
+        {
+            return;
+        }
+
+        if (fleetEvent.Player.Equals("LocalPlayer", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            fleetEvent = fleetEvent with { Player = _localPlayer };
+        }
+
+        if (fleetEvent.Type == FleetEventType.PlayerOnline)
+        {
+            _localPlayer = fleetEvent.Player;
+            _localPlayerId = fleetEvent.PlayerId;
+            GameNameText.Text = _localPlayer;
+            PlayerIdText.Text = string.IsNullOrWhiteSpace(_localPlayerId)
+                ? "Unknown"
+                : _localPlayerId;
+            ProfileStatusText.Text = "Online";
+            SaveCurrentConfig();
+        }
+
+        _fleetState.Apply(fleetEvent);
+        RenderState();
+
+        if (output)
+        {
+            AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""} | {fleetEvent.Location ?? fleetEvent.NavigationTarget ?? ""}");
+        }
+    }
+
+    private void RenderState()
+    {
+        _isGameProcessRunning = IsStarCitizenRunning();
+        if (!string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            _fleetState.SetPlayerOnlineState(_localPlayer, _isGameProcessRunning, DateTimeOffset.Now);
+        }
+
+        _fleetState.RefreshShipInferences(DateTimeOffset.Now);
+        _players.Clear();
+
+        foreach (var player in _fleetState.Players)
+        {
+            var isLocalPlayer = !string.IsNullOrWhiteSpace(_localPlayer) &&
+                                player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase);
+            _networkSnapshots.TryGetValue(player.Name, out var networkSnapshot);
+            var online = player.Online && (!isLocalPlayer || _isGameProcessRunning);
+            var rawShip = online ? ShipNameLocalizer.NormalizeCode(player.Ship) : "Unknown";
+            var shipConfidence = player.ShipConfidence;
+            var displayLocation = online ? FormatLocation(player.Location, player.NavigationTarget) : "Unknown";
+            if (!isLocalPlayer && networkSnapshot is not null)
+            {
+                rawShip = online ? ShipNameLocalizer.NormalizeCode(networkSnapshot.Ship) : "Unknown";
+                shipConfidence = string.IsNullOrWhiteSpace(networkSnapshot.ShipConfidence)
+                    ? "Low"
+                    : networkSnapshot.ShipConfidence!;
+                displayLocation = online && !string.IsNullOrWhiteSpace(networkSnapshot.Location)
+                    ? networkSnapshot.Location!
+                    : displayLocation;
+            }
+
+            var displayShip = ShipNameLocalizer.DisplayName(rawShip, _language);
+            var playerSquadName = isLocalPlayer
+                ? _joinedSquad?.Name ?? "Unassigned"
+                : networkSnapshot?.Squad ?? "Unassigned";
+            var playerCallsign = isLocalPlayer ? _callsign : networkSnapshot?.Callsign;
+            _players.Add(new PlayerRow(
+                player.Name,
+                online ? "Online" : "Offline",
+                displayShip,
+                online ? FormatShipInference(displayShip, shipConfidence) : "Ship: Unknown",
+                displayLocation,
+                playerCallsign,
+                IsLocalPlayer(player.Name) ? _avatarPath : null,
+                GetInitials(player.Name),
+                playerSquadName,
+                GetFleetRole(player.Name, playerCallsign),
+                GetFleetNameBrush(player.Name),
+                rawShip,
+                shipConfidence));
+        }
+
+        TotalMembersText.Text = _players.Count.ToString();
+        OnlineMembersText.Text = _players.Count(player => player.Status == "Online").ToString();
+        FleetShipCountText.Text = _players
+            .Select(player => player.Ship)
+            .Where(ship => !string.IsNullOrWhiteSpace(ship) &&
+                           !ship.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count()
+            .ToString();
+        RefreshFleetHeader();
+        RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
+        _ = PushFleetDirectoryAsync(silent: true);
+        _ = PushLocalSnapshotAsync(silent: true);
+
+        var local = _players.FirstOrDefault(player =>
+            player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
+        if (local is not null)
+        {
+            ShipStateText.Text =
+                $"Current Ship: {local.Ship}{Environment.NewLine}" +
+                $"Location: {local.Location}{Environment.NewLine}" +
+                $"Status: {local.Status}";
+        }
+    }
+
+    private static string FormatShipInference(string ship, string confidence)
+    {
+        if (string.IsNullOrWhiteSpace(ship) ||
+            ship.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Ship: Unknown";
+        }
+
+        return $"Ship: {ship} [{confidence}]";
+    }
+
+    private string GetFleetRole(string playerName, string? callsign)
+    {
+        return IsFleetCommander(playerName, callsign) ? "舰队指挥官" : "成员";
+    }
+
+    private System.Windows.Media.Brush GetFleetNameBrush(string playerName)
+    {
+        return IsFleetCommander(playerName, IsLocalPlayer(playerName) ? _callsign : null)
+            ? FindBrush("FleetCommanderNameBrush", Brushes.Gold)
+            : FindBrush("PrimaryTextBrush", Brushes.White);
+    }
+
+    private bool IsFleetCommander(string playerName, string? callsign)
+    {
+        return playerName.Equals(GetGameNameFromDisplayName(_fleetChiefCommander), StringComparison.OrdinalIgnoreCase) ||
+               (!string.IsNullOrWhiteSpace(callsign) &&
+                callsign.Equals(GetCallsignFromDisplayName(_fleetChiefCommander), StringComparison.OrdinalIgnoreCase));
+    }
+
+    private System.Windows.Media.Brush GetSquadNameBrush(SquadRow squad, PlayerRow player)
+    {
+        return IsSquadCommander(squad, player)
+            ? FindBrush("SquadCommanderNameBrush", Brushes.Aquamarine)
+            : FindBrush("PrimaryTextBrush", Brushes.White);
+    }
+
+    private static System.Windows.Media.Brush FindBrush(string key, System.Windows.Media.Brush fallback)
+    {
+        return System.Windows.Application.Current.TryFindResource(key) as System.Windows.Media.Brush ?? fallback;
+    }
+
+    private static string FormatLocation(string location, string navigationTarget)
+    {
+        if (string.IsNullOrWhiteSpace(navigationTarget) ||
+            navigationTarget.Equals("None", StringComparison.OrdinalIgnoreCase))
+        {
+            return location;
+        }
+
+        return $"{location} -> {navigationTarget}";
+    }
+
+    private void UpdateLocalOnlineStateFromGameProcess()
+    {
+        _isGameProcessRunning = IsStarCitizenRunning();
+        if (string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            RenderState();
+            return;
+        }
+
+        if (_isGameProcessRunning)
+        {
+            RenderState();
+            return;
+        }
+
+        _fleetState.Apply(new FleetEvent(FleetEventType.PlayerOffline, _localPlayer));
+        RenderState();
+        ProfileStatusText.Text = "Offline - game process not detected";
+    }
+
+    private static bool IsStarCitizenRunning()
+    {
+        string[] processNames =
+        [
+            "StarCitizen",
+            "StarCitizen_LIVE",
+            "StarCitizen_PTUR",
+            "StarCitizen_EPTU",
+            "StarCitizen_TECH-PREVIEW"
+        ];
+
+        return Process.GetProcesses()
+            .Any(process =>
+            {
+                try
+                {
+                    return processNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase) ||
+                           process.ProcessName.StartsWith("StarCitizen", StringComparison.OrdinalIgnoreCase);
+                }
+                catch
+                {
+                    return false;
+                }
+            });
+    }
+
+    private static IEnumerable<string> ReadSharedLines(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
+        }
+    }
+
+    private void AppendOutput(string message)
+    {
+        OutputBox.AppendText(message + Environment.NewLine);
+        OutputBox.ScrollToEnd();
+    }
+
+    private async void NetworkTestButton_Click(object sender, RoutedEventArgs e)
+    {
+        await TestNetworkAsync();
+    }
+
+    private async void NetworkPushButton_Click(object sender, RoutedEventArgs e)
+    {
+        await PushFleetDirectoryAsync();
+        await PushLocalSnapshotAsync();
+    }
+
+    private async void NetworkPullButton_Click(object sender, RoutedEventArgs e)
+    {
+        await PullNetworkFleetsAsync();
+        await PullNetworkSnapshotsAsync();
+    }
+
+    private void NetworkAutoSyncCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        if (NetworkAutoSyncCheck.IsChecked == true)
+        {
+            _networkSyncTimer.Start();
+            NetworkStatusText.Text = "自动同步已开启";
+            return;
+        }
+
+        _networkSyncTimer.Stop();
+        NetworkStatusText.Text = "自动同步已关闭";
+    }
+
+    private async Task NetworkAutoSyncAsync()
+    {
+        if (NetworkAutoSyncCheck.IsChecked != true)
+        {
+            return;
+        }
+
+        await PushFleetDirectoryAsync(silent: true);
+        await PushLocalSnapshotAsync(silent: true);
+        await PullNetworkFleetsAsync(silent: true);
+        await PullNetworkSnapshotsAsync(silent: true);
+    }
+
+    private async Task TestNetworkAsync()
+    {
+        try
+        {
+            var response = await _networkClient.GetAsync(BuildNetworkUri("health"));
+            response.EnsureSuccessStatusCode();
+            NetworkStatusText.Text = "连接成功";
+            AppendOutput($"NETWORK | connected={NetworkServerUrlBox.Text.Trim()}");
+            await PullNetworkFleetsAsync(silent: true);
+        }
+        catch (Exception ex)
+        {
+            NetworkStatusText.Text = $"连接失败：{ex.Message}";
+            AppendOutput($"NETWORK | connect failed={ex.Message}");
+        }
+    }
+
+    private async Task PushLocalSnapshotAsync(bool silent = false)
+    {
+        if (string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            NetworkStatusText.Text = "需要先从日志识别玩家名";
+            return;
+        }
+
+        var local = _players.FirstOrDefault(player => player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
+        var snapshot = new NetworkPlayerSnapshot(
+            _localPlayer,
+            _callsign,
+            _hasFleet ? _fleetName : "No Fleet",
+            _joinedSquad?.Name ?? "Unassigned",
+            local?.Status.Equals("Online", StringComparison.OrdinalIgnoreCase) == true,
+            local?.RawShip ?? "Unknown",
+            local?.ShipConfidence ?? "None",
+            local?.Location ?? "Unknown",
+            "Low",
+            DateTimeOffset.UtcNow);
+
+        try
+        {
+            var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri("api/players"), snapshot);
+            response.EnsureSuccessStatusCode();
+            await PushFleetDirectoryAsync(silent: true);
+            NetworkStatusText.Text = $"已上传：{snapshot.Name}";
+            if (!silent)
+            {
+                AppendOutput($"NETWORK | pushed={snapshot.Name}");
+            }
+        }
+        catch (Exception ex)
+        {
+            NetworkStatusText.Text = $"上传失败：{ex.Message}";
+            if (!silent)
+            {
+                AppendOutput($"NETWORK | push failed={ex.Message}");
+            }
+        }
+    }
+
+    private async Task PullNetworkSnapshotsAsync(bool silent = false)
+    {
+        try
+        {
+            var snapshots = await _networkClient.GetFromJsonAsync<NetworkPlayerSnapshot[]>(BuildNetworkUri("api/players")) ?? [];
+            foreach (var snapshot in snapshots)
+            {
+                ApplyNetworkSnapshot(snapshot);
+            }
+
+            RenderState();
+            NetworkStatusText.Text = $"已拉取：{snapshots.Length} 名玩家";
+            if (!silent)
+            {
+                AppendOutput($"NETWORK | pulled players={snapshots.Length}");
+            }
+        }
+        catch (Exception ex)
+        {
+            NetworkStatusText.Text = $"拉取失败：{ex.Message}";
+            if (!silent)
+            {
+                AppendOutput($"NETWORK | pull failed={ex.Message}");
+            }
+        }
+    }
+
+    private async Task PushFleetDirectoryAsync(bool silent = false)
+    {
+        if (!_hasFleet)
+        {
+            return;
+        }
+
+        var snapshot = BuildLocalFleetSnapshot();
+        try
+        {
+            var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri("api/fleets"), snapshot);
+            response.EnsureSuccessStatusCode();
+            if (!silent)
+            {
+                NetworkStatusText.Text = $"已发布舰队：{snapshot.Name}";
+                AppendOutput($"NETWORK | pushed fleet={snapshot.Name}");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+            {
+                NetworkStatusText.Text = $"发布舰队失败：{ex.Message}";
+                AppendOutput($"NETWORK | push fleet failed={ex.Message}");
+            }
+        }
+    }
+
+    private async Task PullNetworkFleetsAsync(bool silent = false)
+    {
+        try
+        {
+            var snapshots = await _networkClient.GetFromJsonAsync<NetworkFleetSnapshot[]>(BuildNetworkUri("api/fleets")) ?? [];
+            _networkFleets.Clear();
+            foreach (var snapshot in snapshots)
+            {
+                if (IsSameFleet(snapshot.Name) || IsSameFleet(snapshot.Code))
+                {
+                    MergeNetworkFleetSquads(snapshot);
+                }
+
+                _networkFleets.Add(NetworkFleetCard.FromSnapshot(snapshot));
+            }
+
+            if (!silent)
+            {
+                NetworkStatusText.Text = $"已拉取：{snapshots.Length} 个舰队";
+                AppendOutput($"NETWORK | pulled fleets={snapshots.Length}");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+            {
+                NetworkStatusText.Text = $"拉取舰队失败：{ex.Message}";
+                AppendOutput($"NETWORK | pull fleets failed={ex.Message}");
+            }
+        }
+    }
+
+    private void ApplyNetworkSnapshot(NetworkPlayerSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(snapshot.Name) ||
+            snapshot.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _networkSnapshots[snapshot.Name] = snapshot;
+
+        if (_hasFleet && !IsSameFleet(snapshot.Fleet))
+        {
+            return;
+        }
+
+        _fleetState.Apply(new FleetEvent(
+            snapshot.Online ? FleetEventType.PlayerOnline : FleetEventType.PlayerOffline,
+            snapshot.Name,
+            Timestamp: snapshot.LastUpdated));
+
+        if (!snapshot.Online)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.Location) &&
+            !snapshot.Location.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            _fleetState.Apply(new FleetEvent(
+                FleetEventType.PlayerLocationChanged,
+                snapshot.Name,
+                Location: snapshot.Location,
+                LocationEvidenceScore: 55,
+                LocationEvidence: "Network relay",
+                Timestamp: snapshot.LastUpdated));
+        }
+    }
+
+    private bool IsSameFleet(string? fleet)
+    {
+        if (!_hasFleet || string.IsNullOrWhiteSpace(fleet))
+        {
+            return false;
+        }
+
+        return fleet.Equals(_fleetName, StringComparison.OrdinalIgnoreCase) ||
+               fleet.Equals(_fleetCode, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void MergeNetworkFleetSquads(NetworkFleetSnapshot snapshot)
+    {
+        var changed = false;
+        foreach (var squadSnapshot in snapshot.Squads ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(squadSnapshot.Name))
+            {
+                continue;
+            }
+
+            var existing = _squads.FirstOrDefault(squad =>
+                squad.Name.Equals(squadSnapshot.Name, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                _squads.Add(new SquadRow
+                {
+                    Name = squadSnapshot.Name,
+                    Icon = GetInitials(squadSnapshot.Name),
+                    Commander = string.IsNullOrWhiteSpace(squadSnapshot.Commander) ? "Unassigned" : squadSnapshot.Commander!,
+                    Type = string.IsNullOrWhiteSpace(squadSnapshot.Type) ? "Assault" : squadSnapshot.Type!,
+                    Description = string.IsNullOrWhiteSpace(squadSnapshot.Description) ? "No squad briefing yet." : squadSnapshot.Description!
+                });
+                changed = true;
+                continue;
+            }
+
+            existing.Commander = string.IsNullOrWhiteSpace(squadSnapshot.Commander) ? existing.Commander : squadSnapshot.Commander!;
+            existing.Type = string.IsNullOrWhiteSpace(squadSnapshot.Type) ? existing.Type : squadSnapshot.Type!;
+            existing.Description = string.IsNullOrWhiteSpace(squadSnapshot.Description) ? existing.Description : squadSnapshot.Description!;
+            existing.RefreshComputed();
+        }
+
+        if (changed)
+        {
+            RenderSquads();
+            RenderMySquad();
+        }
+    }
+
+    private Uri BuildNetworkUri(string path)
+    {
+        var baseUrl = NetworkServerUrlBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            baseUrl = "http://127.0.0.1:5058";
+        }
+
+        if (!baseUrl.EndsWith("/", StringComparison.Ordinal))
+        {
+            baseUrl += "/";
+        }
+
+        return new Uri(new Uri(baseUrl), path);
+    }
+
+    private NetworkFleetSnapshot BuildLocalFleetSnapshot()
+    {
+        var squads = _squads
+            .Select(squad => new NetworkSquadSnapshot(
+                squad.Name,
+                squad.Commander,
+                squad.Type,
+                squad.Description))
+            .ToArray();
+
+        return new NetworkFleetSnapshot(
+            _fleetName,
+            _fleetCode,
+            _fleetChiefCommander,
+            _fleetDescription,
+            _fleetType,
+            _fleetActiveTime,
+            _fleetJoinPolicy,
+            string.IsNullOrWhiteSpace(_fleetCode) ? "LOGO" : _fleetCode,
+            squads,
+            _players.Count(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase)),
+            Math.Max(1, _players.Count),
+            DateTimeOffset.UtcNow);
+    }
+
+    private async void RefreshFleetDirectory_Click(object sender, RoutedEventArgs e)
+    {
+        await PushFleetDirectoryAsync(silent: true);
+        await PullNetworkFleetsAsync();
+    }
+
+    private async void JoinNetworkFleet_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not NetworkFleetCard card)
+        {
+            return;
+        }
+
+        JoinNetworkFleet(card.Snapshot);
+        await PushLocalSnapshotAsync(silent: true);
+        await PullNetworkSnapshotsAsync(silent: true);
+        NetworkStatusText.Text = $"已加入舰队：{card.Name}";
+        NavigateToMyFleet();
+    }
+
+    private void JoinNetworkFleet(NetworkFleetSnapshot snapshot)
+    {
+        _hasFleet = true;
+        _isCreatingFleet = false;
+        _fleetName = snapshot.Name;
+        _fleetCode = snapshot.Code;
+        _fleetChiefCommander = string.IsNullOrWhiteSpace(snapshot.Commander) ? "Unassigned" : snapshot.Commander!;
+        _fleetDeputyCommander = "Unassigned";
+        _fleetDescription = string.IsNullOrWhiteSpace(snapshot.Description) ? "No fleet description." : snapshot.Description!;
+        _fleetType = string.IsNullOrWhiteSpace(snapshot.Type) ? "Combat" : snapshot.Type!;
+        _fleetJoinPolicy = string.IsNullOrWhiteSpace(snapshot.JoinPolicy) ? "Open" : snapshot.JoinPolicy!;
+        _fleetActiveTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? "20:00 - 23:59 UTC+8" : snapshot.ActiveTime!;
+        LocalFleetText.Text = $"{_fleetName} [{_fleetCode}]";
+
+        _squads.Clear();
+        foreach (var squad in snapshot.Squads ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(squad.Name))
+            {
+                continue;
+            }
+
+            _squads.Add(new SquadRow
+            {
+                Name = squad.Name,
+                Icon = GetInitials(squad.Name),
+                Commander = string.IsNullOrWhiteSpace(squad.Commander) ? "Unassigned" : squad.Commander!,
+                Type = string.IsNullOrWhiteSpace(squad.Type) ? "Assault" : squad.Type!,
+                Description = string.IsNullOrWhiteSpace(squad.Description) ? "No squad briefing yet." : squad.Description!
+            });
+        }
+
+        _selectedSquad = _squads.FirstOrDefault();
+        _joinedSquad = null;
+        SquadSelectionList.SelectedItem = _selectedSquad;
+        UpdateFleetEntryPanels();
+        RefreshFleetHeader();
+        RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
+    }
+
+    private void PlayersList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+
+    }
+
+    private void RenderCachedIdentity()
+    {
+        if (!string.IsNullOrWhiteSpace(_logPath))
+        {
+            LogPathBox.Text = _logPath;
+        }
+
+        if (string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            GameNameText.Text = _language == "zh" ? "等待 Game.log 身份信息" : "Waiting for Game.log identity";
+            PlayerIdText.Text = _language == "zh" ? "等待 playerGEID" : "Waiting for playerGEID";
+            ProfileStatusText.Text = _language == "zh" ? "需要身份信息" : "Identity Required";
+            return;
+        }
+
+        GameNameText.Text = _localPlayer;
+        PlayerIdText.Text = string.IsNullOrWhiteSpace(_localPlayerId) ? "Unknown" : _localPlayerId;
+        ProfileStatusText.Text = _language == "zh" ? "已缓存身份" : "Cached Identity";
+        _fleetState.Apply(new FleetEvent(FleetEventType.PlayerOffline, _localPlayer));
+        RenderState();
+    }
+
+    private void SaveCurrentConfig()
+    {
+        var overlaySettings = _overlaySettings.Serialize();
+        var overlayLayout = SerializeOverlayLayout();
+        DesktopAppConfig.Save(new DesktopAppConfig(
+            _logPath,
+            _localPlayer,
+            _localPlayerId,
+            _avatarPath,
+            OverlayHotkeyBox.Text,
+            overlayLayout,
+            _callsign,
+            overlaySettings,
+            _language));
+        DesktopAppConfig.SaveOverlaySettings(overlaySettings);
+        DesktopAppConfig.SaveOverlayLayout(overlayLayout);
+    }
+
+    private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        SaveCurrentConfig();
+        CloseOverlayWindow();
+    }
+
+    private void MainWindow_StateChanged(object? sender, EventArgs e)
+    {
+        UpdateMaximizeButtonText();
+    }
+
+    private void LanguageBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (LanguageBox.SelectedItem is ComboBoxItem { Tag: string language })
+        {
+            _language = NormalizeLanguage(language);
+            ApplyLanguageToControls();
+            RenderState();
+            RefreshOverlayWindow();
+            if (!_isLoadingSettings)
+            {
+                SaveCurrentConfig();
+            }
+        }
+    }
+
+    private void OverlayHotkeyBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        OverlayHotkeyBox.SelectAll();
+    }
+
+    private void OverlayHotkeyBox_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        e.Handled = true;
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin)
+        {
+            return;
+        }
+
+        OverlayHotkeyBox.Text = FormatHotkey(Keyboard.Modifiers, key);
+        if (!_isLoadingSettings)
+        {
+            RegisterOverlayHotkey();
+            SaveCurrentConfig();
+        }
+    }
+
+    private void OpenOverlay_Click(object sender, RoutedEventArgs e)
+    {
+        ToggleOverlayWindow();
+    }
+
+    private void ToggleOverlayWindow()
+    {
+        RenderSquads();
+        if (_overlayWindow is { IsVisible: true })
+        {
+            _overlayWindow.Close();
+            return;
+        }
+
+        _overlayWindow = new OverlayWindow(_squads, GetOverlayPlayers(), _overlayLayout, _overlaySettings, _language, _hasFleet, BuildOverlayCommandState());
+        _overlayWindow.Closed += (_, _) => _overlayWindow = null;
+        _overlayWindow.Show();
+    }
+
+    private IntPtr MainWindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmHotkey && wParam.ToInt32() == OverlayHotkeyId)
+        {
+            handled = true;
+            ToggleOverlayWindow();
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void RegisterOverlayHotkey()
+    {
+        UnregisterOverlayHotkey();
+
+        if (!TryParseHotkey(OverlayHotkeyBox.Text, out var modifiers, out var key))
+        {
+            AppendOutput($"HOTKEY | invalid={OverlayHotkeyBox.Text}");
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        var virtualKey = KeyInterop.VirtualKeyFromKey(key);
+        if (handle == IntPtr.Zero || virtualKey == 0)
+        {
+            return;
+        }
+
+        _hotkeyRegistered = RegisterHotKey(handle, OverlayHotkeyId, modifiers | ModNoRepeat, (uint)virtualKey);
+        if (!_hotkeyRegistered)
+        {
+            AppendOutput($"HOTKEY | register failed={OverlayHotkeyBox.Text} | error={Marshal.GetLastWin32Error()}");
+            return;
+        }
+
+        AppendOutput($"HOTKEY | registered={OverlayHotkeyBox.Text}");
+    }
+
+    private void UnregisterOverlayHotkey()
+    {
+        if (!_hotkeyRegistered)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
+        {
+            UnregisterHotKey(handle, OverlayHotkeyId);
+        }
+
+        _hotkeyRegistered = false;
+    }
+
+    private static string FormatHotkey(ModifierKeys modifiers, Key key)
+    {
+        var parts = new List<string>();
+        if (modifiers.HasFlag(ModifierKeys.Control))
+        {
+            parts.Add("Ctrl");
+        }
+
+        if (modifiers.HasFlag(ModifierKeys.Alt))
+        {
+            parts.Add("Alt");
+        }
+
+        if (modifiers.HasFlag(ModifierKeys.Shift))
+        {
+            parts.Add("Shift");
+        }
+
+        if (modifiers.HasFlag(ModifierKeys.Windows))
+        {
+            parts.Add("Win");
+        }
+
+        parts.Add(key.ToString());
+        return string.Join("+", parts);
+    }
+
+    private static bool TryParseHotkey(string? text, out uint modifiers, out Key key)
+    {
+        modifiers = 0;
+        key = Key.None;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        foreach (var part in text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (part.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) ||
+                part.Equals("Control", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModControl;
+                continue;
+            }
+
+            if (part.Equals("Alt", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModAlt;
+                continue;
+            }
+
+            if (part.Equals("Shift", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModShift;
+                continue;
+            }
+
+            if (part.Equals("Win", StringComparison.OrdinalIgnoreCase) ||
+                part.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+            {
+                modifiers |= ModWin;
+                continue;
+            }
+
+            if (!Enum.TryParse(part, ignoreCase: true, out key))
+            {
+                return false;
+            }
+        }
+
+        return key is not Key.None
+            and not Key.LeftCtrl
+            and not Key.RightCtrl
+            and not Key.LeftAlt
+            and not Key.RightAlt
+            and not Key.LeftShift
+            and not Key.RightShift
+            and not Key.LWin
+            and not Key.RWin;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr handle, int id, uint modifiers, uint virtualKey);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr handle, int id);
+
+    private void CloseOverlayWindow()
+    {
+        var overlayWindow = _overlayWindow;
+        if (overlayWindow is null)
+        {
+            return;
+        }
+
+        _overlayWindow = null;
+        try
+        {
+            overlayWindow.Close();
+        }
+        catch (Exception exception)
+        {
+            App.WriteCrashLog(exception);
+        }
+    }
+
+    private void RefreshOverlayWindow()
+    {
+        if (_overlayWindow is not { IsVisible: true })
+        {
+            return;
+        }
+
+        RenderSquads();
+        _overlayWindow.Refresh(_squads, GetOverlayPlayers(), _overlaySettings, _language, _hasFleet, BuildOverlayCommandState());
+    }
+
+    private OverlayCommandState BuildOverlayCommandState()
+    {
+        var noticeTitle = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle)
+            ? "任务发布"
+            : _fleetNoticeTitle;
+        var noticeText = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle)
+            ? $"{_fleetCurrentTaskTitle} / {NormalizeOptionalField(_fleetCurrentTaskBrief)}"
+            : _fleetNoticeContent;
+
+        return new OverlayCommandState(
+            noticeTitle,
+            noticeText,
+            _fleetCurrentTaskTitle,
+            _fleetCurrentTaskBrief,
+            _fleetCurrentTaskRally,
+            _fleetCurrentTaskShip);
+    }
+
+    private IEnumerable<PlayerRow> GetOverlayPlayers()
+    {
+        if (_joinedSquad is null)
+        {
+            return _players;
+        }
+
+        return _players.Where(player =>
+            player.SquadName.Equals(_joinedSquad.Name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void SaveOverlayLayout_Click(object sender, RoutedEventArgs e)
+    {
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+        AppendOutput("Overlay layout saved.");
+    }
+
+    private void ResetOverlayLayout_Click(object sender, RoutedEventArgs e)
+    {
+        _overlayLayout.Clear();
+        _overlayLayout.AddRange(CreateDefaultOverlayLayout());
+        RenderOverlayEditor();
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+        AppendOutput("Overlay layout reset.");
+    }
+
+    private void OverlayEditorCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        RenderOverlayEditor();
+    }
+
+    private void OverlaySetting_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        if (HideMissionWhenIdleCheck is null ||
+            HideOfflineMembersCheck is null ||
+            HideSquadIconsCheck is null ||
+            TrayModeCheck is null ||
+            OverlayOpacitySlider is null ||
+            ShowNoticePanelCheck is null ||
+            ShowSquadsPanelCheck is null ||
+            ShowMissionPanelCheck is null ||
+            ShowMembersPanelCheck is null)
+        {
+            return;
+        }
+
+        var mode = ShowCallsignOnlyRadio.IsChecked == true
+            ? OverlayMemberNameMode.CallsignOnly
+            : ShowGameNameOnlyRadio.IsChecked == true
+                ? OverlayMemberNameMode.GameNameOnly
+                : OverlayMemberNameMode.CallsignAndGameName;
+
+        _overlaySettings = new OverlayDisplaySettings(
+            HideMissionWhenIdleCheck.IsChecked == true,
+            mode,
+            HideOfflineMembersCheck.IsChecked == true,
+            HideSquadIconsCheck.IsChecked == true,
+            TrayModeCheck.IsChecked == true,
+            Math.Clamp(OverlayOpacitySlider.Value / 100.0, 0.15, 1.0),
+            ShowNoticePanelCheck.IsChecked == true,
+            ShowSquadsPanelCheck.IsChecked == true,
+            ShowMissionPanelCheck.IsChecked == true,
+            ShowMembersPanelCheck.IsChecked == true);
+
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+    }
+
+    private void OverlayOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (OverlayOpacityValueText is not null)
+        {
+            OverlayOpacityValueText.Text = $"{Math.Round(OverlayOpacitySlider.Value)}%";
+        }
+
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        OverlaySetting_Changed(sender, new RoutedEventArgs());
+    }
+
+    private void CallsignBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        _callsign = string.IsNullOrWhiteSpace(CallsignBox.Text)
+            ? null
+            : CallsignBox.Text.Trim();
+        SaveCurrentConfig();
+        RenderState();
+    }
+
+    private void MySquadDescriptionBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_isLoadingSettings || MySquadDescriptionBox is null)
+        {
+            return;
+        }
+
+        var squad = _selectedSquad;
+        if (squad is null)
+        {
+            return;
+        }
+
+        squad.Description = MySquadDescriptionBox.Text.Trim();
+        squad.RefreshComputed();
+        RefreshOverlayWindow();
+        _ = PushFleetDirectoryAsync(silent: true);
+    }
+
+    private void CreateSquad_Click(object sender, RoutedEventArgs e)
+    {
+        if (_joinedSquad is not null &&
+            _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
+        {
+            JoinSquadHintText.Text = "每人只能创建一个小队";
+            return;
+        }
+
+        CreateSquadPanel.Visibility = Visibility.Visible;
+        CreateSquadValidationText.Text = "";
+        CreateSquadNameBox.Text = "";
+        CreateSquadTypeBox.SelectedIndex = 0;
+        CreateSquadCustomTypeBox.Text = "";
+        CreateSquadCustomTypeBox.Visibility = Visibility.Collapsed;
+        CreateSquadDescriptionBox.Text = "No squad briefing yet.";
+        CreateSquadNameBox.Focus();
+    }
+
+    private void CreateSquadCancel_Click(object sender, RoutedEventArgs e)
+    {
+        CreateSquadPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void CreateSquadConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (_joinedSquad is not null &&
+            _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
+        {
+            CreateSquadValidationText.Text = "每人只能创建一个小队。";
+            return;
+        }
+
+        var name = CreateSquadNameBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            CreateSquadValidationText.Text = "请输入小队名称。";
+            return;
+        }
+
+        if (_squads.Any(squad => squad.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+        {
+            CreateSquadValidationText.Text = "已经存在同名小队。";
+            return;
+        }
+
+        var squadType = GetCreateSquadType();
+        if (string.IsNullOrWhiteSpace(squadType))
+        {
+            CreateSquadValidationText.Text = "请输入自定义小队类型。";
+            return;
+        }
+
+        if (IsCustomSquadTypeSelected() && !IsValidChineseText(squadType, maxLength: 5))
+        {
+            CreateSquadValidationText.Text = "自定义类型仅限 5 个中文字以内。";
+            return;
+        }
+
+        var squad = new SquadRow
+        {
+            Name = name,
+            Icon = GetInitials(name),
+            Commander = FormatCommanderName(_callsign, _localPlayer),
+            Type = squadType,
+            Description = string.IsNullOrWhiteSpace(CreateSquadDescriptionBox.Text)
+                ? "No squad briefing yet."
+                : CreateSquadDescriptionBox.Text.Trim()
+        };
+
+        _squads.Add(squad);
+        _selectedSquad = squad;
+        _joinedSquad = squad;
+        SquadSelectionList.SelectedItem = squad;
+        CreateSquadPanel.Visibility = Visibility.Collapsed;
+        JoinSquadHintText.Text = $"已创建并加入 {squad.Name}";
+        RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
+    }
+
+    private void CreateSquadTypeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (CreateSquadCustomTypeBox is null)
+        {
+            return;
+        }
+
+        CreateSquadCustomTypeBox.Visibility = IsCustomSquadTypeSelected()
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private string GetCreateSquadType()
+    {
+        return IsCustomSquadTypeSelected()
+            ? CreateSquadCustomTypeBox.Text.Trim()
+            : (CreateSquadTypeBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "突击";
+    }
+
+    private bool IsCustomSquadTypeSelected()
+    {
+        return string.Equals(
+            (CreateSquadTypeBox.SelectedItem as ComboBoxItem)?.Content?.ToString(),
+            "自定义",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsValidChineseText(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > maxLength)
+        {
+            return false;
+        }
+
+        return value.All(character => character >= '\u4e00' && character <= '\u9fff');
+    }
+
+    private void JoinSquad_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSquad is null)
+        {
+            JoinSquadHintText.Text = "请选择一个小队";
+            return;
+        }
+
+        _joinedSquad = _selectedSquad;
+        JoinSquadHintText.Text = $"已加入 {_joinedSquad.Name}";
+        RenderState();
+        _ = PushLocalSnapshotAsync(silent: true);
+    }
+
+    private void SquadSelectionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _selectedSquad = SquadSelectionList.SelectedItem as SquadRow;
+        JoinSquadButton.IsEnabled = _selectedSquad is not null;
+        JoinSquadHintText.Text = _selectedSquad is null ? "请选择一个小队" : "可以加入所选小队";
+        RenderMySquad();
+    }
+
+    private void OpenPublishTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        OpenPublishTaskPanel();
+    }
+
+    private void OpenPublishRallyButton_Click(object sender, RoutedEventArgs e)
+    {
+        OpenPublishTaskPanel(rallyOnly: true);
+    }
+
+    private void OpenPublishTaskPanel(bool rallyOnly = false)
+    {
+        PublishTaskValidationText.Text = "";
+        PublishTaskObjectiveBox.Text = rallyOnly ? "舰队集结" : "战术打击";
+        PublishTaskBriefBox.Text = rallyOnly
+            ? "舰队集结，等待进一步指令。"
+            : "简要说明任务目标、行动范围或注意事项。";
+        PublishTaskRallyCheck.IsChecked = rallyOnly;
+        PublishTaskRallyBox.Text = "未指定";
+        PublishTaskShipRequiredCheck.IsChecked = false;
+        PublishTaskShipBox.Text = "未指定";
+        PublishTaskEmailCallCheck.IsChecked = false;
+
+        PublishTaskSquadList.Items.Clear();
+        foreach (var squad in _squads)
+        {
+            PublishTaskSquadList.Items.Add(squad.Name);
+        }
+        PublishTaskPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CancelPublishTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        PublishTaskPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void PublishFleetTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        var objective = PublishTaskObjectiveBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(objective))
+        {
+            PublishTaskValidationText.Text = "请输入任务目标。";
+            return;
+        }
+
+        var selectedSquads = PublishTaskSquadList.SelectedItems
+            .Cast<object>()
+            .Select(item => item.ToString())
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .ToArray();
+        var participants = selectedSquads.Length == 0
+            ? "全员参与"
+            : string.Join("、", selectedSquads);
+        var brief = PublishTaskBriefBox.Text.Trim();
+        var rallyEnabled = PublishTaskRallyCheck.IsChecked == true;
+        var rally = PublishTaskRallyBox.Text.Trim();
+        var shipRequired = PublishTaskShipRequiredCheck.IsChecked == true;
+        var ship = PublishTaskShipBox.Text.Trim();
+        var emailCall = PublishTaskEmailCallCheck.IsChecked == true;
+
+        _fleetCurrentTaskTitle = objective;
+        _fleetCurrentTaskBrief = NormalizeOptionalField(brief);
+        _fleetCurrentTaskParticipants = participants;
+        _fleetCurrentTaskRally = rallyEnabled ? NormalizeOptionalField(rally) : "";
+        _fleetCurrentTaskShip = shipRequired ? NormalizeOptionalField(ship) : "";
+        _fleetCurrentTaskEmailCall = emailCall;
+        _fleetCurrentTaskTime = DateTime.Now;
+        _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
+        PublishTaskPanel.Visibility = Visibility.Collapsed;
+        RefreshFleetInfoPanel();
+        RefreshOverlayWindow();
+        AppendOutput($"Fleet task published: {objective}");
+    }
+
+    private static string NormalizeOptionalField(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? "未指定" : value;
+    }
+
+    private void CustomTitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2)
+        {
+            ToggleWindowMaximize();
+            return;
+        }
+
+        DragMove();
+    }
+
+    private void MinimizeWindowButton_Click(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void MaximizeWindowButton_Click(object sender, RoutedEventArgs e)
+    {
+        ToggleWindowMaximize();
+    }
+
+    private void CloseWindowButton_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
+
+    private void ToggleWindowMaximize()
+    {
+        WindowState = WindowState == WindowState.Maximized
+            ? WindowState.Normal
+            : WindowState.Maximized;
+        UpdateMaximizeButtonText();
+    }
+
+    private void UpdateMaximizeButtonText()
+    {
+        if (MaximizeWindowButton is not null)
+        {
+            MaximizeWindowButton.Content = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
+        }
+    }
+
+    private static string GetAppVersion()
+    {
+        return Assembly.GetExecutingAssembly().GetName().Version is { } version
+            ? $"{version.Major}.{version.Minor}.{version.Build}"
+            : "0.2.2";
+    }
+
+    private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_selectedFleetInfoPanel == FleetInfoPanelKind.ActionPlan)
+        {
+            OpenActionPlanEditor();
+        }
+        else if (_selectedFleetInfoPanel == FleetInfoPanelKind.CurrentTask)
+        {
+            OpenCurrentTaskDetail();
+        }
+        else if (_selectedFleetInfoPanel == FleetInfoPanelKind.Notice && IsCurrentUserFleetCommander())
+        {
+            OpenFleetNoticeEditor();
+        }
+    }
+
+    private void OpenFleetNoticeEditor()
+    {
+        FleetNoticeTitleBox.Text = _fleetNoticeTitle;
+        FleetNoticeContentBox.Text = _fleetNoticeContent;
+        FleetNoticeValidationText.Text = "";
+        FleetNoticeEditorPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CancelFleetNoticeButton_Click(object sender, RoutedEventArgs e)
+    {
+        FleetNoticeEditorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void PublishFleetNoticeButton_Click(object sender, RoutedEventArgs e)
+    {
+        var title = FleetNoticeTitleBox.Text.Trim();
+        var content = FleetNoticeContentBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            FleetNoticeValidationText.Text = "请输入公告标题。";
+            return;
+        }
+
+        _fleetNoticeTitle = title;
+        _fleetNoticeContent = NormalizeOptionalField(content);
+        _selectedFleetInfoPanel = FleetInfoPanelKind.Notice;
+        FleetNoticeEditorPanel.Visibility = Visibility.Collapsed;
+        RefreshFleetInfoPanel();
+    }
+
+    private void OpenCurrentTaskDetail()
+    {
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            return;
+        }
+
+        CurrentTaskDetailTitleText.Text = _fleetCurrentTaskTitle;
+        CurrentTaskDetailBriefText.Text = _fleetCurrentTaskBrief;
+        CurrentTaskDetailParticipantsText.Text = $"参与范围 / {_fleetCurrentTaskParticipants}";
+        CurrentTaskDetailRallyText.Text = string.IsNullOrWhiteSpace(_fleetCurrentTaskRally)
+            ? "集结点 / 未发布"
+            : $"集结点 / {_fleetCurrentTaskRally}";
+        CurrentTaskDetailShipText.Text = string.IsNullOrWhiteSpace(_fleetCurrentTaskShip)
+            ? "指定舰船 / 无"
+            : $"指定舰船 / {_fleetCurrentTaskShip}";
+        CurrentTaskDetailTimeText.Text = _fleetCurrentTaskTime is null
+            ? ""
+            : $"发布时间 / {_fleetCurrentTaskTime:yyyy-MM-dd HH:mm}";
+        CurrentTaskDetailPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CloseCurrentTaskDetailButton_Click(object sender, RoutedEventArgs e)
+    {
+        CurrentTaskDetailPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void FleetNoticeInfoTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        _selectedFleetInfoPanel = FleetInfoPanelKind.Notice;
+        RefreshFleetInfoPanel();
+    }
+
+    private void FleetCurrentTaskInfoTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
+        RefreshFleetInfoPanel();
+    }
+
+    private void FleetActionPlanInfoTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        _selectedFleetInfoPanel = FleetInfoPanelKind.ActionPlan;
+        RefreshFleetInfoPanel();
+    }
+
+    private void OpenActionPlanEditor()
+    {
+        ActionPlanTitleBox.Text = _fleetActionTitle;
+        ActionPlanContentBox.Text = _fleetActionContent;
+        var start = _fleetActionStartTime ?? DateTime.Now.AddHours(1);
+        ActionPlanDatePicker.SelectedDate = start.Date;
+        ActionPlanTimeBox.Text = start.ToString("HH:mm");
+        ActionPlanNotifyFleetCheck.IsChecked = _fleetActionNotifyMembers;
+        ActionPlanValidationText.Text = "";
+        ActionPlanEditorPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CancelActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        ActionPlanEditorPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void PublishActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        var title = ActionPlanTitleBox.Text.Trim();
+        var content = ActionPlanContentBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            ActionPlanValidationText.Text = "请输入行动标题。";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            ActionPlanValidationText.Text = "请输入行动内容。";
+            return;
+        }
+
+        if (!TryReadActionPlanStartTime(out var startTime, out var message))
+        {
+            ActionPlanValidationText.Text = message;
+            return;
+        }
+
+        _fleetActionTitle = title;
+        _fleetActionContent = content;
+        _fleetActionStartTime = startTime;
+        _fleetActionNotifyMembers = ActionPlanNotifyFleetCheck.IsChecked == true;
+        _selectedFleetInfoPanel = FleetInfoPanelKind.ActionPlan;
+        ActionPlanEditorPanel.Visibility = Visibility.Collapsed;
+        RefreshFleetInfoPanel();
+    }
+
+    private bool TryReadActionPlanStartTime(out DateTime startTime, out string message)
+    {
+        startTime = default;
+        message = "";
+        if (ActionPlanDatePicker.SelectedDate is not { } selectedDate)
+        {
+            message = "请选择行动日期。";
+            return false;
+        }
+
+        if (!IsValidTime24(ActionPlanTimeBox.Text.Trim()))
+        {
+            message = "行动时间必须使用 24 小时制 HH:mm。";
+            return false;
+        }
+
+        var hour = int.Parse(ActionPlanTimeBox.Text[..2]);
+        var minute = int.Parse(ActionPlanTimeBox.Text[3..]);
+        startTime = selectedDate.Date.AddHours(hour).AddMinutes(minute);
+        var now = DateTime.Now;
+        if (startTime < now)
+        {
+            message = "行动时间不能早于当前时间。";
+            return false;
+        }
+
+        if (startTime > now.AddDays(7))
+        {
+            message = "行动时间只能设定在现在开始的 7 天之内。";
+            return false;
+        }
+
+        return true;
+    }
+
+    private void JoinFleetActionButton_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        JoinActionPlanTitleText.Text = string.IsNullOrWhiteSpace(_fleetActionTitle)
+            ? "行动计划"
+            : _fleetActionTitle;
+        JoinActionNotifyCheck.IsChecked = _joinActionNotifyMe;
+        JoinActionPlanPanel.Visibility = Visibility.Visible;
+    }
+
+    private void CancelJoinActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        JoinActionPlanPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void ConfirmJoinActionPlanButton_Click(object sender, RoutedEventArgs e)
+    {
+        _joinActionNotifyMe = JoinActionNotifyCheck.IsChecked == true;
+        JoinActionPlanPanel.Visibility = Visibility.Collapsed;
+        AppendOutput(_joinActionNotifyMe
+            ? "Action joined. Email reminder requested for 5 minutes before start."
+            : "Action joined.");
+    }
+
+    private void ChooseAvatar_Click(object sender, RoutedEventArgs e)
+    {
+        var croppedPath = ChooseAndCropImage("Choose player avatar", "player-avatar.png");
+        if (croppedPath is null)
+        {
+            return;
+        }
+
+        _avatarPath = croppedPath;
+        SaveCurrentConfig();
+        LoadAvatarPreview();
+        RenderState();
+        AppendOutput("Profile avatar updated.");
+    }
+
+    private void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
+    {
+        if (_hasFleet && !IsCurrentUserFleetCommander())
+        {
+            AppendOutput("Only the fleet commander can update the fleet logo.");
+            return;
+        }
+
+        var croppedPath = ChooseAndCropImage("Choose fleet logo", "fleet-logo.png");
+        if (croppedPath is null)
+        {
+            return;
+        }
+
+        _fleetLogoPath = croppedPath;
+        LoadCreateFleetLogoPreview();
+        LoadFleetHeaderLogoPreview();
+        AppendOutput("Fleet logo updated.");
+    }
+
+    private void FleetHeaderLogo_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_hasFleet || !IsCurrentUserFleetCommander())
+        {
+            return;
+        }
+
+        ChooseFleetLogo_Click(sender, new RoutedEventArgs());
+    }
+
+    private void FleetSquadBanner_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (FindVisualParent<System.Windows.Controls.Button>(e.OriginalSource as DependencyObject) is not null)
+        {
+            return;
+        }
+
+        if ((sender as FrameworkElement)?.Tag is not SquadRow squad)
+        {
+            return;
+        }
+
+        squad.IsExpanded = !squad.IsExpanded;
+    }
+
+    private void ChooseSquadEmblem_Click(object sender, RoutedEventArgs e)
+    {
+        var squad = (sender as FrameworkElement)?.Tag as SquadRow ?? _squads.FirstOrDefault();
+        ChooseSquadEmblem(squad);
+    }
+
+    private void MySquadEmblem_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        ChooseSquadEmblem(_selectedSquad);
+    }
+
+    private void ChooseSquadEmblem(SquadRow? squad)
+    {
+        if (squad is null)
+        {
+            return;
+        }
+
+        var safeName = string.Concat(squad.Name.Select(character =>
+            Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
+        var croppedPath = ChooseAndCropImage("Choose squad emblem", $"squad-{safeName}-emblem.png");
+        if (croppedPath is null)
+        {
+            return;
+        }
+
+        squad.EmblemPath = croppedPath;
+        squad.RefreshComputed();
+        RenderSquads();
+        RenderMySquad();
+        RefreshOverlayWindow();
+        AppendOutput($"Squad emblem updated: {squad.Name}");
+    }
+
+    private string? ChooseAndCropImage(string title, string fileName)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = title,
+            Filter = "Image files (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return null;
+        }
+
+        var cropWindow = new SquadEmblemCropWindow(dialog.FileName)
+        {
+            Owner = this
+        };
+
+        if (cropWindow.ShowDialog() != true || cropWindow.CroppedImage is null)
+        {
+            return null;
+        }
+
+        var directory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StarBridge",
+            "Images");
+        Directory.CreateDirectory(directory);
+
+        var outputPath = Path.Combine(directory, fileName);
+        using var stream = File.Create(outputPath);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(cropWindow.CroppedImage));
+        encoder.Save(stream);
+        return outputPath;
+    }
+
+    private static T? FindVisualParent<T>(DependencyObject? source)
+        where T : DependencyObject
+    {
+        while (source is not null)
+        {
+            if (source is T target)
+            {
+                return target;
+            }
+
+            source = VisualTreeHelper.GetParent(source);
+        }
+
+        return null;
+    }
+
+    private void RenderOverlayEditor()
+    {
+        if (OverlayEditorCanvas is null)
+        {
+            return;
+        }
+
+        OverlayEditorCanvas.Children.Clear();
+
+        foreach (var item in _overlayLayout)
+        {
+            var panel = CreateOverlayEditorPanel(item);
+            Canvas.SetLeft(panel, item.X * OverlayEditorCanvas.Width);
+            Canvas.SetTop(panel, item.Y * OverlayEditorCanvas.Height);
+            panel.Width = item.Width * OverlayEditorCanvas.Width;
+            panel.Height = item.Height * OverlayEditorCanvas.Height;
+            OverlayEditorCanvas.Children.Add(panel);
+        }
+    }
+
+    private FrameworkElement CreateOverlayEditorPanel(OverlayLayoutItem item)
+    {
+        var border = new Border
+        {
+            Tag = item,
+            Background = new SolidColorBrush(Color.FromArgb(170, 5, 10, 17)),
+            BorderBrush = item.Brush,
+            BorderThickness = new Thickness(2),
+            Padding = new Thickness(10),
+            Cursor = Cursors.SizeAll,
+            MinWidth = 80,
+            MinHeight = 50
+        };
+
+        var title = new TextBlock
+        {
+            Text = item.Title,
+            Foreground = item.Brush,
+            FontWeight = FontWeights.SemiBold,
+            FontSize = 18
+        };
+        var hint = new TextBlock
+        {
+            Text = _language == "zh" ? "拖拽 / 缩放" : "drag / resize",
+            Foreground = Brushes.Gray,
+            FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var content = new Grid();
+        content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        content.Children.Add(title);
+        content.Children.Add(hint);
+        Grid.SetRow(hint, 1);
+
+        var handle = new Border
+        {
+            Width = 20,
+            Height = 20,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Background = item.Brush,
+            Cursor = Cursors.SizeNWSE,
+            Opacity = 0.9
+        };
+        handle.MouseLeftButtonDown += OverlayResize_MouseLeftButtonDown;
+
+        var wrapper = new Grid();
+        wrapper.Children.Add(content);
+        wrapper.Children.Add(handle);
+        border.Child = wrapper;
+
+        border.MouseLeftButtonDown += OverlayPanel_MouseLeftButtonDown;
+        border.MouseMove += OverlayPanel_MouseMove;
+        border.MouseLeftButtonUp += OverlayPanel_MouseLeftButtonUp;
+        return border;
+    }
+
+    private void OverlayPanel_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not OverlayLayoutItem item)
+        {
+            return;
+        }
+
+        _activeOverlayItem = item;
+        _activeOverlayEditorElement = element;
+        _isOverlayResize = false;
+        _lastOverlayEditorPoint = e.GetPosition(OverlayEditorCanvas);
+        element.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void OverlayResize_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement handle ||
+            FindParentEditorPanel(handle) is not FrameworkElement panel ||
+            panel.Tag is not OverlayLayoutItem item)
+        {
+            return;
+        }
+
+        _activeOverlayItem = item;
+        _activeOverlayEditorElement = panel;
+        _isOverlayResize = true;
+        _lastOverlayEditorPoint = e.GetPosition(OverlayEditorCanvas);
+        panel.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void OverlayPanel_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_activeOverlayItem is null || _activeOverlayEditorElement is null || e.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        var point = e.GetPosition(OverlayEditorCanvas);
+        var dx = (point.X - _lastOverlayEditorPoint.X) / OverlayEditorCanvas.Width;
+        var dy = (point.Y - _lastOverlayEditorPoint.Y) / OverlayEditorCanvas.Height;
+
+        if (_isOverlayResize)
+        {
+            _activeOverlayItem.Width = Math.Clamp(_activeOverlayItem.Width + dx, 0.06, 1 - _activeOverlayItem.X);
+            _activeOverlayItem.Height = Math.Clamp(_activeOverlayItem.Height + dy, 0.05, 1 - _activeOverlayItem.Y);
+        }
+        else
+        {
+            _activeOverlayItem.X = Math.Clamp(_activeOverlayItem.X + dx, 0, 1 - _activeOverlayItem.Width);
+            _activeOverlayItem.Y = Math.Clamp(_activeOverlayItem.Y + dy, 0, 1 - _activeOverlayItem.Height);
+        }
+
+        _lastOverlayEditorPoint = point;
+        Canvas.SetLeft(_activeOverlayEditorElement, _activeOverlayItem.X * OverlayEditorCanvas.Width);
+        Canvas.SetTop(_activeOverlayEditorElement, _activeOverlayItem.Y * OverlayEditorCanvas.Height);
+        _activeOverlayEditorElement.Width = _activeOverlayItem.Width * OverlayEditorCanvas.Width;
+        _activeOverlayEditorElement.Height = _activeOverlayItem.Height * OverlayEditorCanvas.Height;
+        e.Handled = true;
+    }
+
+    private void OverlayPanel_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        _activeOverlayEditorElement?.ReleaseMouseCapture();
+        _activeOverlayItem = null;
+        _activeOverlayEditorElement = null;
+        _isOverlayResize = false;
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+    }
+
+    private static FrameworkElement? FindParentEditorPanel(DependencyObject element)
+    {
+        var current = VisualTreeHelper.GetParent(element);
+        while (current is not null)
+        {
+            if (current is Border { Tag: OverlayLayoutItem } border)
+            {
+                return border;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
+    private void LoadOverlayLayout(string? serialized)
+    {
+        _overlayLayout.Clear();
+        var parsed = OverlayLayoutItem.ParseMany(serialized).ToArray();
+        _overlayLayout.AddRange(parsed.Length == 0 ? CreateDefaultOverlayLayout() : parsed);
+    }
+
+    private string SerializeOverlayLayout()
+    {
+        return string.Join(";", _overlayLayout.Select(item => item.Serialize()));
+    }
+
+    private void ApplyOverlaySettingsToControls()
+    {
+        HideMissionWhenIdleCheck.IsChecked = _overlaySettings.HideMissionWhenIdle;
+        HideOfflineMembersCheck.IsChecked = _overlaySettings.HideOfflineMembers;
+        HideSquadIconsCheck.IsChecked = _overlaySettings.HideSquadIcons;
+        TrayModeCheck.IsChecked = _overlaySettings.EnableTrayMode;
+        ShowNoticePanelCheck.IsChecked = _overlaySettings.ShowNotice;
+        ShowSquadsPanelCheck.IsChecked = _overlaySettings.ShowSquads;
+        ShowMissionPanelCheck.IsChecked = _overlaySettings.ShowMission;
+        ShowMembersPanelCheck.IsChecked = _overlaySettings.ShowMembers;
+        OverlayOpacitySlider.Value = Math.Clamp(_overlaySettings.Opacity, 0.15, 1.0) * 100.0;
+        OverlayOpacityValueText.Text = $"{Math.Round(OverlayOpacitySlider.Value)}%";
+        ShowCallsignOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignOnly;
+        ShowGameNameOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.GameNameOnly;
+        ShowCallsignAndNameRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignAndGameName;
+    }
+
+    private void ApplyLanguageToControls()
+    {
+        var zh = _language == "zh";
+        Title = zh ? "星海舰桥" : "Star Bridge";
+
+        LanguageBox.SelectionChanged -= LanguageBox_SelectionChanged;
+        LanguageBox.SelectedIndex = zh ? 1 : 0;
+        LanguageBox.SelectionChanged += LanguageBox_SelectionChanged;
+
+        FindFleetNavText.Text = zh ? "寻找舰队" : "Find Fleet";
+        MyFleetNavText.Text = zh ? "我的舰队" : "My Fleet";
+        MySquadNavText.Text = zh ? "我的小队" : "My Squad";
+        OverlayNavText.Text = "Overlay";
+        PersonalNavText.Text = zh ? "个人" : "Personal";
+        FindFleetTab.Header = zh ? "寻找舰队" : "Find Fleet";
+        FindFleetTitleText.Text = zh ? "寻找舰队" : "Find Fleet";
+        FindFleetPlaceholderText.Text = zh
+            ? "从 Relay Server 拉取舰队目录，选择一个舰队加入后即可进行第一阶段同步测试。"
+            : "Pull fleet directory from the relay server, then join a fleet for first-stage sync testing.";
+        RefreshFleetDirectoryButton.Content = zh ? "刷新舰队" : "Refresh Fleets";
+        SelectLogButton.Content = zh ? "选择日志" : "Select Log";
+        ToggleOverlayButton.Content = zh ? "切换 Overlay" : "Toggle Overlay";
+        NetworkTestNavButton.Content = zh ? "联网测试 / 监控" : "Network / Monitor";
+        HotkeyLimitHintText.Text = zh
+            ? "由于游戏限制，星际公民在前台时无法使用热键开关 Overlay。"
+            : "Due to game restrictions, hotkeys cannot toggle Overlay while Star Citizen is in front.";
+        FleetTab.Header = zh ? "舰队" : "Fleet";
+        MySquadTab.Header = zh ? "我的小队" : "My Squad";
+        AllPlayersTab.Header = zh ? "全成员" : "All Players";
+        SquadsTab.Header = zh ? "小队" : "Squads";
+        ManageFleetTab.Header = zh ? "管理舰队" : "Manage Fleet";
+        OverlayEditTab.Header = zh ? "Overlay 编辑" : "Overlay Edit";
+        PersonalTab.Header = zh ? "个人" : "Personal";
+        MonitorTab.Header = zh ? "监控" : "Monitor";
+        TotalMembersLabel.Text = zh ? "总人数" : "TOTAL MEMBERS";
+        OnlineLabel.Text = zh ? "在线" : "ONLINE";
+        FleetShipsLabel.Text = zh ? "舰船数量" : "SHIPS";
+        FleetNoticeInfoTabButton.Content = zh ? "舰队公告" : "Fleet Notice";
+        FleetCurrentTaskInfoTabButton.Content = zh ? "当前任务" : "Current Task";
+        FleetActionPlanInfoTabButton.Content = zh ? "行动计划" : "Action Plan";
+        PlayerNameColumn.Header = zh ? "游戏名" : "Name";
+        PlayerStatusColumn.Header = zh ? "状态" : "Status";
+        PlayerShipColumn.Header = zh ? "飞船" : "Ship";
+        PlayerLocationColumn.Header = zh ? "位置" : "Location";
+        MySquadEmblemHintText.Text = zh ? "点击更换" : "Click to change";
+        MySquadAvatarColumn.Header = zh ? "头像" : "Avatar";
+        MySquadRoleColumn.Header = zh ? "职位" : "Role";
+        MySquadCallsignColumn.Header = zh ? "呼号" : "Callsign";
+        MySquadGameIdColumn.Header = zh ? "游戏 ID" : "Game ID";
+        MySquadOnlineColumn.Header = zh ? "在线状态" : "Online";
+        MySquadShipColumn.Header = zh ? "飞船状态" : "Ship Status";
+        MySquadLocationColumn.Header = zh ? "地点信息" : "Location";
+        OverlayEditHintText.Text = zh
+            ? "拖拽面板移动位置，拖拽右下角手柄缩放。保存后的布局会应用到全屏 Overlay。"
+            : "Drag panels to move. Drag the lower-right handle to resize. Saved layout is applied to fullscreen Overlay.";
+        SaveLayoutButton.Content = zh ? "保存布局" : "Save Layout";
+        ResetLayoutButton.Content = zh ? "重置" : "Reset";
+        OverlayOptionsLabel.Text = zh ? "OVERLAY 选项" : "OVERLAY OPTIONS";
+        HideMissionWhenIdleCheck.Content = zh ? "无任务时隐藏右侧任务 Overlay" : "No task: hide right mission overlay";
+        HideOfflineMembersCheck.Content = zh ? "隐藏离线小队成员" : "Hide offline squad members";
+        HideSquadIconsCheck.Content = zh ? "左侧不显示小队图标" : "Left panel: hide squad icons";
+        MemberNameDisplayLabel.Text = zh ? "成员名字显示" : "MEMBER NAME DISPLAY";
+        ShowCallsignAndNameRadio.Content = zh ? "显示呼号和游戏名" : "Show callsign and game name";
+        ShowCallsignOnlyRadio.Content = zh ? "只显示呼号" : "Only callsign";
+        ShowGameNameOnlyRadio.Content = zh ? "只显示游戏名" : "Only game name";
+        BackgroundModeLabel.Text = zh ? "后台模式" : "BACKGROUND";
+        TrayModeCheck.Content = zh ? "窗口最小化时仍然可以显示 Overlay" : "Keep Overlay visible when minimized";
+        TrayModeHintText.Text = zh
+            ? "启用后，主窗口最小化时不会隐藏已经开启的 Overlay。"
+            : "When enabled, minimizing the main window will not hide an active Overlay.";
+        AvatarPlaceholderText.Text = zh ? "头像" : "AVATAR";
+        ChooseAvatarButton.Content = zh ? "选择头像" : "Choose Avatar";
+        PlayerNameLabel.Text = zh ? "游戏名" : "Player Name";
+        PlayerIdLabel.Text = zh ? "玩家 ID" : "Player ID";
+        CallsignLabel.Text = zh ? "呼号" : "Callsign";
+        FleetLabel.Text = zh ? "舰队" : "Fleet";
+        LocalFleetText.Text = zh ? "本地舰队" : "Local Fleet";
+        StatusLabel.Text = zh ? "状态" : "Status";
+        RenderOverlayEditor();
+    }
+
+    private static string NormalizeLanguage(string? language)
+    {
+        return "zh";
+    }
+
+    private void LoadAvatarPreview()
+    {
+        if (string.IsNullOrWhiteSpace(_avatarPath) || !File.Exists(_avatarPath))
+        {
+            AvatarImage.Source = null;
+            AvatarPlaceholderText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(_avatarPath);
+        image.EndInit();
+        image.Freeze();
+
+        AvatarImage.Source = image;
+        AvatarPlaceholderText.Visibility = Visibility.Collapsed;
+    }
+
+    private void LoadCreateFleetLogoPreview()
+    {
+        if (CreateFleetLogoImage is null || CreateFleetLogoText is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetLogoPath) || !File.Exists(_fleetLogoPath))
+        {
+            CreateFleetLogoImage.Source = null;
+            CreateFleetLogoText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(_fleetLogoPath);
+        image.EndInit();
+        image.Freeze();
+
+        CreateFleetLogoImage.Source = image;
+        CreateFleetLogoText.Visibility = Visibility.Collapsed;
+    }
+
+    private void LoadFleetHeaderLogoPreview()
+    {
+        if (FleetHeaderLogoImage is null || FleetHeaderLogoText is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetLogoPath) || !File.Exists(_fleetLogoPath))
+        {
+            FleetHeaderLogoImage.Source = null;
+            FleetHeaderLogoText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(_fleetLogoPath);
+        image.EndInit();
+        image.Freeze();
+
+        FleetHeaderLogoImage.Source = image;
+        FleetHeaderLogoText.Visibility = Visibility.Collapsed;
+    }
+
+    private void RefreshFleetHeader()
+    {
+        if (FleetHeaderNameText is null)
+        {
+            return;
+        }
+
+        FleetHeaderNameText.Text = _hasFleet ? _fleetName : "No Fleet";
+        FleetHeaderCodeText.Text = _hasFleet ? _fleetCode : "N/A";
+        FleetCommanderText.Text = $"首席指挥官 / {FormatCommanderName(_callsign, _localPlayer, _fleetChiefCommander)}";
+        FleetDeputyCommanderText.Text = $"副指挥官 / {_fleetDeputyCommander}";
+        FleetTypeSummaryText.Text = _hasFleet
+            ? $"活动时间 / {_fleetActiveTime}"
+            : "活动时间 / 未设置";
+        RefreshFleetInfoPanel();
+
+        LoadFleetHeaderLogoPreview();
+        ManageFleetTab.Visibility = _hasFleet && IsCurrentUserFleetCommander()
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private static string FormatCommanderName(string? callsign, string? gameName, string fallback = "Unassigned")
+    {
+        if (string.IsNullOrWhiteSpace(gameName))
+        {
+            return string.IsNullOrWhiteSpace(callsign) ? fallback : callsign.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(callsign) ||
+            callsign.Equals(gameName, StringComparison.OrdinalIgnoreCase))
+        {
+            return gameName.Trim();
+        }
+
+        return $"{callsign.Trim()} ({gameName.Trim()})";
+    }
+
+    private void RefreshFleetInfoPanel()
+    {
+        if (FleetActionPlanTitleText is null)
+        {
+            return;
+        }
+
+        FleetNoticeInfoTabButton.Tag = _selectedFleetInfoPanel == FleetInfoPanelKind.Notice ? "Active" : null;
+        FleetCurrentTaskInfoTabButton.Tag = _selectedFleetInfoPanel == FleetInfoPanelKind.CurrentTask ? "Active" : null;
+        FleetActionPlanInfoTabButton.Tag = _selectedFleetInfoPanel == FleetInfoPanelKind.ActionPlan ? "Active" : null;
+
+        switch (_selectedFleetInfoPanel)
+        {
+            case FleetInfoPanelKind.Notice:
+                RefreshNoticePanel();
+                break;
+            case FleetInfoPanelKind.CurrentTask:
+                RefreshCurrentTaskPanel();
+                break;
+            default:
+                RefreshActionPlanPanel();
+                break;
+        }
+    }
+
+    private void RefreshNoticePanel()
+    {
+        var hasNotice = !string.IsNullOrWhiteSpace(_fleetNoticeTitle);
+        if (!hasNotice)
+        {
+            FleetActionPlanTitleText.Text = "暂无舰队公告";
+            FleetActionPlanSummaryText.Text = "等待舰队指挥发布公告";
+            FleetActionPlanTimeText.Text = "";
+            JoinFleetActionButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        FleetActionPlanTitleText.Text = _fleetNoticeTitle;
+        FleetActionPlanSummaryText.Text = _fleetNoticeContent;
+        FleetActionPlanTimeText.Text = IsCurrentUserFleetCommander()
+            ? "点击编辑公告"
+            : "";
+        JoinFleetActionButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void RefreshCurrentTaskPanel()
+    {
+        var hasTask = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle);
+        if (!hasTask)
+        {
+            FleetActionPlanTitleText.Text = "暂无当前任务";
+            FleetActionPlanSummaryText.Text = "等待舰队指挥发布任务或集结点";
+            FleetActionPlanTimeText.Text = "";
+            JoinFleetActionButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        FleetActionPlanTitleText.Text = _fleetCurrentTaskTitle;
+        FleetActionPlanSummaryText.Text = FormatCurrentTaskPreview();
+        FleetActionPlanTimeText.Text = _fleetCurrentTaskTime is null
+            ? "点击查看任务详情"
+            : $"发布时间 / {_fleetCurrentTaskTime:yyyy-MM-dd HH:mm}    点击查看任务详情";
+        JoinFleetActionButton.Visibility = Visibility.Collapsed;
+    }
+
+    private string FormatCurrentTaskPreview()
+    {
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(_fleetCurrentTaskBrief))
+        {
+            lines.Add($"任务简述 / {_fleetCurrentTaskBrief}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_fleetCurrentTaskRally))
+        {
+            lines.Add($"集结点 / {_fleetCurrentTaskRally}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_fleetCurrentTaskShip))
+        {
+            lines.Add($"指定舰船 / {_fleetCurrentTaskShip}");
+        }
+
+        lines.Add($"参与范围 / {_fleetCurrentTaskParticipants}");
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private void RefreshActionPlanPanel()
+    {
+        var hasAction = !string.IsNullOrWhiteSpace(_fleetActionTitle);
+        if (!hasAction)
+        {
+            FleetActionPlanTitleText.Text = "暂无行动计划，等待下一步指挥";
+            FleetActionPlanSummaryText.Text = "";
+            FleetActionPlanTimeText.Text = "";
+            JoinFleetActionButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        FleetActionPlanTitleText.Text = _fleetActionTitle;
+        FleetActionPlanSummaryText.Text = _fleetActionContent;
+        FleetActionPlanTimeText.Text = _fleetActionStartTime is null
+            ? ""
+            : $"开始时间 / {_fleetActionStartTime:yyyy-MM-dd HH:mm}";
+        JoinFleetActionButton.Visibility = Visibility.Visible;
+    }
+
+    private bool IsLocalPlayer(string playerName)
+    {
+        return !string.IsNullOrWhiteSpace(_localPlayer) &&
+               playerName.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsCurrentUserFleetCommander()
+    {
+        return !string.IsNullOrWhiteSpace(_localPlayer) &&
+               IsFleetCommander(_localPlayer, _callsign);
+    }
+
+    private void SeedSquads()
+    {
+        if (_squads.Count > 0)
+        {
+            return;
+        }
+    }
+
+    private void RenderSquads()
+    {
+        foreach (var squad in _squads)
+        {
+            squad.Members.Clear();
+            squad.PreviewMembers.Clear();
+            squad.StatusMembers.Clear();
+            if (_hasFleet)
+            {
+                foreach (var player in _players.Where(player =>
+                             player.SquadName.Equals(squad.Name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    squad.Members.Add(CreateSquadAvatarRow(squad, player));
+                    squad.StatusMembers.Add(CreateSquadStatusRow(squad, player));
+                }
+            }
+
+            foreach (var member in squad.Members
+                         .OrderByDescending(member => member.IsCommander)
+                         .Take(6))
+            {
+                squad.PreviewMembers.Add(member);
+            }
+
+            squad.RefreshComputed();
+        }
+
+        NoSquadsPanel.Visibility = _squads.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SquadSelectionList.Visibility = _squads.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private MemberAvatarRow CreateSquadAvatarRow(SquadRow squad, PlayerRow player)
+    {
+        var isCommander = IsSquadCommander(squad, player);
+        return new MemberAvatarRow(
+            player.Callsign ?? player.Name,
+            GetInitials(player.Name),
+            player.Status,
+            player.AvatarPath,
+            GetSquadNameBrush(squad, player),
+            isCommander);
+    }
+
+    private SquadMemberStatusRow CreateSquadStatusRow(SquadRow squad, PlayerRow player)
+    {
+        return new SquadMemberStatusRow(
+            GetInitials(player.Name),
+            player.AvatarPath,
+            GetSquadRole(squad, player),
+            player.Callsign ?? "-",
+            player.Name,
+            player.Status,
+            player.Ship,
+            player.Location,
+            GetSquadNameBrush(squad, player));
+    }
+
+    private void RenderMySquad()
+    {
+        var squad = _selectedSquad;
+        if (squad is null)
+        {
+            MySquadEmptyDetailPanel.Visibility = Visibility.Visible;
+            MySquadDetailPanel.Visibility = Visibility.Collapsed;
+            if (!MySquadDescriptionBox.IsKeyboardFocusWithin)
+            {
+                MySquadDescriptionBox.Text = "";
+            }
+            _mySquadMembers.Clear();
+            return;
+        }
+
+        MySquadEmptyDetailPanel.Visibility = Visibility.Collapsed;
+        MySquadDetailPanel.Visibility = Visibility.Visible;
+        MySquadNameText.Text = squad.Name;
+        MySquadCommanderText.Text = $"Commander / {squad.Commander}";
+        MySquadMemberCountText.Text = $"{squad.Members.Count(member => member.Status == "Online")}/{squad.Members.Count} Online";
+        MySquadTypeText.Text = $"Type / {squad.Type}";
+        if (!MySquadDescriptionBox.IsKeyboardFocusWithin)
+        {
+            MySquadDescriptionBox.Text = squad.Description;
+        }
+        MySquadIconText.Text = squad.Icon;
+        LoadMySquadEmblem(squad.EmblemPath);
+
+        _mySquadMembers.Clear();
+        if (ReferenceEquals(squad, _joinedSquad))
+        {
+            foreach (var player in _players.Where(player =>
+                         player.SquadName.Equals(squad.Name, StringComparison.OrdinalIgnoreCase)))
+            {
+                _mySquadMembers.Add(CreateSquadStatusRow(squad, player));
+            }
+        }
+    }
+
+    private static string GetSquadRole(SquadRow squad, PlayerRow player)
+    {
+        return IsSquadCommander(squad, player)
+            ? "小队指挥官"
+            : "成员";
+    }
+
+    private static bool IsSquadCommander(SquadRow squad, PlayerRow player)
+    {
+        return player.Name.Equals(GetGameNameFromDisplayName(squad.Commander), StringComparison.OrdinalIgnoreCase) ||
+               player.Callsign?.Equals(GetCallsignFromDisplayName(squad.Commander), StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static string GetGameNameFromDisplayName(string value)
+    {
+        var start = value.LastIndexOf('(');
+        var end = value.LastIndexOf(')');
+        return start >= 0 && end > start
+            ? value[(start + 1)..end].Trim()
+            : value.Trim();
+    }
+
+    private static string GetCallsignFromDisplayName(string value)
+    {
+        var start = value.LastIndexOf('(');
+        return start > 0 ? value[..start].Trim() : value.Trim();
+    }
+
+    private static string GetInitials(string name)
+    {
+        return string.IsNullOrWhiteSpace(name)
+            ? "?"
+            : name.Length >= 2 ? name[..2].ToUpperInvariant() : name[..1].ToUpperInvariant();
+    }
+
+    private void LoadMySquadEmblem(string? emblemPath)
+    {
+        if (string.IsNullOrWhiteSpace(emblemPath) || !File.Exists(emblemPath))
+        {
+            MySquadEmblemImage.Source = null;
+            MySquadIconText.Visibility = Visibility.Visible;
+            MySquadEmblemHintText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.UriSource = new Uri(emblemPath);
+        image.EndInit();
+        image.Freeze();
+
+        MySquadEmblemImage.Source = image;
+        MySquadIconText.Visibility = Visibility.Collapsed;
+        MySquadEmblemHintText.Visibility = Visibility.Collapsed;
+    }
+
+    private static IEnumerable<OverlayLayoutItem> CreateDefaultOverlayLayout()
+    {
+        yield return new OverlayLayoutItem("Notice", "FLEET NOTICE", 0.305, 0.01, 0.39, 0.07, Brushes.Yellow);
+        yield return new OverlayLayoutItem("Squads", "FLEET / SQUADS", 0.01, 0.32, 0.16, 0.36, Brushes.DeepSkyBlue);
+        yield return new OverlayLayoutItem("Mission", "MISSION PACKAGE", 0.835, 0.26, 0.16, 0.14, Brushes.Red);
+        yield return new OverlayLayoutItem("Members", "SQUAD MEMBERS", 0.82, 0.56, 0.18, 0.22, Brushes.Gray);
+    }
+}
+
+public sealed record PlayerRow(
+    string Name,
+    string Status,
+    string Ship,
+    string ShipInfo,
+    string Location,
+    string? Callsign = null,
+    string? AvatarPath = null,
+    string Initials = "?",
+    string SquadName = "Unassigned",
+    string Role = "Member",
+    System.Windows.Media.Brush? NameBrush = null,
+    string RawShip = "Unknown",
+    string ShipConfidence = "None");
+
+public sealed record SquadMemberStatusRow(
+    string Avatar,
+    string? AvatarPath,
+    string Role,
+    string Callsign,
+    string GameId,
+    string OnlineStatus,
+    string ShipStatus,
+    string Location,
+    System.Windows.Media.Brush? NameBrush = null);
+
+public sealed record NetworkFleetCard(
+    NetworkFleetSnapshot Snapshot,
+    string Name,
+    string LogoText,
+    string CodeLine,
+    string CommanderLine,
+    string JoinPolicyLine,
+    string Description,
+    string TypeLine,
+    string ActiveTimeLine,
+    string MembersLine)
+{
+    public static NetworkFleetCard FromSnapshot(NetworkFleetSnapshot snapshot)
+    {
+        var code = string.IsNullOrWhiteSpace(snapshot.Code) ? "N/A" : snapshot.Code;
+        var commander = string.IsNullOrWhiteSpace(snapshot.Commander) ? "Unassigned" : snapshot.Commander;
+        var joinPolicy = string.IsNullOrWhiteSpace(snapshot.JoinPolicy) ? "Open" : snapshot.JoinPolicy;
+        var description = string.IsNullOrWhiteSpace(snapshot.Description) ? "No fleet description." : snapshot.Description;
+        var type = string.IsNullOrWhiteSpace(snapshot.Type) ? "Unknown" : snapshot.Type;
+        var activeTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? "Unassigned" : snapshot.ActiveTime;
+
+        return new NetworkFleetCard(
+            snapshot,
+            snapshot.Name,
+            string.IsNullOrWhiteSpace(snapshot.LogoText) ? code : snapshot.LogoText!,
+            $"Code / {code}",
+            $"Commander / {commander}",
+            joinPolicy.Equals("需要申请", StringComparison.OrdinalIgnoreCase) ||
+            joinPolicy.Equals("Application", StringComparison.OrdinalIgnoreCase)
+                ? "Join / Requires application"
+                : "Join / Open",
+            description!,
+            $"Type / {type}",
+            $"Active / {activeTime}",
+            $"{snapshot.OnlineMembers} Online / {snapshot.TotalMembers} Members");
+    }
+}
+
