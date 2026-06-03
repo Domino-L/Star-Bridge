@@ -5,8 +5,8 @@ $root = Split-Path -Parent $scriptsDir
 $project = Join-Path $root "StarBridge.Desktop\StarBridge.Desktop.csproj"
 $publishDir = Join-Path $root "StarBridge.Desktop\bin\Release\net8.0-windows\win-x64\publish"
 $distDir = Join-Path $root "dist"
-$packageDir = Join-Path $distDir "StarBridge-0.2.2"
-$zipPath = Join-Path $distDir "StarBridge-0.2.2-win-x64.zip"
+$packageDir = Join-Path $distDir "StarBridge-0.3.0"
+$zipPath = Join-Path $distDir "StarBridge-0.3.0-win-x64.zip"
 
 $env:DOTNET_CLI_HOME = Join-Path $root ".dotnet-home"
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
@@ -23,7 +23,7 @@ New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $publishDir "*") -Destination $packageDir -Recurse -Force
 
 @"
-Star Bridge / æ˜Ÿæµ·èˆ°æ¡¥ 0.2.2
+Star Bridge / 星海舰桥 0.3.0
 
 How to run:
 1. Extract this zip.

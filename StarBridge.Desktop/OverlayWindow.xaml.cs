@@ -5,8 +5,11 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
+using Brush = System.Windows.Media.Brush;
 using Brushes = System.Windows.Media.Brushes;
+using Color = System.Windows.Media.Color;
 
 namespace StarBridge.Desktop;
 
@@ -154,6 +157,15 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
     private Visibility _membersVisibility = Visibility.Visible;
     private bool _showNotice = true;
     private double _overlayOpacity = 0.85;
+    private Brush _panelBackgroundBrush = new SolidColorBrush(Color.FromArgb(176, 5, 10, 17));
+    private Brush _panelBorderBrush = new SolidColorBrush(Color.FromRgb(69, 174, 255));
+    private Brush _titleBrush = new SolidColorBrush(Color.FromRgb(83, 190, 255));
+    private Brush _textBrush = new SolidColorBrush(Color.FromRgb(235, 247, 255));
+    private Brush _mutedBrush = new SolidColorBrush(Color.FromRgb(142, 187, 220));
+    private Brush _alertBrush = new SolidColorBrush(Color.FromRgb(255, 240, 0));
+    private Brush _iconBackgroundBrush = new SolidColorBrush(Color.FromRgb(4, 16, 28));
+    private Brush _onlineBrush = new SolidColorBrush(Color.FromRgb(121, 255, 158));
+    private Brush _offlineBrush = new SolidColorBrush(Color.FromRgb(255, 105, 105));
 
     public OverlayViewModel(
         IEnumerable<SquadRow> squads,
@@ -265,6 +277,60 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         private set => SetProperty(ref _overlayOpacity, value);
     }
 
+    public Brush PanelBackgroundBrush
+    {
+        get => _panelBackgroundBrush;
+        private set => SetProperty(ref _panelBackgroundBrush, value);
+    }
+
+    public Brush PanelBorderBrush
+    {
+        get => _panelBorderBrush;
+        private set => SetProperty(ref _panelBorderBrush, value);
+    }
+
+    public Brush TitleBrush
+    {
+        get => _titleBrush;
+        private set => SetProperty(ref _titleBrush, value);
+    }
+
+    public Brush TextBrush
+    {
+        get => _textBrush;
+        private set => SetProperty(ref _textBrush, value);
+    }
+
+    public Brush MutedBrush
+    {
+        get => _mutedBrush;
+        private set => SetProperty(ref _mutedBrush, value);
+    }
+
+    public Brush AlertBrush
+    {
+        get => _alertBrush;
+        private set => SetProperty(ref _alertBrush, value);
+    }
+
+    public Brush IconBackgroundBrush
+    {
+        get => _iconBackgroundBrush;
+        private set => SetProperty(ref _iconBackgroundBrush, value);
+    }
+
+    public Brush OnlineBrush
+    {
+        get => _onlineBrush;
+        private set => SetProperty(ref _onlineBrush, value);
+    }
+
+    public Brush OfflineBrush
+    {
+        get => _offlineBrush;
+        private set => SetProperty(ref _offlineBrush, value);
+    }
+
     public string NoticeTimerLabel => $"{_noticeSecondsRemaining}s";
 
     public Visibility NotificationVisibility => _showNotice && _noticeSecondsRemaining > 0
@@ -283,6 +349,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         var squadArray = hasFleet ? squads.ToArray() : [];
         _showNotice = settings.ShowNotice;
         OverlayOpacity = settings.Opacity;
+        ApplyTheme(settings.Theme);
         SquadsVisibility = settings.ShowSquads ? Visibility.Visible : Visibility.Collapsed;
         MembersVisibility = settings.ShowMembers ? Visibility.Visible : Visibility.Collapsed;
 
@@ -332,6 +399,61 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         OnChanged(nameof(NotificationVisibility));
     }
 
+    private void ApplyTheme(OverlayVisualTheme theme)
+    {
+        if (theme == OverlayVisualTheme.Anvil)
+        {
+            PanelBackgroundBrush = BrushFromArgb(190, 0, 18, 14);
+            PanelBorderBrush = BrushFromRgb(0, 255, 141);
+            TitleBrush = BrushFromRgb(78, 255, 171);
+            TextBrush = BrushFromRgb(229, 255, 242);
+            MutedBrush = BrushFromRgb(120, 221, 173);
+            AlertBrush = BrushFromRgb(208, 255, 0);
+            IconBackgroundBrush = BrushFromArgb(120, 0, 42, 28);
+            OnlineBrush = BrushFromRgb(121, 255, 92);
+            OfflineBrush = BrushFromRgb(255, 92, 76);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Drake)
+        {
+            PanelBackgroundBrush = BrushFromArgb(188, 22, 10, 0);
+            PanelBorderBrush = BrushFromRgb(255, 138, 18);
+            TitleBrush = BrushFromRgb(255, 178, 48);
+            TextBrush = BrushFromRgb(255, 236, 196);
+            MutedBrush = BrushFromRgb(230, 151, 62);
+            AlertBrush = BrushFromRgb(255, 222, 89);
+            IconBackgroundBrush = BrushFromArgb(132, 52, 22, 0);
+            OnlineBrush = BrushFromRgb(255, 190, 52);
+            OfflineBrush = BrushFromRgb(196, 72, 48);
+            return;
+        }
+
+        PanelBackgroundBrush = BrushFromArgb(176, 5, 10, 17);
+        PanelBorderBrush = BrushFromRgb(69, 174, 255);
+        TitleBrush = BrushFromRgb(83, 190, 255);
+        TextBrush = BrushFromRgb(235, 247, 255);
+        MutedBrush = BrushFromRgb(142, 187, 220);
+        AlertBrush = BrushFromRgb(255, 240, 0);
+        IconBackgroundBrush = BrushFromRgb(4, 16, 28);
+        OnlineBrush = BrushFromRgb(121, 255, 158);
+        OfflineBrush = BrushFromRgb(255, 105, 105);
+    }
+
+    private static SolidColorBrush BrushFromRgb(byte red, byte green, byte blue)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(red, green, blue));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static SolidColorBrush BrushFromArgb(byte alpha, byte red, byte green, byte blue)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(alpha, red, green, blue));
+        brush.Freeze();
+        return brush;
+    }
+
     private void RefreshSquads(IEnumerable<SquadRow> squads, OverlayDisplaySettings settings, bool zh, bool hasFleet)
     {
         Squads.Clear();
@@ -372,7 +494,8 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
                     FormatMemberName(player, settings.MemberNameMode),
                     player.Status,
                     player.ShipInfo,
-                    player.Location));
+                    player.Location,
+                    player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase) ? OnlineBrush : OfflineBrush));
             }
         }
 
@@ -385,7 +508,8 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             hasFleet ? zh ? "未分配" : "Unassigned" : zh ? "无舰队" : "No Fleet",
             hasFleet ? zh ? "离线" : "Offline" : "-",
             hasFleet ? zh ? "未知" : "Unknown" : "-",
-            hasFleet ? zh ? "未知" : "Unknown" : "-"));
+            hasFleet ? zh ? "未知" : "Unknown" : "-",
+            hasFleet ? OfflineBrush : MutedBrush));
     }
 
     private void OnChanged(string propertyName)
@@ -474,9 +598,9 @@ public sealed record OverlaySquadRow(
     string? EmblemPath,
     Visibility IconVisibility);
 
-public sealed record OverlayMemberRow(string DisplayName, string Status, string Ship, string Location)
-{
-    public System.Windows.Media.Brush StatusBrush => Status.Equals("Online", StringComparison.OrdinalIgnoreCase)
-        ? Brushes.LawnGreen
-        : Brushes.IndianRed;
-}
+public sealed record OverlayMemberRow(
+    string DisplayName,
+    string Status,
+    string Ship,
+    string Location,
+    System.Windows.Media.Brush StatusBrush);

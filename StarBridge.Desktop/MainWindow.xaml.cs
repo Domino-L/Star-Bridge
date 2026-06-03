@@ -4,12 +4,14 @@ using StarBridge.Core.LogWatching;
 using StarBridge.Core.Parsing;
 using StarBridge.Core.State;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -57,13 +59,92 @@ public sealed record NetworkFleetSnapshot(
     NetworkSquadSnapshot[]? Squads,
     int OnlineMembers,
     int TotalMembers,
-    DateTimeOffset LastUpdated);
+    DateTimeOffset LastUpdated,
+    string? OwnerAccount = null);
 
 public sealed record NetworkSquadSnapshot(
     string Name,
     string? Commander,
     string? Type,
     string? Description);
+
+public sealed record AuthRequest(
+    string UserName,
+    string Password,
+    string? GameName,
+    string? Email = null,
+    string? VerificationCode = null,
+    string? Callsign = null);
+
+public sealed record AuthResponse(
+    string UserName,
+    string? Email,
+    string? Callsign,
+    string? GameName,
+    string Token);
+
+public sealed record EmailVerificationRequest(
+    string Email);
+
+public sealed record FleetDisbandRequest(
+    string FleetCode,
+    string Password);
+
+public sealed record LocalFleetState(
+    bool HasFleet,
+    string? FleetName,
+    string? FleetCode,
+    string? FleetChiefCommander,
+    string? FleetDeputyCommander,
+    string? FleetDescription,
+    string? FleetType,
+    string? FleetJoinPolicy,
+    string? FleetActiveTime,
+    string? FleetLogoPath,
+    string? FleetNoticeTitle,
+    string? FleetNoticeContent,
+    string? FleetCurrentTaskTitle,
+    string? FleetCurrentTaskBrief,
+    string? FleetCurrentTaskParticipants,
+    string? FleetCurrentTaskRally,
+    string? FleetCurrentTaskShip,
+    bool FleetCurrentTaskEmailCall,
+    DateTime? FleetCurrentTaskTime,
+    string? FleetCurrentTaskHistoryKey,
+    int FleetCurrentTaskNoticeRevision,
+    LocalFleetTaskHistory[]? TaskHistory,
+    LocalSquadState[]? Squads,
+    string? JoinedSquadName,
+    LocalFleetActionPlan[]? ActionPlans,
+    string[]? JoinedActionPlanIds);
+
+public sealed record LocalFleetTaskHistory(
+    string Key,
+    string Title,
+    string Brief,
+    string Status,
+    string Participants,
+    string Rally,
+    string RequiredShip,
+    string PublishedAtText);
+
+public sealed record LocalSquadState(
+    string Name,
+    string Icon,
+    string Commander,
+    string Mission,
+    string RallyPoint,
+    string Description,
+    string Type,
+    string? EmblemPath);
+
+public sealed record LocalFleetActionPlan(
+    string Id,
+    string Title,
+    string Content,
+    DateTime StartTime,
+    bool NotifyMembers,
+    ActionPlanParticipantRow[]? Participants);
 
 public sealed class ImagePathConverter : IValueConverter
 {
@@ -107,6 +188,10 @@ public partial class MainWindow : Window
     private const uint ModShift = 0x0004;
     private const uint ModWin = 0x0008;
     private const uint ModNoRepeat = 0x4000;
+    private const string OverlayPresetCombat = "combat";
+    private const string OverlayPresetCompact = "compact";
+    private const string OverlayPresetCommand = "command";
+    private const string OverlayPresetCustom = "custom";
 
     private readonly RegexLogEventParser _parser = new();
     private readonly FleetState _fleetState = new();
@@ -114,7 +199,12 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SquadRow> _squads = [];
     private readonly ObservableCollection<SquadMemberStatusRow> _mySquadMembers = [];
     private readonly ObservableCollection<NetworkFleetCard> _networkFleets = [];
+    private readonly ObservableCollection<OwnedShipRecord> _ownedShips = [];
+    private readonly ObservableCollection<FleetShipInventoryRow> _fleetShipInventory = [];
+    private readonly ObservableCollection<FleetTaskHistoryRow> _fleetTaskHistory = [];
+    private readonly ObservableCollection<FleetActionPlanRow> _fleetActionPlans = [];
     private readonly Dictionary<string, NetworkPlayerSnapshot> _networkSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _joinedActionPlanIds = new(StringComparer.OrdinalIgnoreCase);
     private SquadRow? _selectedSquad;
     private SquadRow? _joinedSquad;
     private readonly GridViewColumn PlayerNameColumn = new();
@@ -129,6 +219,8 @@ public partial class MainWindow : Window
     private string? _logPath;
     private string? _localPlayer;
     private string? _localPlayerId;
+    private string? _accountName;
+    private string? _authToken;
     private string? _avatarPath;
     private string? _fleetLogoPath;
     private string _fleetName = "No Fleet";
@@ -149,10 +241,13 @@ public partial class MainWindow : Window
     private string _fleetCurrentTaskShip = "";
     private bool _fleetCurrentTaskEmailCall;
     private DateTime? _fleetCurrentTaskTime;
+    private string _fleetCurrentTaskHistoryKey = "";
+    private int _fleetCurrentTaskNoticeRevision;
     private string _fleetActionTitle = "";
     private string _fleetActionContent = "";
     private DateTime? _fleetActionStartTime;
     private bool _fleetActionNotifyMembers;
+    private string _selectedActionPlanId = "";
     private bool _joinActionNotifyMe;
     private string? _callsign;
     private OverlayWindow? _overlayWindow;
@@ -161,9 +256,12 @@ public partial class MainWindow : Window
     private bool _isOverlayResize;
     private System.Windows.Point _lastOverlayEditorPoint;
     private OverlayDisplaySettings _overlaySettings = OverlayDisplaySettings.Default;
+    private string _activeOverlayPreset = OverlayPresetCombat;
     private string _language = "zh";
     private bool _isGameProcessRunning;
     private bool _isLoadingSettings;
+    private bool _startupLoginPromptShown;
+    private bool _isLoginDialogOpen;
     private HwndSource? _hotkeySource;
     private bool _hotkeyRegistered;
     private bool _hasFleet;
@@ -179,27 +277,55 @@ public partial class MainWindow : Window
         SquadSelectionList.ItemsSource = _squads;
         MySquadMembersList.ItemsSource = _mySquadMembers;
         FindFleetResults.ItemsSource = _networkFleets;
+        OwnedShipsList.ItemsSource = _ownedShips;
+        FleetShipInventoryList.ItemsSource = _fleetShipInventory;
+        FleetShipDatabaseList.ItemsSource = _fleetShipInventory;
+        FleetTaskHistoryList.ItemsSource = _fleetTaskHistory;
+        FleetActionPlanList.ItemsSource = _fleetActionPlans;
 
         _isLoadingSettings = true;
         var config = DesktopAppConfig.Load();
         _logPath = config.LogPath;
         _localPlayer = config.PlayerName;
         _localPlayerId = config.PlayerId;
+        _accountName = config.AccountName;
+        _authToken = config.AuthToken;
         _avatarPath = config.AvatarPath;
         _callsign = config.Callsign;
+        if (string.IsNullOrWhiteSpace(_authToken))
+        {
+            _callsign = null;
+        }
         _language = "zh";
-        _overlaySettings = OverlayDisplaySettings.Parse(DesktopAppConfig.LoadOverlaySettings() ?? config.OverlaySettings);
-        LoadOverlayLayout(DesktopAppConfig.LoadOverlayLayout() ?? config.OverlayLayout);
+        _activeOverlayPreset = NormalizeOverlayPreset(DesktopAppConfig.LoadActiveOverlayPreset());
+        _overlaySettings = OverlayDisplaySettings.Parse(
+            DesktopAppConfig.LoadOverlayPresetSettings(_activeOverlayPreset) ??
+            DesktopAppConfig.LoadOverlaySettings() ??
+            config.OverlaySettings);
+        LoadOverlayLayout(
+            DesktopAppConfig.LoadOverlayPresetLayout(_activeOverlayPreset) ??
+            DesktopAppConfig.LoadOverlayLayout() ??
+            config.OverlayLayout);
         ApplyOverlaySettingsToControls();
         ApplyLanguageToControls();
         OverlayHotkeyBox.Text = string.IsNullOrWhiteSpace(config.OverlayHotkey)
             ? "Ctrl+Shift+O"
             : config.OverlayHotkey;
+        NetworkServerUrlBox.Text = string.IsNullOrWhiteSpace(config.NetworkServerUrl)
+            ? "http://198.13.49.128:5058"
+            : config.NetworkServerUrl;
+        NetworkServerKeyBox.Password = config.NetworkServerKey ?? "";
         CallsignBox.Text = _callsign ?? "";
+        LoadFleetState(config.FleetStateJson);
+        RefreshAccountPanel();
         RenderCachedIdentity();
         LoadAvatarPreview();
+        LoadOwnedShips();
         _isLoadingSettings = false;
 
+        RefreshFleetHeader();
+        RenderSquads();
+        RenderMySquad();
         UpdateFleetEntryPanels();
         Loaded += (_, _) =>
         {
@@ -208,6 +334,8 @@ public partial class MainWindow : Window
             {
                 StartWatching(_logPath);
             }
+
+            _ = InitializeLoginAndNetworkAsync();
         };
         _gameProcessTimer.Tick += (_, _) => UpdateLocalOnlineStateFromGameProcess();
         _gameProcessTimer.Start();
@@ -253,10 +381,87 @@ public partial class MainWindow : Window
         SetActiveNav(PersonalNavButton);
     }
 
+    private void BrandLogo_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        MainTabs.SelectedItem = SupportTab;
+        SetActiveNav(null);
+    }
+
+    private void FeedbackButton_Click(object sender, RoutedEventArgs e)
+    {
+        MainTabs.SelectedItem = SupportTab;
+        SetActiveNav(null);
+    }
+
     private void NetworkTestNav_Click(object sender, RoutedEventArgs e)
     {
         MainTabs.SelectedItem = MonitorTab;
         SetActiveNav(null);
+    }
+
+    private bool IsLoggedIn => !string.IsNullOrWhiteSpace(_authToken);
+
+    private bool EnsureLoggedIn(string message)
+    {
+        if (IsLoggedIn)
+        {
+            return true;
+        }
+
+        LoginStatusText.Text = message;
+        NetworkStatusText.Text = "浏览模式：请先登录";
+        MainTabs.SelectedItem = PersonalTab;
+        SetActiveNav(PersonalNavButton);
+        _ = ShowLoginDialogAsync();
+        return false;
+    }
+
+    private void RefreshAccountPanel()
+    {
+        if (AccountNameText is null)
+        {
+            return;
+        }
+
+        if (IsLoggedIn)
+        {
+            AccountNameText.Text = _accountName ?? "已登录";
+            AccountModeText.Text = "已连接星海舰桥服务器，可同步舰队与玩家状态";
+            LoginButton.Content = "切换账号";
+            LogoutButton.IsEnabled = true;
+            LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
+                ? "已登录"
+                : $"已登录：{_accountName}";
+            CallsignBox.IsReadOnly = true;
+            CallsignBox.IsEnabled = true;
+            CallsignBox.Text = _callsign ?? "";
+            ChooseAvatarButton.IsEnabled = true;
+            OpenHangarReaderButton.IsEnabled = true;
+            ImportHangarButton.IsEnabled = true;
+            ClearShipDatabaseButton.IsEnabled = true;
+            RenderCachedIdentity();
+            LoadAvatarPreview();
+            LoadOwnedShips();
+            return;
+        }
+
+        AccountNameText.Text = "访客模式";
+        AccountModeText.Text = "只能浏览，无法同步或管理舰队";
+        LoginButton.Content = "登录 / 注册";
+        LogoutButton.IsEnabled = false;
+        LoginStatusText.Text = "未登录";
+        CallsignBox.IsReadOnly = true;
+        CallsignBox.IsEnabled = false;
+        CallsignBox.Text = "";
+        GameNameText.Text = "请登录后查看";
+        PlayerIdText.Text = "请登录后查看";
+        ProfileStatusText.Text = "浏览模式";
+        ChooseAvatarButton.IsEnabled = false;
+        OpenHangarReaderButton.IsEnabled = false;
+        ImportHangarButton.IsEnabled = false;
+        ClearShipDatabaseButton.IsEnabled = false;
+        LoadAvatarPreview();
+        LoadOwnedShips();
     }
 
     private void NavigateToMyFleet()
@@ -275,6 +480,11 @@ public partial class MainWindow : Window
 
     private void FleetCreateButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("创建舰队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         _isCreatingFleet = true;
         MainTabs.SelectedItem = FleetTab;
         SetActiveNav(MyFleetNavButton);
@@ -290,6 +500,11 @@ public partial class MainWindow : Window
 
     private void CreateFleetSubmit_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("创建舰队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         if (!ValidateCreateFleetForm())
         {
             return;
@@ -308,6 +523,7 @@ public partial class MainWindow : Window
         LocalFleetText.Text = $"{CreateFleetNameBox.Text.Trim()} [{CreateFleetCodeBox.Text.Trim()}]";
         RefreshFleetHeader();
         UpdateFleetEntryPanels();
+        SaveCurrentConfig();
         _ = PushFleetDirectoryAsync(silent: true);
         _ = PushLocalSnapshotAsync(silent: true);
     }
@@ -527,12 +743,16 @@ public partial class MainWindow : Window
         {
             _localPlayer = fleetEvent.Player;
             _localPlayerId = fleetEvent.PlayerId;
-            GameNameText.Text = _localPlayer;
-            PlayerIdText.Text = string.IsNullOrWhiteSpace(_localPlayerId)
-                ? "Unknown"
-                : _localPlayerId;
-            ProfileStatusText.Text = "Online";
+            if (IsLoggedIn)
+            {
+                GameNameText.Text = _localPlayer;
+                PlayerIdText.Text = string.IsNullOrWhiteSpace(_localPlayerId)
+                    ? "Unknown"
+                    : _localPlayerId;
+                ProfileStatusText.Text = "Online";
+            }
             SaveCurrentConfig();
+            LoadOwnedShips();
         }
 
         _fleetState.Apply(fleetEvent);
@@ -598,19 +818,16 @@ public partial class MainWindow : Window
 
         TotalMembersText.Text = _players.Count.ToString();
         OnlineMembersText.Text = _players.Count(player => player.Status == "Online").ToString();
-        FleetShipCountText.Text = _players
-            .Select(player => player.Ship)
-            .Where(ship => !string.IsNullOrWhiteSpace(ship) &&
-                           !ship.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count()
-            .ToString();
+        RefreshFleetShipInventory();
         RefreshFleetHeader();
         RenderSquads();
         RenderMySquad();
         RefreshOverlayWindow();
-        _ = PushFleetDirectoryAsync(silent: true);
-        _ = PushLocalSnapshotAsync(silent: true);
+        if (IsLoggedIn)
+        {
+            _ = PushFleetDirectoryAsync(silent: true);
+            _ = PushLocalSnapshotAsync(silent: true);
+        }
 
         var local = _players.FirstOrDefault(player =>
             player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
@@ -748,8 +965,30 @@ public partial class MainWindow : Window
         await TestNetworkAsync();
     }
 
+    private async void LoginButton_Click(object sender, RoutedEventArgs e)
+    {
+        await ShowLoginDialogAsync();
+    }
+
+    private void LogoutButton_Click(object sender, RoutedEventArgs e)
+    {
+        _authToken = null;
+        _accountName = null;
+        _callsign = null;
+        NetworkAutoSyncCheck.IsChecked = false;
+        _networkSyncTimer.Stop();
+        SaveCurrentConfig();
+        RefreshAccountPanel();
+        LoginStatusText.Text = "已退出登录，当前为浏览模式";
+    }
+
     private async void NetworkPushButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("上传本机状态需要先登录。"))
+        {
+            return;
+        }
+
         await PushFleetDirectoryAsync();
         await PushLocalSnapshotAsync();
     }
@@ -764,6 +1003,12 @@ public partial class MainWindow : Window
     {
         if (NetworkAutoSyncCheck.IsChecked == true)
         {
+            if (!EnsureLoggedIn("自动同步需要先登录。"))
+            {
+                NetworkAutoSyncCheck.IsChecked = false;
+                return;
+            }
+
             _networkSyncTimer.Start();
             NetworkStatusText.Text = "自动同步已开启";
             return;
@@ -775,7 +1020,7 @@ public partial class MainWindow : Window
 
     private async Task NetworkAutoSyncAsync()
     {
-        if (NetworkAutoSyncCheck.IsChecked != true)
+        if (NetworkAutoSyncCheck.IsChecked != true || !IsLoggedIn)
         {
             return;
         }
@@ -786,25 +1031,202 @@ public partial class MainWindow : Window
         await PullNetworkSnapshotsAsync(silent: true);
     }
 
-    private async Task TestNetworkAsync()
+    private async Task InitializeLoginAndNetworkAsync()
+    {
+        if (IsLoggedIn)
+        {
+            await AutoConnectNetworkAsync();
+            return;
+        }
+
+        if (_startupLoginPromptShown)
+        {
+            return;
+        }
+
+        _startupLoginPromptShown = true;
+        await ShowLoginDialogAsync();
+    }
+
+    private async Task AutoConnectNetworkAsync()
+    {
+        if (!IsLoggedIn && string.IsNullOrWhiteSpace(NetworkServerKeyBox.Password))
+        {
+            LoginStatusText.Text = "未登录";
+            RefreshAccountPanel();
+            return;
+        }
+
+        await TestNetworkAsync(silent: true);
+        NetworkAutoSyncCheck.IsChecked = true;
+        _networkSyncTimer.Start();
+        LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
+            ? "已连接服务器"
+            : $"已登录：{_accountName}";
+        RefreshAccountPanel();
+    }
+
+    private async Task ShowLoginDialogAsync()
+    {
+        if (_isLoginDialogOpen)
+        {
+            return;
+        }
+
+        _isLoginDialogOpen = true;
+        var dialog = new LoginWindow(_accountName) { Owner = this };
+        dialog.SendVerificationCodeAsync = RequestVerificationCodeAsync;
+        try
+        {
+            var result = dialog.ShowDialog();
+            if (result != true)
+            {
+                RefreshAccountPanel();
+                return;
+            }
+
+            if (dialog.IsSkipped)
+            {
+                LoginStatusText.Text = "已进入浏览模式";
+                RefreshAccountPanel();
+                return;
+            }
+
+            var path = dialog.IsRegisterMode ? "api/auth/register" : "api/auth/login";
+            var actionName = dialog.IsRegisterMode ? "注册" : "登录";
+            await AuthenticateAsync(
+                path,
+                actionName,
+                dialog.IsRegisterMode ? dialog.RegisterEmail : dialog.LoginEmail,
+                dialog.IsRegisterMode ? dialog.RegisterPassword : dialog.LoginPassword,
+                dialog.IsRegisterMode ? dialog.RegisterEmail : dialog.LoginEmail,
+                dialog.IsRegisterMode ? dialog.RegisterVerificationCode : null,
+                dialog.IsRegisterMode ? dialog.RegisterCallsign : null);
+        }
+        finally
+        {
+            _isLoginDialogOpen = false;
+        }
+    }
+
+    private async Task<string> RequestVerificationCodeAsync(string email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return "请输入邮箱地址。";
+        }
+
+        try
+        {
+            var request = new EmailVerificationRequest(email.Trim());
+            var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri("api/auth/send-code"), request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                return $"发送失败：{error}";
+            }
+
+            return "验证码已发送，10 分钟内有效。";
+        }
+        catch (Exception ex)
+        {
+            return $"发送失败：{ex.Message}";
+        }
+    }
+
+    private async Task AuthenticateAsync(
+        string path,
+        string actionName,
+        string email,
+        string password,
+        string? authEmail,
+        string? verificationCode,
+        string? callsign)
+    {
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
+        {
+            LoginStatusText.Text = "请输入登录邮箱和密码";
+            await ShowLoginDialogAsync();
+            return;
+        }
+
+        if (path.EndsWith("register", StringComparison.OrdinalIgnoreCase) &&
+            (string.IsNullOrWhiteSpace(authEmail) ||
+             string.IsNullOrWhiteSpace(verificationCode) ||
+             string.IsNullOrWhiteSpace(callsign)))
+        {
+            LoginStatusText.Text = "注册需要登录邮箱、呼号和验证码";
+            await ShowLoginDialogAsync();
+            return;
+        }
+
+        try
+        {
+            var request = new AuthRequest(email.Trim(), password, _localPlayer, authEmail?.Trim(), verificationCode?.Trim(), callsign?.Trim());
+            var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri(path), request);
+            response.EnsureSuccessStatusCode();
+            var auth = await response.Content.ReadFromJsonAsync<AuthResponse>();
+            if (auth is null || string.IsNullOrWhiteSpace(auth.Token))
+            {
+                LoginStatusText.Text = $"{actionName}失败：服务器响应无效";
+                return;
+            }
+
+            _accountName = auth.Email ?? auth.UserName;
+            _authToken = auth.Token;
+            _callsign = auth.Callsign;
+            CallsignBox.Text = _callsign ?? "";
+            LoginStatusText.Text = $"{actionName}成功：{_accountName}";
+            NetworkStatusText.Text = "已登录并连接服务器";
+            SaveCurrentConfig();
+            RefreshAccountPanel();
+            NetworkAutoSyncCheck.IsChecked = true;
+            _networkSyncTimer.Start();
+            await PullNetworkFleetsAsync(silent: true);
+            await PushLocalSnapshotAsync(silent: true);
+        }
+        catch (Exception ex)
+        {
+            LoginStatusText.Text = $"{actionName}失败：{ex.Message}";
+            NetworkStatusText.Text = $"{actionName}失败";
+        }
+    }
+
+    private async Task TestNetworkAsync(bool silent = false)
     {
         try
         {
             var response = await _networkClient.GetAsync(BuildNetworkUri("health"));
             response.EnsureSuccessStatusCode();
             NetworkStatusText.Text = "连接成功";
-            AppendOutput($"NETWORK | connected={NetworkServerUrlBox.Text.Trim()}");
+            if (!silent)
+            {
+                AppendOutput($"NETWORK | connected={NetworkServerUrlBox.Text.Trim()}");
+            }
             await PullNetworkFleetsAsync(silent: true);
         }
         catch (Exception ex)
         {
             NetworkStatusText.Text = $"连接失败：{ex.Message}";
-            AppendOutput($"NETWORK | connect failed={ex.Message}");
+            if (!silent)
+            {
+                AppendOutput($"NETWORK | connect failed={ex.Message}");
+            }
         }
     }
 
     private async Task PushLocalSnapshotAsync(bool silent = false)
     {
+        if (!IsLoggedIn)
+        {
+            if (!silent)
+            {
+                NetworkStatusText.Text = "浏览模式：登录后才能上传状态";
+            }
+
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_localPlayer))
         {
             NetworkStatusText.Text = "需要先从日志识别玩家名";
@@ -826,7 +1248,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri("api/players"), snapshot);
+            var response = await PostNetworkJsonAsync("api/players", snapshot);
             response.EnsureSuccessStatusCode();
             await PushFleetDirectoryAsync(silent: true);
             NetworkStatusText.Text = $"已上传：{snapshot.Name}";
@@ -874,6 +1296,16 @@ public partial class MainWindow : Window
 
     private async Task PushFleetDirectoryAsync(bool silent = false)
     {
+        if (!IsLoggedIn)
+        {
+            if (!silent)
+            {
+                NetworkStatusText.Text = "浏览模式：登录后才能发布舰队";
+            }
+
+            return;
+        }
+
         if (!_hasFleet)
         {
             return;
@@ -882,7 +1314,7 @@ public partial class MainWindow : Window
         var snapshot = BuildLocalFleetSnapshot();
         try
         {
-            var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri("api/fleets"), snapshot);
+            var response = await PostNetworkJsonAsync("api/fleets", snapshot);
             response.EnsureSuccessStatusCode();
             if (!silent)
             {
@@ -1036,6 +1468,25 @@ public partial class MainWindow : Window
         return new Uri(new Uri(baseUrl), path);
     }
 
+    private Task<HttpResponseMessage> PostNetworkJsonAsync<T>(string path, T payload)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, BuildNetworkUri(path))
+        {
+            Content = JsonContent.Create(payload)
+        };
+        var key = NetworkServerKeyBox.Password.Trim();
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            request.Headers.Add("X-StarBridge-Key", key);
+        }
+        if (!string.IsNullOrWhiteSpace(_authToken))
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _authToken);
+        }
+
+        return _networkClient.SendAsync(request);
+    }
+
     private NetworkFleetSnapshot BuildLocalFleetSnapshot()
     {
         var squads = _squads
@@ -1058,7 +1509,8 @@ public partial class MainWindow : Window
             squads,
             _players.Count(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase)),
             Math.Max(1, _players.Count),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            _accountName);
     }
 
     private async void RefreshFleetDirectory_Click(object sender, RoutedEventArgs e)
@@ -1069,6 +1521,11 @@ public partial class MainWindow : Window
 
     private async void JoinNetworkFleet_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("加入舰队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         if ((sender as FrameworkElement)?.Tag is not NetworkFleetCard card)
         {
             return;
@@ -1120,6 +1577,90 @@ public partial class MainWindow : Window
         RefreshFleetHeader();
         RenderSquads();
         RenderMySquad();
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+    }
+
+    private async void DisbandFleetButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("解散舰队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (!_hasFleet || string.IsNullOrWhiteSpace(_fleetCode))
+        {
+            DisbandFleetStatusText.Text = "当前没有可解散的舰队。";
+            return;
+        }
+
+        var password = DisbandFleetPasswordBox.Password;
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            DisbandFleetStatusText.Text = "请输入账号密码后再解散舰队。";
+            return;
+        }
+
+        try
+        {
+            var request = new FleetDisbandRequest(_fleetCode, password);
+            var response = await PostNetworkJsonAsync("api/fleets/disband", request);
+            response.EnsureSuccessStatusCode();
+
+            ClearFleetState();
+            DisbandFleetPasswordBox.Password = "";
+            DisbandFleetStatusText.Text = "舰队已解散。";
+            NetworkStatusText.Text = "舰队已从服务器移除";
+            SaveCurrentConfig();
+            await PullNetworkSnapshotsAsync(silent: true);
+        }
+        catch (Exception ex)
+        {
+            DisbandFleetStatusText.Text = $"解散失败：{ex.Message}";
+        }
+    }
+
+    private void ClearFleetState()
+    {
+        _hasFleet = false;
+        _isCreatingFleet = false;
+        _fleetName = "No Fleet";
+        _fleetCode = "N/A";
+        _fleetChiefCommander = "Unassigned";
+        _fleetDeputyCommander = "Unassigned";
+        _fleetDescription = "No fleet description.";
+        _fleetType = "Combat";
+        _fleetJoinPolicy = "Open";
+        _fleetActiveTime = "20:00 - 23:59 UTC+8";
+        _fleetLogoPath = null;
+        _fleetNoticeTitle = "";
+        _fleetNoticeContent = "";
+        _fleetCurrentTaskTitle = "";
+        _fleetCurrentTaskBrief = "";
+        _fleetCurrentTaskParticipants = "";
+        _fleetCurrentTaskRally = "";
+        _fleetCurrentTaskShip = "";
+        _fleetCurrentTaskEmailCall = false;
+        _fleetCurrentTaskTime = null;
+        _fleetCurrentTaskHistoryKey = "";
+        _fleetCurrentTaskNoticeRevision = 0;
+        _fleetActionTitle = "";
+        _fleetActionContent = "";
+        _fleetActionStartTime = null;
+        _fleetActionNotifyMembers = false;
+        _selectedActionPlanId = "";
+        _joinActionNotifyMe = false;
+        _squads.Clear();
+        _fleetTaskHistory.Clear();
+        _fleetActionPlans.Clear();
+        _joinedActionPlanIds.Clear();
+        _joinedSquad = null;
+        _selectedSquad = null;
+        LocalFleetText.Text = "未加入舰队";
+        RefreshFleetHeader();
+        UpdateFleetEntryPanels();
+        RenderSquads();
+        RenderMySquad();
         RefreshOverlayWindow();
     }
 
@@ -1130,6 +1671,14 @@ public partial class MainWindow : Window
 
     private void RenderCachedIdentity()
     {
+        if (!IsLoggedIn)
+        {
+            GameNameText.Text = "请登录后查看";
+            PlayerIdText.Text = "请登录后查看";
+            ProfileStatusText.Text = "浏览模式";
+            return;
+        }
+
         if (!string.IsNullOrWhiteSpace(_logPath))
         {
             LogPathBox.Text = _logPath;
@@ -1154,6 +1703,7 @@ public partial class MainWindow : Window
     {
         var overlaySettings = _overlaySettings.Serialize();
         var overlayLayout = SerializeOverlayLayout();
+        var fleetStateJson = SerializeFleetState();
         DesktopAppConfig.Save(new DesktopAppConfig(
             _logPath,
             _localPlayer,
@@ -1163,9 +1713,295 @@ public partial class MainWindow : Window
             overlayLayout,
             _callsign,
             overlaySettings,
-            _language));
+            _language,
+            NetworkServerUrlBox.Text.Trim(),
+            NetworkServerKeyBox.Password,
+            _accountName,
+            _authToken,
+            fleetStateJson));
         DesktopAppConfig.SaveOverlaySettings(overlaySettings);
         DesktopAppConfig.SaveOverlayLayout(overlayLayout);
+        DesktopAppConfig.SaveActiveOverlayPreset(_activeOverlayPreset);
+        DesktopAppConfig.SaveOverlayPresetSettings(_activeOverlayPreset, overlaySettings);
+        DesktopAppConfig.SaveOverlayPresetLayout(_activeOverlayPreset, overlayLayout);
+    }
+
+    private string SerializeFleetState()
+    {
+        var cache = new LocalFleetState(
+            _hasFleet,
+            _fleetName,
+            _fleetCode,
+            _fleetChiefCommander,
+            _fleetDeputyCommander,
+            _fleetDescription,
+            _fleetType,
+            _fleetJoinPolicy,
+            _fleetActiveTime,
+            _fleetLogoPath,
+            _fleetNoticeTitle,
+            _fleetNoticeContent,
+            _fleetCurrentTaskTitle,
+            _fleetCurrentTaskBrief,
+            _fleetCurrentTaskParticipants,
+            _fleetCurrentTaskRally,
+            _fleetCurrentTaskShip,
+            _fleetCurrentTaskEmailCall,
+            _fleetCurrentTaskTime,
+            _fleetCurrentTaskHistoryKey,
+            _fleetCurrentTaskNoticeRevision,
+            _fleetTaskHistory.Select(item => new LocalFleetTaskHistory(
+                item.Key,
+                item.Title,
+                item.Brief,
+                item.Status,
+                item.Participants,
+                item.Rally,
+                item.RequiredShip,
+                item.PublishedAtText)).ToArray(),
+            _squads.Select(squad => new LocalSquadState(
+                squad.Name,
+                squad.Icon,
+                squad.Commander,
+                squad.Mission,
+                squad.RallyPoint,
+                squad.Description,
+                squad.Type,
+                squad.EmblemPath)).ToArray(),
+            _joinedSquad?.Name,
+            _fleetActionPlans.Select(plan => new LocalFleetActionPlan(
+                plan.Id,
+                plan.Title,
+                plan.Content,
+                plan.StartTime,
+                plan.NotifyMembers,
+                plan.Participants.ToArray())).ToArray(),
+            _joinedActionPlanIds.ToArray());
+        return JsonSerializer.Serialize(cache);
+    }
+
+    private void LoadFleetState(string? fleetStateJson)
+    {
+        if (string.IsNullOrWhiteSpace(fleetStateJson))
+        {
+            return;
+        }
+
+        try
+        {
+            var cache = JsonSerializer.Deserialize<LocalFleetState>(fleetStateJson);
+            if (cache is null)
+            {
+                return;
+            }
+
+            _hasFleet = cache.HasFleet;
+            _fleetName = string.IsNullOrWhiteSpace(cache.FleetName) ? "No Fleet" : cache.FleetName;
+            _fleetCode = string.IsNullOrWhiteSpace(cache.FleetCode) ? "N/A" : cache.FleetCode;
+            _fleetChiefCommander = string.IsNullOrWhiteSpace(cache.FleetChiefCommander) ? "Unassigned" : cache.FleetChiefCommander;
+            _fleetDeputyCommander = string.IsNullOrWhiteSpace(cache.FleetDeputyCommander) ? "Unassigned" : cache.FleetDeputyCommander;
+            _fleetDescription = string.IsNullOrWhiteSpace(cache.FleetDescription) ? "No fleet description." : cache.FleetDescription;
+            _fleetType = string.IsNullOrWhiteSpace(cache.FleetType) ? "Combat" : cache.FleetType;
+            _fleetJoinPolicy = string.IsNullOrWhiteSpace(cache.FleetJoinPolicy) ? "Open" : cache.FleetJoinPolicy;
+            _fleetActiveTime = string.IsNullOrWhiteSpace(cache.FleetActiveTime) ? "20:00 - 23:59 UTC+8" : cache.FleetActiveTime;
+            _fleetLogoPath = cache.FleetLogoPath;
+            _fleetNoticeTitle = cache.FleetNoticeTitle ?? "";
+            _fleetNoticeContent = cache.FleetNoticeContent ?? "";
+            _fleetCurrentTaskTitle = cache.FleetCurrentTaskTitle ?? "";
+            _fleetCurrentTaskBrief = cache.FleetCurrentTaskBrief ?? "";
+            _fleetCurrentTaskParticipants = cache.FleetCurrentTaskParticipants ?? "";
+            _fleetCurrentTaskRally = cache.FleetCurrentTaskRally ?? "";
+            _fleetCurrentTaskShip = cache.FleetCurrentTaskShip ?? "";
+            _fleetCurrentTaskEmailCall = cache.FleetCurrentTaskEmailCall;
+            _fleetCurrentTaskTime = cache.FleetCurrentTaskTime;
+            _fleetCurrentTaskHistoryKey = cache.FleetCurrentTaskHistoryKey ?? "";
+            _fleetCurrentTaskNoticeRevision = cache.FleetCurrentTaskNoticeRevision;
+
+            _fleetTaskHistory.Clear();
+            foreach (var item in cache.TaskHistory ?? [])
+            {
+                _fleetTaskHistory.Add(new FleetTaskHistoryRow(
+                    item.Key,
+                    item.Title,
+                    item.Brief,
+                    item.Status,
+                    item.Participants,
+                    item.Rally,
+                    item.RequiredShip,
+                    item.PublishedAtText));
+            }
+
+            _squads.Clear();
+            foreach (var squad in cache.Squads ?? [])
+            {
+                _squads.Add(new SquadRow
+                {
+                    Name = squad.Name,
+                    Icon = string.IsNullOrWhiteSpace(squad.Icon) ? GetInitials(squad.Name) : squad.Icon,
+                    Commander = string.IsNullOrWhiteSpace(squad.Commander) ? "Unassigned" : squad.Commander,
+                    Mission = string.IsNullOrWhiteSpace(squad.Mission) ? "Standby" : squad.Mission,
+                    RallyPoint = string.IsNullOrWhiteSpace(squad.RallyPoint) ? "Use Global" : squad.RallyPoint,
+                    Description = string.IsNullOrWhiteSpace(squad.Description) ? "No squad briefing yet." : squad.Description,
+                    Type = string.IsNullOrWhiteSpace(squad.Type) ? "Assault" : squad.Type,
+                    EmblemPath = squad.EmblemPath
+                });
+            }
+
+            _joinedSquad = _squads.FirstOrDefault(squad =>
+                squad.Name.Equals(cache.JoinedSquadName, StringComparison.OrdinalIgnoreCase));
+            _selectedSquad = _joinedSquad ?? _squads.FirstOrDefault();
+            if (SquadSelectionList is not null)
+            {
+                SquadSelectionList.SelectedItem = _selectedSquad;
+            }
+
+            _fleetActionPlans.Clear();
+            foreach (var plan in cache.ActionPlans ?? [])
+            {
+                var row = new FleetActionPlanRow(
+                    plan.Id,
+                    plan.Title,
+                    plan.Content,
+                    plan.StartTime,
+                    plan.NotifyMembers);
+                foreach (var participant in plan.Participants ?? [])
+                {
+                    row.Participants.Add(participant);
+                }
+
+                row.RefreshParticipantSummary();
+                _fleetActionPlans.Add(row);
+            }
+
+            _joinedActionPlanIds.Clear();
+            foreach (var id in cache.JoinedActionPlanIds ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    _joinedActionPlanIds.Add(id);
+                }
+            }
+
+            LocalFleetText.Text = _hasFleet ? $"{_fleetName} [{_fleetCode}]" : "未加入舰队";
+        }
+        catch
+        {
+            // ignore invalid cache and continue with current in-memory defaults
+        }
+    }
+
+    private void LoadOwnedShips()
+    {
+        _ownedShips.Clear();
+        if (!IsLoggedIn)
+        {
+            UpdateShipDatabaseSummary();
+            RefreshFleetShipInventory();
+            return;
+        }
+
+        foreach (var ship in ShipDatabaseStore.Load(GetShipDatabaseOwnerKey()))
+        {
+            _ownedShips.Add(ship);
+        }
+
+        UpdateShipDatabaseSummary();
+        RefreshFleetShipInventory();
+    }
+
+    private void SaveOwnedShips()
+    {
+        ShipDatabaseStore.Save(GetShipDatabaseOwnerKey(), _ownedShips);
+        RefreshFleetShipInventory();
+    }
+
+    private string GetShipDatabaseOwnerKey()
+    {
+        if (!string.IsNullOrWhiteSpace(_accountName))
+        {
+            return $"account:{_accountName}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(_localPlayerId))
+        {
+            return _localPlayerId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            return _localPlayer;
+        }
+
+        return "local";
+    }
+
+    private void UpdateShipDatabaseSummary(int? matchedCodes = null, int? matchedNames = null)
+    {
+        if (!IsLoggedIn)
+        {
+            ShipDatabaseStatusText.Text = "请登录后使用舰船数据库";
+            return;
+        }
+
+        var text = $"已验证舰船：{_ownedShips.Count}";
+        if (matchedCodes is not null || matchedNames is not null)
+        {
+            text += $" / 官网舰船条目 {matchedCodes ?? 0} / 已识别 {matchedNames ?? 0}";
+        }
+
+        ShipDatabaseStatusText.Text = text;
+    }
+
+    private void RefreshFleetShipInventory()
+    {
+        if (FleetShipCountText is not null)
+        {
+            FleetShipCountText.Text = _ownedShips.Count.ToString();
+        }
+
+        if (FleetShipInventoryCountText is null)
+        {
+            return;
+        }
+
+        _fleetShipInventory.Clear();
+
+        var ownerName = string.IsNullOrWhiteSpace(_localPlayer) ? "Unknown" : _localPlayer;
+        var ownerCallsign = string.IsNullOrWhiteSpace(_callsign) ? ownerName : _callsign!;
+        var ownerDisplay = FormatCommanderName(_callsign, _localPlayer, ownerName);
+        var ownerSquad = _joinedSquad?.Name ?? "未加入小队";
+        var index = 1;
+        foreach (var ship in _ownedShips.OrderBy(ship => ship.ImportedAt).ThenBy(ship => ship.DisplayName))
+        {
+            _fleetShipInventory.Add(new FleetShipInventoryRow(
+                index++,
+                ship.DisplayName,
+                ship.Code,
+                ownerDisplay,
+                ownerCallsign,
+                ownerName,
+                ownerSquad,
+                _avatarPath,
+                GetInitials(ownerName),
+                ship.ImportedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+        }
+
+        FleetShipInventoryCountText.Text = $"已上传舰船 / {_fleetShipInventory.Count}";
+        FleetShipInventoryEmptyText.Visibility = _fleetShipInventory.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        FleetShipDatabaseCountText.Text = _fleetShipInventory.Count.ToString();
+        FleetShipDatabaseCapitalText.Text = "待分类";
+        FleetShipDatabaseLargeText.Text = "待分类";
+        FleetShipDatabaseMediumText.Text = "待分类";
+        FleetShipDatabaseSmallText.Text = "待分类";
+        FleetShipDatabaseTopOwnerText.Text = _fleetShipInventory.Count == 0
+            ? "-"
+            : ownerDisplay;
+        FleetShipDatabaseAceText.Text = "待评定";
+        FleetShipDatabaseEmptyText.Visibility = _fleetShipInventory.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -1412,7 +2248,7 @@ public partial class MainWindow : Window
             ? "任务发布"
             : _fleetNoticeTitle;
         var noticeText = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle)
-            ? $"{_fleetCurrentTaskTitle} / {NormalizeOptionalField(_fleetCurrentTaskBrief)}"
+            ? $"{_fleetCurrentTaskTitle} / {NormalizeOptionalField(_fleetCurrentTaskBrief)}{BuildInvisibleNoticeRevision()}"
             : _fleetNoticeContent;
 
         return new OverlayCommandState(
@@ -1422,6 +2258,16 @@ public partial class MainWindow : Window
             _fleetCurrentTaskBrief,
             _fleetCurrentTaskRally,
             _fleetCurrentTaskShip);
+    }
+
+    private string BuildInvisibleNoticeRevision()
+    {
+        if (_fleetCurrentTaskNoticeRevision <= 0)
+        {
+            return "";
+        }
+
+        return new string('\u200B', (_fleetCurrentTaskNoticeRevision % 2) + 1);
     }
 
     private IEnumerable<PlayerRow> GetOverlayPlayers()
@@ -1439,17 +2285,21 @@ public partial class MainWindow : Window
     {
         SaveCurrentConfig();
         RefreshOverlayWindow();
-        AppendOutput("Overlay layout saved.");
+        AppendOutput($"Overlay preset saved: {_activeOverlayPreset}.");
     }
 
     private void ResetOverlayLayout_Click(object sender, RoutedEventArgs e)
     {
         _overlayLayout.Clear();
-        _overlayLayout.AddRange(CreateDefaultOverlayLayout());
+        _overlayLayout.AddRange(CreateDefaultOverlayLayout(_activeOverlayPreset));
+        _overlaySettings = CreateDefaultOverlaySettings(_activeOverlayPreset);
+        _isLoadingSettings = true;
+        ApplyOverlaySettingsToControls();
+        _isLoadingSettings = false;
         RenderOverlayEditor();
         SaveCurrentConfig();
         RefreshOverlayWindow();
-        AppendOutput("Overlay layout reset.");
+        AppendOutput($"Overlay preset reset: {_activeOverlayPreset}.");
     }
 
     private void OverlayEditorCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -1472,7 +2322,8 @@ public partial class MainWindow : Window
             ShowNoticePanelCheck is null ||
             ShowSquadsPanelCheck is null ||
             ShowMissionPanelCheck is null ||
-            ShowMembersPanelCheck is null)
+            ShowMembersPanelCheck is null ||
+            OverlayThemeBox is null)
         {
             return;
         }
@@ -1493,7 +2344,13 @@ public partial class MainWindow : Window
             ShowNoticePanelCheck.IsChecked == true,
             ShowSquadsPanelCheck.IsChecked == true,
             ShowMissionPanelCheck.IsChecked == true,
-            ShowMembersPanelCheck.IsChecked == true);
+            ShowMembersPanelCheck.IsChecked == true,
+            OverlayThemeBox.SelectedIndex switch
+            {
+                1 => OverlayVisualTheme.Anvil,
+                2 => OverlayVisualTheme.Drake,
+                _ => OverlayVisualTheme.Default
+            });
 
         SaveCurrentConfig();
         RefreshOverlayWindow();
@@ -1512,6 +2369,27 @@ public partial class MainWindow : Window
         }
 
         OverlaySetting_Changed(sender, new RoutedEventArgs());
+    }
+
+    private void OverlayThemeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        OverlaySetting_Changed(sender, new RoutedEventArgs());
+    }
+
+    private void OverlayPresetBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isLoadingSettings ||
+            OverlayPresetBox.SelectedItem is not ComboBoxItem { Tag: string preset })
+        {
+            return;
+        }
+
+        LoadOverlayPreset(preset);
     }
 
     private void CallsignBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -1549,6 +2427,11 @@ public partial class MainWindow : Window
 
     private void CreateSquad_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("创建小队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         if (_joinedSquad is not null &&
             _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
         {
@@ -1573,6 +2456,11 @@ public partial class MainWindow : Window
 
     private void CreateSquadConfirm_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("创建小队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         if (_joinedSquad is not null &&
             _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
         {
@@ -1667,6 +2555,11 @@ public partial class MainWindow : Window
 
     private void JoinSquad_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("加入小队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         if (_selectedSquad is null)
         {
             JoinSquadHintText.Text = "请选择一个小队";
@@ -1689,32 +2582,58 @@ public partial class MainWindow : Window
 
     private void OpenPublishTaskButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("发布任务需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         OpenPublishTaskPanel();
     }
 
     private void OpenPublishRallyButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("发布集结点需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         OpenPublishTaskPanel(rallyOnly: true);
     }
 
-    private void OpenPublishTaskPanel(bool rallyOnly = false)
+    private void OpenPublishTaskPanel(bool rallyOnly = false, bool editCurrent = false)
     {
         PublishTaskValidationText.Text = "";
-        PublishTaskObjectiveBox.Text = rallyOnly ? "舰队集结" : "战术打击";
-        PublishTaskBriefBox.Text = rallyOnly
+        PublishTaskObjectiveBox.Text = editCurrent ? _fleetCurrentTaskTitle : rallyOnly ? "舰队集结" : "战术打击";
+        PublishTaskBriefBox.Text = editCurrent ? _fleetCurrentTaskBrief : rallyOnly
             ? "舰队集结，等待进一步指令。"
             : "简要说明任务目标、行动范围或注意事项。";
-        PublishTaskRallyCheck.IsChecked = rallyOnly;
-        PublishTaskRallyBox.Text = "未指定";
-        PublishTaskShipRequiredCheck.IsChecked = false;
-        PublishTaskShipBox.Text = "未指定";
-        PublishTaskEmailCallCheck.IsChecked = false;
+        PublishTaskRallyCheck.IsChecked = editCurrent ? !string.IsNullOrWhiteSpace(_fleetCurrentTaskRally) : rallyOnly;
+        PublishTaskRallyBox.Text = editCurrent ? NormalizeOptionalField(_fleetCurrentTaskRally) : "未指定";
+        PublishTaskShipRequiredCheck.IsChecked = editCurrent && !string.IsNullOrWhiteSpace(_fleetCurrentTaskShip);
+        PublishTaskShipBox.Text = editCurrent ? NormalizeOptionalField(_fleetCurrentTaskShip) : "未指定";
+        PublishTaskEmailCallCheck.IsChecked = editCurrent ? _fleetCurrentTaskEmailCall : false;
 
         PublishTaskSquadList.Items.Clear();
         foreach (var squad in _squads)
         {
             PublishTaskSquadList.Items.Add(squad.Name);
         }
+
+        if (editCurrent && !string.IsNullOrWhiteSpace(_fleetCurrentTaskParticipants))
+        {
+            var selectedSquads = _fleetCurrentTaskParticipants
+                .Split('、', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < PublishTaskSquadList.Items.Count; index++)
+            {
+                if (PublishTaskSquadList.Items[index] is { } item &&
+                    selectedSquads.Contains(item.ToString() ?? ""))
+                {
+                    PublishTaskSquadList.SelectedItems.Add(item);
+                }
+            }
+        }
+
         PublishTaskPanel.Visibility = Visibility.Visible;
     }
 
@@ -1725,6 +2644,11 @@ public partial class MainWindow : Window
 
     private void PublishFleetTaskButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("发布任务需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
         var objective = PublishTaskObjectiveBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(objective))
         {
@@ -1754,11 +2678,160 @@ public partial class MainWindow : Window
         _fleetCurrentTaskShip = shipRequired ? NormalizeOptionalField(ship) : "";
         _fleetCurrentTaskEmailCall = emailCall;
         _fleetCurrentTaskTime = DateTime.Now;
+        _fleetCurrentTaskNoticeRevision++;
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskHistoryKey))
+        {
+            _fleetCurrentTaskHistoryKey = Guid.NewGuid().ToString("N");
+        }
+
+        UpsertCurrentTaskHistory("进行中");
         _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
         PublishTaskPanel.Visibility = Visibility.Collapsed;
         RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
         RefreshOverlayWindow();
         AppendOutput($"Fleet task published: {objective}");
+    }
+
+    private void EditCurrentTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("编辑任务需要先登录。"))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            return;
+        }
+
+        OpenPublishTaskPanel(editCurrent: true);
+    }
+
+    private void CompleteCurrentTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("完成任务需要先登录。"))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            return;
+        }
+
+        UpsertCurrentTaskHistory("已完成");
+        ClearCurrentTask();
+        RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
+        RefreshOverlayWindow();
+    }
+
+    private void DeleteCurrentTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("删除任务需要先登录。"))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            return;
+        }
+
+        UpsertCurrentTaskHistory("已删除");
+        ClearCurrentTask();
+        RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
+        RefreshOverlayWindow();
+    }
+
+    private void RenotifyCurrentTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("再次通知需要先登录。"))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            return;
+        }
+
+        _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
+        _fleetCurrentTaskNoticeRevision++;
+        RefreshFleetInfoPanel();
+        RefreshOverlayWindow();
+        AppendOutput($"Fleet task re-notified: {_fleetCurrentTaskTitle}");
+    }
+
+    private void OpenFleetNoticeEditorButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("编辑舰队公告需要先登录。"))
+        {
+            return;
+        }
+
+        OpenFleetNoticeEditor();
+    }
+
+    private void OpenActionPlanEditorButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("创建行动计划需要先登录。"))
+        {
+            return;
+        }
+
+        OpenActionPlanEditor();
+    }
+
+    private void ClearCurrentTask()
+    {
+        _fleetCurrentTaskTitle = "";
+        _fleetCurrentTaskBrief = "";
+        _fleetCurrentTaskParticipants = "";
+        _fleetCurrentTaskRally = "";
+        _fleetCurrentTaskShip = "";
+        _fleetCurrentTaskEmailCall = false;
+        _fleetCurrentTaskTime = null;
+        _fleetCurrentTaskHistoryKey = "";
+        _fleetCurrentTaskNoticeRevision++;
+    }
+
+    private void UpsertCurrentTaskHistory(string status)
+    {
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_fleetCurrentTaskHistoryKey))
+        {
+            _fleetCurrentTaskHistoryKey = Guid.NewGuid().ToString("N");
+        }
+
+        var row = new FleetTaskHistoryRow(
+            _fleetCurrentTaskHistoryKey,
+            _fleetCurrentTaskTitle,
+            NormalizeOptionalField(_fleetCurrentTaskBrief),
+            status,
+            $"参与范围 / {NormalizeOptionalField(_fleetCurrentTaskParticipants)}",
+            string.IsNullOrWhiteSpace(_fleetCurrentTaskRally) ? "集结点 / 未发布" : $"集结点 / {_fleetCurrentTaskRally}",
+            string.IsNullOrWhiteSpace(_fleetCurrentTaskShip) ? "指定舰船 / 无" : $"指定舰船 / {_fleetCurrentTaskShip}",
+            (_fleetCurrentTaskTime ?? DateTime.Now).ToString("yyyy-MM-dd HH:mm"));
+
+        var existingIndex = _fleetTaskHistory
+            .Select((task, index) => new { task, index })
+            .FirstOrDefault(item => item.task.Key.Equals(_fleetCurrentTaskHistoryKey, StringComparison.OrdinalIgnoreCase))
+            ?.index;
+        if (existingIndex is int index)
+        {
+            _fleetTaskHistory[index] = row;
+        }
+        else
+        {
+            _fleetTaskHistory.Insert(0, row);
+        }
     }
 
     private static string NormalizeOptionalField(string value)
@@ -1812,13 +2885,18 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.2.2";
+            : "0.3.0";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         if (_selectedFleetInfoPanel == FleetInfoPanelKind.ActionPlan)
         {
+            if (!EnsureLoggedIn("编辑行动计划需要先登录。"))
+            {
+                return;
+            }
+
             OpenActionPlanEditor();
         }
         else if (_selectedFleetInfoPanel == FleetInfoPanelKind.CurrentTask)
@@ -1846,6 +2924,11 @@ public partial class MainWindow : Window
 
     private void PublishFleetNoticeButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("发布舰队公告需要先登录。"))
+        {
+            return;
+        }
+
         var title = FleetNoticeTitleBox.Text.Trim();
         var content = FleetNoticeContentBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(title))
@@ -1859,6 +2942,7 @@ public partial class MainWindow : Window
         _selectedFleetInfoPanel = FleetInfoPanelKind.Notice;
         FleetNoticeEditorPanel.Visibility = Visibility.Collapsed;
         RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
     }
 
     private void OpenCurrentTaskDetail()
@@ -1908,6 +2992,11 @@ public partial class MainWindow : Window
 
     private void OpenActionPlanEditor()
     {
+        if (!IsLoggedIn)
+        {
+            return;
+        }
+
         ActionPlanTitleBox.Text = _fleetActionTitle;
         ActionPlanContentBox.Text = _fleetActionContent;
         var start = _fleetActionStartTime ?? DateTime.Now.AddHours(1);
@@ -1925,6 +3014,11 @@ public partial class MainWindow : Window
 
     private void PublishActionPlanButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("发布行动计划需要先登录。"))
+        {
+            return;
+        }
+
         var title = ActionPlanTitleBox.Text.Trim();
         var content = ActionPlanContentBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(title))
@@ -1945,13 +3039,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        _fleetActionTitle = title;
-        _fleetActionContent = content;
-        _fleetActionStartTime = startTime;
-        _fleetActionNotifyMembers = ActionPlanNotifyFleetCheck.IsChecked == true;
+        var plan = new FleetActionPlanRow(
+            Guid.NewGuid().ToString("N"),
+            title,
+            content,
+            startTime,
+            ActionPlanNotifyFleetCheck.IsChecked == true);
+        _fleetActionPlans.Add(plan);
+        SelectFeaturedActionPlan();
         _selectedFleetInfoPanel = FleetInfoPanelKind.ActionPlan;
         ActionPlanEditorPanel.Visibility = Visibility.Collapsed;
         RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
     }
 
     private bool TryReadActionPlanStartTime(out DateTime startTime, out string message)
@@ -1991,6 +3090,11 @@ public partial class MainWindow : Window
 
     private void JoinFleetActionButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("预约行动计划需要先登录。"))
+        {
+            return;
+        }
+
         e.Handled = true;
         JoinActionPlanTitleText.Text = string.IsNullOrWhiteSpace(_fleetActionTitle)
             ? "行动计划"
@@ -2006,11 +3110,43 @@ public partial class MainWindow : Window
 
     private void ConfirmJoinActionPlanButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!EnsureLoggedIn("预约行动计划需要先登录。"))
+        {
+            return;
+        }
+
         _joinActionNotifyMe = JoinActionNotifyCheck.IsChecked == true;
+        JoinSelectedActionPlan();
         JoinActionPlanPanel.Visibility = Visibility.Collapsed;
+        RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
         AppendOutput(_joinActionNotifyMe
             ? "Action joined. Email reminder requested for 5 minutes before start."
             : "Action joined.");
+    }
+
+    private void JoinSelectedActionPlan()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedActionPlanId))
+        {
+            return;
+        }
+
+        var plan = _fleetActionPlans.FirstOrDefault(plan =>
+            plan.Id.Equals(_selectedActionPlanId, StringComparison.OrdinalIgnoreCase));
+        if (plan is null || !_joinedActionPlanIds.Add(plan.Id))
+        {
+            return;
+        }
+
+        var gameName = string.IsNullOrWhiteSpace(_localPlayer) ? "Unknown" : _localPlayer!;
+        var callsign = string.IsNullOrWhiteSpace(_callsign) ? gameName : _callsign!;
+        plan.Participants.Add(new ActionPlanParticipantRow(
+            callsign,
+            gameName,
+            _avatarPath,
+            GetInitials(gameName)));
+        plan.RefreshParticipantSummary();
     }
 
     private void ChooseAvatar_Click(object sender, RoutedEventArgs e)
@@ -2026,6 +3162,88 @@ public partial class MainWindow : Window
         LoadAvatarPreview();
         RenderState();
         AppendOutput("Profile avatar updated.");
+    }
+
+    private void ImportHangarButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("导入舰船数据库需要先登录。"))
+        {
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "选择 RSI 官网机库页面快照",
+            Filter = "Hangar snapshot (*.html;*.htm;*.txt;*.csv)|*.html;*.htm;*.txt;*.csv|All files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        string content;
+        try
+        {
+            content = File.ReadAllText(dialog.FileName);
+        }
+        catch (Exception exception)
+        {
+            ShipDatabaseStatusText.Text = $"读取失败：{exception.Message}";
+            return;
+        }
+
+        var result = HangarShipImporter.ImportOfficialHangarSnapshot(content, _language);
+        _ownedShips.Clear();
+        foreach (var ship in result.Ships)
+        {
+            _ownedShips.Add(ship);
+        }
+
+        SaveOwnedShips();
+        UpdateShipDatabaseSummary(result.MatchedCodes, result.MatchedNames);
+        AppendOutput($"Ship database imported. ships={_ownedShips.Count}, codeMatches={result.MatchedCodes}, nameMatches={result.MatchedNames}");
+    }
+
+    private void OpenHangarReaderButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("读取官网机库需要先登录。"))
+        {
+            return;
+        }
+
+        var reader = new HangarReaderWindow(_language)
+        {
+            Owner = this
+        };
+
+        if (reader.ShowDialog() != true)
+        {
+            return;
+        }
+
+        _ownedShips.Clear();
+        foreach (var ship in reader.ImportedShips)
+        {
+            _ownedShips.Add(ship);
+        }
+
+        SaveOwnedShips();
+        UpdateShipDatabaseSummary(reader.ImportedShips.Count, reader.ImportedShips.Count);
+        AppendOutput($"Ship database imported from WebView2 reader. ships={_ownedShips.Count}");
+    }
+
+    private void ClearShipDatabaseButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("清空舰船数据库需要先登录。"))
+        {
+            return;
+        }
+
+        _ownedShips.Clear();
+        SaveOwnedShips();
+        UpdateShipDatabaseSummary();
+        AppendOutput("Ship database cleared.");
     }
 
     private void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
@@ -2328,20 +3546,97 @@ public partial class MainWindow : Window
         return null;
     }
 
+    private void LoadOverlayPreset(string preset)
+    {
+        _activeOverlayPreset = NormalizeOverlayPreset(preset);
+        _overlaySettings = OverlayDisplaySettings.Parse(
+            DesktopAppConfig.LoadOverlayPresetSettings(_activeOverlayPreset) ??
+            CreateDefaultOverlaySettings(_activeOverlayPreset).Serialize());
+
+        LoadOverlayLayout(
+            DesktopAppConfig.LoadOverlayPresetLayout(_activeOverlayPreset) ??
+            SerializeOverlayLayout(CreateDefaultOverlayLayout(_activeOverlayPreset)));
+
+        _isLoadingSettings = true;
+        ApplyOverlaySettingsToControls();
+        _isLoadingSettings = false;
+        RenderOverlayEditor();
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+        AppendOutput($"Overlay preset loaded: {_activeOverlayPreset}.");
+    }
+
+    private static string NormalizeOverlayPreset(string? preset)
+    {
+        return preset?.Trim().ToLowerInvariant() switch
+        {
+            OverlayPresetCompact => OverlayPresetCompact,
+            OverlayPresetCommand => OverlayPresetCommand,
+            OverlayPresetCustom => OverlayPresetCustom,
+            _ => OverlayPresetCombat
+        };
+    }
+
+    private static OverlayDisplaySettings CreateDefaultOverlaySettings(string preset)
+    {
+        return NormalizeOverlayPreset(preset) switch
+        {
+            OverlayPresetCompact => OverlayDisplaySettings.Default with
+            {
+                HideMissionWhenIdle = true,
+                HideOfflineMembers = true,
+                HideSquadIcons = true,
+                Opacity = 0.78,
+                ShowNotice = true,
+                ShowSquads = true,
+                ShowMission = true,
+                ShowMembers = true
+            },
+            OverlayPresetCommand => OverlayDisplaySettings.Default with
+            {
+                HideMissionWhenIdle = false,
+                HideOfflineMembers = false,
+                HideSquadIcons = false,
+                Opacity = 0.9,
+                ShowNotice = true,
+                ShowSquads = true,
+                ShowMission = true,
+                ShowMembers = true
+            },
+            _ => OverlayDisplaySettings.Default
+        };
+    }
+
     private void LoadOverlayLayout(string? serialized)
     {
         _overlayLayout.Clear();
         var parsed = OverlayLayoutItem.ParseMany(serialized).ToArray();
-        _overlayLayout.AddRange(parsed.Length == 0 ? CreateDefaultOverlayLayout() : parsed);
+        _overlayLayout.AddRange(parsed.Length == 0 ? CreateDefaultOverlayLayout(_activeOverlayPreset) : parsed);
     }
 
     private string SerializeOverlayLayout()
     {
-        return string.Join(";", _overlayLayout.Select(item => item.Serialize()));
+        return SerializeOverlayLayout(_overlayLayout);
+    }
+
+    private static string SerializeOverlayLayout(IEnumerable<OverlayLayoutItem> layout)
+    {
+        return string.Join(";", layout.Select(item => item.Serialize()));
     }
 
     private void ApplyOverlaySettingsToControls()
     {
+        if (OverlayPresetBox is not null)
+        {
+            OverlayPresetBox.SelectedIndex = _activeOverlayPreset switch
+            {
+                OverlayPresetCompact => 1,
+                OverlayPresetCommand => 2,
+                OverlayPresetCustom => 3,
+                _ => 0
+            };
+        }
+
         HideMissionWhenIdleCheck.IsChecked = _overlaySettings.HideMissionWhenIdle;
         HideOfflineMembersCheck.IsChecked = _overlaySettings.HideOfflineMembers;
         HideSquadIconsCheck.IsChecked = _overlaySettings.HideSquadIcons;
@@ -2350,6 +3645,12 @@ public partial class MainWindow : Window
         ShowSquadsPanelCheck.IsChecked = _overlaySettings.ShowSquads;
         ShowMissionPanelCheck.IsChecked = _overlaySettings.ShowMission;
         ShowMembersPanelCheck.IsChecked = _overlaySettings.ShowMembers;
+        OverlayThemeBox.SelectedIndex = _overlaySettings.Theme switch
+        {
+            OverlayVisualTheme.Anvil => 1,
+            OverlayVisualTheme.Drake => 2,
+            _ => 0
+        };
         OverlayOpacitySlider.Value = Math.Clamp(_overlaySettings.Opacity, 0.15, 1.0) * 100.0;
         OverlayOpacityValueText.Text = $"{Math.Round(OverlayOpacitySlider.Value)}%";
         ShowCallsignOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignOnly;
@@ -2387,6 +3688,7 @@ public partial class MainWindow : Window
         MySquadTab.Header = zh ? "我的小队" : "My Squad";
         AllPlayersTab.Header = zh ? "全成员" : "All Players";
         SquadsTab.Header = zh ? "小队" : "Squads";
+        FleetShipDatabaseTab.Header = zh ? "舰船" : "Ships";
         ManageFleetTab.Header = zh ? "管理舰队" : "Manage Fleet";
         OverlayEditTab.Header = zh ? "Overlay 编辑" : "Overlay Edit";
         PersonalTab.Header = zh ? "个人" : "Personal";
@@ -2412,16 +3714,32 @@ public partial class MainWindow : Window
         OverlayEditHintText.Text = zh
             ? "拖拽面板移动位置，拖拽右下角手柄缩放。保存后的布局会应用到全屏 Overlay。"
             : "Drag panels to move. Drag the lower-right handle to resize. Saved layout is applied to fullscreen Overlay.";
+        OverlayPresetLabel.Text = zh ? "Overlay 预设" : "OVERLAY PRESET";
+        OverlayHotkeyLabel.Text = zh ? "Overlay 热键" : "OVERLAY HOTKEY";
+        if (OverlayPresetBox.Items.Count >= 4)
+        {
+            ((ComboBoxItem)OverlayPresetBox.Items[0]).Content = zh ? "战斗" : "Combat";
+            ((ComboBoxItem)OverlayPresetBox.Items[1]).Content = zh ? "精简" : "Compact";
+            ((ComboBoxItem)OverlayPresetBox.Items[2]).Content = zh ? "指挥" : "Command";
+            ((ComboBoxItem)OverlayPresetBox.Items[3]).Content = zh ? "自定义" : "Custom";
+        }
         SaveLayoutButton.Content = zh ? "保存布局" : "Save Layout";
         ResetLayoutButton.Content = zh ? "重置" : "Reset";
         OverlayOptionsLabel.Text = zh ? "OVERLAY 选项" : "OVERLAY OPTIONS";
-        HideMissionWhenIdleCheck.Content = zh ? "无任务时隐藏右侧任务 Overlay" : "No task: hide right mission overlay";
+        HideMissionWhenIdleCheck.Content = zh ? "无任务时隐藏任务 Overlay" : "No task: hide mission overlay";
         HideOfflineMembersCheck.Content = zh ? "隐藏离线小队成员" : "Hide offline squad members";
         HideSquadIconsCheck.Content = zh ? "左侧不显示小队图标" : "Left panel: hide squad icons";
         MemberNameDisplayLabel.Text = zh ? "成员名字显示" : "MEMBER NAME DISPLAY";
         ShowCallsignAndNameRadio.Content = zh ? "显示呼号和游戏名" : "Show callsign and game name";
         ShowCallsignOnlyRadio.Content = zh ? "只显示呼号" : "Only callsign";
         ShowGameNameOnlyRadio.Content = zh ? "只显示游戏名" : "Only game name";
+        OverlayThemeLabel.Text = zh ? "外观风格" : "APPEARANCE";
+        if (OverlayThemeBox.Items.Count >= 3)
+        {
+            ((ComboBoxItem)OverlayThemeBox.Items[0]).Content = zh ? "默认" : "Default";
+            ((ComboBoxItem)OverlayThemeBox.Items[1]).Content = zh ? "铁砧" : "Anvil";
+            ((ComboBoxItem)OverlayThemeBox.Items[2]).Content = zh ? "德雷克" : "Drake";
+        }
         BackgroundModeLabel.Text = zh ? "后台模式" : "BACKGROUND";
         TrayModeCheck.Content = zh ? "窗口最小化时仍然可以显示 Overlay" : "Keep Overlay visible when minimized";
         TrayModeHintText.Text = zh
@@ -2429,12 +3747,25 @@ public partial class MainWindow : Window
             : "When enabled, minimizing the main window will not hide an active Overlay.";
         AvatarPlaceholderText.Text = zh ? "头像" : "AVATAR";
         ChooseAvatarButton.Content = zh ? "选择头像" : "Choose Avatar";
+        FeedbackButton.Content = zh ? "反馈" : "Feedback";
         PlayerNameLabel.Text = zh ? "游戏名" : "Player Name";
         PlayerIdLabel.Text = zh ? "玩家 ID" : "Player ID";
         CallsignLabel.Text = zh ? "呼号" : "Callsign";
         FleetLabel.Text = zh ? "舰队" : "Fleet";
         LocalFleetText.Text = zh ? "本地舰队" : "Local Fleet";
         StatusLabel.Text = zh ? "状态" : "Status";
+        ShipDatabaseTitleText.Text = zh ? "舰船数据库" : "Ship Database";
+        ShipDatabaseHintText.Text = zh
+            ? "仅官网机库读取器或官网快照识别出的飞船计入个人舰船。不会保存 RSI 账号密码。"
+            : "Only ships recognized from the hangar reader or an official snapshot count as personal ships. RSI credentials are never saved.";
+        OpenHangarReaderButton.Content = zh ? "读取官网机库" : "Read Hangar";
+        ImportHangarButton.Content = zh ? "导入快照" : "Import Snapshot";
+        ClearShipDatabaseButton.Content = zh ? "清空舰船库" : "Clear Ships";
+        OwnedShipNameColumn.Header = zh ? "舰船" : "Ship";
+        OwnedShipCodeColumn.Header = zh ? "代码" : "Code";
+        OwnedShipSourceColumn.Header = zh ? "来源" : "Source";
+        OwnedShipImportedAtColumn.Header = zh ? "导入时间" : "Imported";
+        UpdateShipDatabaseSummary();
         RenderOverlayEditor();
     }
 
@@ -2445,9 +3776,18 @@ public partial class MainWindow : Window
 
     private void LoadAvatarPreview()
     {
+        if (!IsLoggedIn)
+        {
+            AvatarImage.Source = null;
+            AvatarPlaceholderText.Text = "请登录";
+            AvatarPlaceholderText.Visibility = Visibility.Visible;
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_avatarPath) || !File.Exists(_avatarPath))
         {
             AvatarImage.Source = null;
+            AvatarPlaceholderText.Text = _language == "zh" ? "头像" : "AVATAR";
             AvatarPlaceholderText.Visibility = Visibility.Visible;
             return;
         }
@@ -2528,6 +3868,7 @@ public partial class MainWindow : Window
             ? $"活动时间 / {_fleetActiveTime}"
             : "活动时间 / 未设置";
         RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
 
         LoadFleetHeaderLogoPreview();
         ManageFleetTab.Visibility = _hasFleet && IsCurrentUserFleetCommander()
@@ -2601,8 +3942,12 @@ public partial class MainWindow : Window
         var hasTask = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle);
         if (!hasTask)
         {
-            FleetActionPlanTitleText.Text = "暂无当前任务";
-            FleetActionPlanSummaryText.Text = "等待舰队指挥发布任务或集结点";
+            FleetActionPlanTitleText.Text = IsCurrentUserFleetCommander()
+                ? "暂无当前任务"
+                : "当前无任务";
+            FleetActionPlanSummaryText.Text = IsCurrentUserFleetCommander()
+                ? "请前往 管理舰队-发布任务 进行任务发布"
+                : "";
             FleetActionPlanTimeText.Text = "";
             JoinFleetActionButton.Visibility = Visibility.Collapsed;
             return;
@@ -2640,6 +3985,7 @@ public partial class MainWindow : Window
 
     private void RefreshActionPlanPanel()
     {
+        SelectFeaturedActionPlan();
         var hasAction = !string.IsNullOrWhiteSpace(_fleetActionTitle);
         if (!hasAction)
         {
@@ -2647,6 +3993,8 @@ public partial class MainWindow : Window
             FleetActionPlanSummaryText.Text = "";
             FleetActionPlanTimeText.Text = "";
             JoinFleetActionButton.Visibility = Visibility.Collapsed;
+            JoinFleetActionButton.Content = "参与";
+            JoinFleetActionButton.IsEnabled = true;
             return;
         }
 
@@ -2656,6 +4004,90 @@ public partial class MainWindow : Window
             ? ""
             : $"开始时间 / {_fleetActionStartTime:yyyy-MM-dd HH:mm}";
         JoinFleetActionButton.Visibility = Visibility.Visible;
+        var joined = _joinedActionPlanIds.Contains(_selectedActionPlanId);
+        JoinFleetActionButton.Content = joined ? "已预约" : "参与";
+        JoinFleetActionButton.IsEnabled = !joined;
+    }
+
+    private void SelectFeaturedActionPlan()
+    {
+        var visiblePlans = GetVisibleActionPlans().ToArray();
+        var now = DateTime.Now;
+        var selected = visiblePlans
+            .Where(plan => plan.StartTime >= now)
+            .OrderBy(plan => plan.StartTime)
+            .FirstOrDefault() ??
+            visiblePlans
+                .OrderByDescending(plan => plan.StartTime)
+                .FirstOrDefault();
+
+        if (selected is null)
+        {
+            _selectedActionPlanId = "";
+            _fleetActionTitle = "";
+            _fleetActionContent = "";
+            _fleetActionStartTime = null;
+            _fleetActionNotifyMembers = false;
+            return;
+        }
+
+        _selectedActionPlanId = selected.Id;
+        _fleetActionTitle = selected.Title;
+        _fleetActionContent = selected.Content;
+        _fleetActionStartTime = selected.StartTime;
+        _fleetActionNotifyMembers = selected.NotifyMembers;
+    }
+
+    private IEnumerable<FleetActionPlanRow> GetVisibleActionPlans()
+    {
+        var now = DateTime.Now;
+        var from = now.AddDays(-2);
+        var to = now.AddDays(7);
+        return _fleetActionPlans
+            .Where(plan => plan.StartTime >= from && plan.StartTime <= to)
+            .OrderBy(plan => plan.StartTime);
+    }
+
+    private void RefreshTaskManagementPanel()
+    {
+        if (ManageCurrentTaskTitleText is null)
+        {
+            return;
+        }
+
+        ManageFleetNoticeTitleText.Text = string.IsNullOrWhiteSpace(_fleetNoticeTitle)
+            ? "暂无舰队公告"
+            : _fleetNoticeTitle;
+        ManageFleetNoticeSummaryText.Text = string.IsNullOrWhiteSpace(_fleetNoticeContent)
+            ? "舰队公告会显示在我的舰队信息栏与 Overlay 通知区域。"
+            : _fleetNoticeContent;
+
+        SelectFeaturedActionPlan();
+        foreach (var plan in _fleetActionPlans)
+        {
+            plan.RefreshParticipantSummary();
+        }
+
+        FleetActionPlansEmptyText.Visibility = GetVisibleActionPlans().Any()
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+
+        var hasTask = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle);
+        ManageCurrentTaskTitleText.Text = hasTask ? _fleetCurrentTaskTitle : "暂无当前任务";
+        ManageCurrentTaskSummaryText.Text = hasTask
+            ? FormatCurrentTaskPreview()
+            : "请前往 管理舰队-发布任务 进行任务发布";
+        ManageCurrentTaskMetaText.Text = hasTask && _fleetCurrentTaskTime is not null
+            ? $"发布时间 / {_fleetCurrentTaskTime:yyyy-MM-dd HH:mm}"
+            : "";
+
+        EditCurrentTaskButton.IsEnabled = hasTask;
+        CompleteCurrentTaskButton.IsEnabled = hasTask;
+        DeleteCurrentTaskButton.IsEnabled = hasTask;
+        RenotifyCurrentTaskButton.IsEnabled = hasTask;
+        FleetTaskHistoryEmptyText.Visibility = _fleetTaskHistory.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private bool IsLocalPlayer(string playerName)
@@ -2833,10 +4265,32 @@ public partial class MainWindow : Window
 
     private static IEnumerable<OverlayLayoutItem> CreateDefaultOverlayLayout()
     {
-        yield return new OverlayLayoutItem("Notice", "FLEET NOTICE", 0.305, 0.01, 0.39, 0.07, Brushes.Yellow);
-        yield return new OverlayLayoutItem("Squads", "FLEET / SQUADS", 0.01, 0.32, 0.16, 0.36, Brushes.DeepSkyBlue);
-        yield return new OverlayLayoutItem("Mission", "MISSION PACKAGE", 0.835, 0.26, 0.16, 0.14, Brushes.Red);
-        yield return new OverlayLayoutItem("Members", "SQUAD MEMBERS", 0.82, 0.56, 0.18, 0.22, Brushes.Gray);
+        return CreateDefaultOverlayLayout(OverlayPresetCombat);
+    }
+
+    private static IEnumerable<OverlayLayoutItem> CreateDefaultOverlayLayout(string preset)
+    {
+        switch (NormalizeOverlayPreset(preset))
+        {
+            case OverlayPresetCompact:
+                yield return new OverlayLayoutItem("Notice", "FLEET NOTICE", 0.34, 0.02, 0.32, 0.055, Brushes.Yellow);
+                yield return new OverlayLayoutItem("Squads", "FLEET / SQUADS", 0.01, 0.36, 0.13, 0.24, Brushes.DeepSkyBlue);
+                yield return new OverlayLayoutItem("Mission", "MISSION PACKAGE", 0.85, 0.30, 0.14, 0.11, Brushes.Red);
+                yield return new OverlayLayoutItem("Members", "SQUAD MEMBERS", 0.84, 0.58, 0.15, 0.18, Brushes.Gray);
+                break;
+            case OverlayPresetCommand:
+                yield return new OverlayLayoutItem("Notice", "FLEET NOTICE", 0.285, 0.01, 0.43, 0.075, Brushes.Yellow);
+                yield return new OverlayLayoutItem("Squads", "FLEET / SQUADS", 0.01, 0.30, 0.18, 0.42, Brushes.DeepSkyBlue);
+                yield return new OverlayLayoutItem("Mission", "MISSION PACKAGE", 0.79, 0.24, 0.20, 0.17, Brushes.Red);
+                yield return new OverlayLayoutItem("Members", "SQUAD MEMBERS", 0.78, 0.54, 0.21, 0.26, Brushes.Gray);
+                break;
+            default:
+                yield return new OverlayLayoutItem("Notice", "FLEET NOTICE", 0.305, 0.01, 0.39, 0.07, Brushes.Yellow);
+                yield return new OverlayLayoutItem("Squads", "FLEET / SQUADS", 0.01, 0.32, 0.16, 0.36, Brushes.DeepSkyBlue);
+                yield return new OverlayLayoutItem("Mission", "MISSION PACKAGE", 0.835, 0.26, 0.16, 0.14, Brushes.Red);
+                yield return new OverlayLayoutItem("Members", "SQUAD MEMBERS", 0.82, 0.56, 0.18, 0.22, Brushes.Gray);
+                break;
+        }
     }
 }
 
@@ -2865,6 +4319,63 @@ public sealed record SquadMemberStatusRow(
     string ShipStatus,
     string Location,
     System.Windows.Media.Brush? NameBrush = null);
+
+public sealed record FleetShipInventoryRow(
+    int Number,
+    string ShipName,
+    string ShipCode,
+    string OwnerDisplay,
+    string OwnerCallsign,
+    string OwnerGameId,
+    string OwnerSquad,
+    string? OwnerAvatarPath,
+    string OwnerInitials,
+    string ImportedAtText);
+
+public sealed record FleetTaskHistoryRow(
+    string Key,
+    string Title,
+    string Brief,
+    string Status,
+    string Participants,
+    string Rally,
+    string RequiredShip,
+    string PublishedAtText);
+
+public sealed class FleetActionPlanRow : INotifyPropertyChanged
+{
+    public FleetActionPlanRow(string id, string title, string content, DateTime startTime, bool notifyMembers)
+    {
+        Id = id;
+        Title = title;
+        Content = content;
+        StartTime = startTime;
+        NotifyMembers = notifyMembers;
+        RefreshParticipantSummary();
+    }
+
+    public string Id { get; }
+    public string Title { get; }
+    public string Content { get; }
+    public DateTime StartTime { get; }
+    public bool NotifyMembers { get; }
+    public ObservableCollection<ActionPlanParticipantRow> Participants { get; } = [];
+    public string StartTimeText => $"行动时间 / {StartTime:yyyy-MM-dd HH:mm}";
+    public string NotifyText => NotifyMembers ? "通知 / 启用" : "通知 / 未启用";
+    public string ParticipantCountText => $"参与 / {Participants.Count}";
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public void RefreshParticipantSummary()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ParticipantCountText)));
+    }
+}
+
+public sealed record ActionPlanParticipantRow(
+    string Callsign,
+    string GameName,
+    string? AvatarPath,
+    string Initials);
 
 public sealed record NetworkFleetCard(
     NetworkFleetSnapshot Snapshot,

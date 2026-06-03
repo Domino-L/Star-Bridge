@@ -11,7 +11,12 @@ internal sealed record DesktopAppConfig(
     string? OverlayLayout,
     string? Callsign,
     string? OverlaySettings,
-    string? Language)
+    string? Language,
+    string? NetworkServerUrl,
+    string? NetworkServerKey,
+    string? AccountName,
+    string? AuthToken,
+    string? FleetStateJson)
 {
     public static readonly string ConfigDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -20,10 +25,12 @@ internal sealed record DesktopAppConfig(
     private static readonly string ConfigPath = Path.Combine(ConfigDirectory, "desktop.config");
     private static readonly string OverlaySettingsPath = Path.Combine(ConfigDirectory, "overlay.settings");
     private static readonly string OverlayLayoutPath = Path.Combine(ConfigDirectory, "overlay.layout");
+    private static readonly string ActiveOverlayPresetPath = Path.Combine(ConfigDirectory, "overlay.active-preset");
     private static readonly string FallbackConfigDirectory = Path.Combine(AppContext.BaseDirectory, "config");
     private static readonly string FallbackConfigPath = Path.Combine(FallbackConfigDirectory, "desktop.config");
     private static readonly string FallbackOverlaySettingsPath = Path.Combine(FallbackConfigDirectory, "overlay.settings");
     private static readonly string FallbackOverlayLayoutPath = Path.Combine(FallbackConfigDirectory, "overlay.layout");
+    private static readonly string FallbackActiveOverlayPresetPath = Path.Combine(FallbackConfigDirectory, "overlay.active-preset");
 
     public static DesktopAppConfig Load()
     {
@@ -33,7 +40,7 @@ internal sealed record DesktopAppConfig(
 
         if (!File.Exists(path))
         {
-            return new DesktopAppConfig(null, null, null, null, null, null, null, null, null);
+            return new DesktopAppConfig(null, null, null, null, null, null, null, null, null, null, null, null, null, null);
         }
 
         string[] lines;
@@ -43,7 +50,7 @@ internal sealed record DesktopAppConfig(
         }
         catch
         {
-            return new DesktopAppConfig(null, null, null, null, null, null, null, null, null);
+            return new DesktopAppConfig(null, null, null, null, null, null, null, null, null, null, null, null, null, null);
         }
 
         return new DesktopAppConfig(
@@ -55,7 +62,12 @@ internal sealed record DesktopAppConfig(
             lines.Length > 5 ? EmptyToNull(lines[5]) : null,
             lines.Length > 6 ? EmptyToNull(lines[6]) : null,
             lines.Length > 7 ? EmptyToNull(lines[7]) : null,
-            lines.Length > 8 ? EmptyToNull(lines[8]) : null);
+            lines.Length > 8 ? EmptyToNull(lines[8]) : null,
+            lines.Length > 9 ? EmptyToNull(lines[9]) : null,
+            lines.Length > 10 ? EmptyToNull(lines[10]) : null,
+            lines.Length > 11 ? EmptyToNull(lines[11]) : null,
+            lines.Length > 12 ? EmptyToNull(lines[12]) : null,
+            lines.Length > 13 ? EmptyToNull(lines[13]) : null);
     }
 
     public static void Save(DesktopAppConfig config)
@@ -70,7 +82,12 @@ internal sealed record DesktopAppConfig(
             config.OverlayLayout ?? "",
             config.Callsign ?? "",
             config.OverlaySettings ?? "",
-            config.Language ?? ""
+            config.Language ?? "",
+            config.NetworkServerUrl ?? "",
+            config.NetworkServerKey ?? "",
+            config.AccountName ?? "",
+            config.AuthToken ?? "",
+            config.FleetStateJson ?? ""
         };
 
         try
@@ -106,9 +123,54 @@ internal sealed record DesktopAppConfig(
         WriteTextWithFallback(OverlayLayoutPath, FallbackOverlayLayoutPath, value);
     }
 
+    public static string? LoadActiveOverlayPreset()
+    {
+        return ReadOptionalText(ActiveOverlayPresetPath) ?? ReadOptionalText(FallbackActiveOverlayPresetPath);
+    }
+
+    public static void SaveActiveOverlayPreset(string value)
+    {
+        WriteTextWithFallback(ActiveOverlayPresetPath, FallbackActiveOverlayPresetPath, value);
+    }
+
+    public static string? LoadOverlayPresetSettings(string preset)
+    {
+        return ReadOptionalText(GetPresetPath(ConfigDirectory, preset, "settings")) ??
+               ReadOptionalText(GetPresetPath(FallbackConfigDirectory, preset, "settings"));
+    }
+
+    public static void SaveOverlayPresetSettings(string preset, string value)
+    {
+        WriteTextWithFallback(
+            GetPresetPath(ConfigDirectory, preset, "settings"),
+            GetPresetPath(FallbackConfigDirectory, preset, "settings"),
+            value);
+    }
+
+    public static string? LoadOverlayPresetLayout(string preset)
+    {
+        return ReadOptionalText(GetPresetPath(ConfigDirectory, preset, "layout")) ??
+               ReadOptionalText(GetPresetPath(FallbackConfigDirectory, preset, "layout"));
+    }
+
+    public static void SaveOverlayPresetLayout(string preset, string value)
+    {
+        WriteTextWithFallback(
+            GetPresetPath(ConfigDirectory, preset, "layout"),
+            GetPresetPath(FallbackConfigDirectory, preset, "layout"),
+            value);
+    }
+
     private static string? EmptyToNull(string value)
     {
         return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string GetPresetPath(string directory, string preset, string kind)
+    {
+        var safePreset = new string(preset.Select(character =>
+            char.IsLetterOrDigit(character) ? character : '-').ToArray()).ToLowerInvariant();
+        return Path.Combine(directory, $"overlay.{safePreset}.{kind}");
     }
 
     private static string? ReadOptionalText(string path)

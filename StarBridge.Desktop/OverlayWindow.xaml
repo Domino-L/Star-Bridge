@@ -14,23 +14,39 @@
         KeyDown="OverlayWindow_KeyDown">
     <Window.Resources>
         <Style x:Key="OverlayPanel" TargetType="Border">
-            <Setter Property="Background" Value="#B0050A11" />
-            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Background" Value="{Binding PanelBackgroundBrush}" />
+            <Setter Property="BorderBrush" Value="{Binding PanelBorderBrush}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="12" />
+            <Setter Property="Padding" Value="10" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
         </Style>
         <Style x:Key="OverlayTitle" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="{Binding TitleBrush}" />
             <Setter Property="FontSize" Value="13" />
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
         <Style x:Key="OverlayText" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="Foreground" Value="{Binding TextBrush}" />
             <Setter Property="FontSize" Value="12" />
         </Style>
         <Style x:Key="OverlayMuted" TargetType="TextBlock" BasedOn="{StaticResource OverlayText}">
-            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+            <Setter Property="Foreground" Value="{Binding MutedBrush}" />
             <Setter Property="FontSize" Value="10" />
+        </Style>
+        <Style x:Key="OverlayCornerPath" TargetType="Path">
+            <Setter Property="Stroke" Value="{Binding TitleBrush}" />
+            <Setter Property="StrokeThickness" Value="1.4" />
+            <Setter Property="Opacity" Value="0.86" />
+            <Setter Property="Width" Value="34" />
+            <Setter Property="Height" Value="22" />
+            <Setter Property="Stretch" Value="None" />
+            <Setter Property="IsHitTestVisible" Value="False" />
+        </Style>
+        <Style x:Key="OverlayScanPath" TargetType="Path">
+            <Setter Property="Stroke" Value="{Binding PanelBorderBrush}" />
+            <Setter Property="StrokeThickness" Value="1" />
+            <Setter Property="Opacity" Value="0.32" />
+            <Setter Property="IsHitTestVisible" Value="False" />
         </Style>
     </Window.Resources>
 
@@ -43,7 +59,7 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="120" />
                 </Grid.ColumnDefinitions>
-                <StackPanel>
+                <StackPanel Margin="10,8,14,8">
                     <TextBlock Text="{Binding FleetNoticeTitle}" Style="{StaticResource OverlayTitle}" />
                     <TextBlock Text="{Binding FleetNotice}" Style="{StaticResource OverlayText}" Margin="0,6,0,0" />
                 </StackPanel>
@@ -51,94 +67,229 @@
                            Text="{Binding NoticeTimerLabel}"
                            HorizontalAlignment="Right"
                            VerticalAlignment="Center"
-                           Foreground="#FFFFF000"
+                           Foreground="{Binding AlertBrush}"
                            FontWeight="SemiBold" />
+                <Path Grid.ColumnSpan="2"
+                      Style="{StaticResource OverlayScanPath}"
+                      Data="M42,0 L150,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Grid.ColumnSpan="2"
+                      Style="{StaticResource OverlayScanPath}"
+                      Data="M0,18 L0,60"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Grid.ColumnSpan="2"
+                      Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,18 L0,5 L5,0 L28,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Grid.ColumnSpan="2"
+                      Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,0 L29,0 L34,5 L34,18"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Grid.ColumnSpan="2"
+                      Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,4 L0,17 L5,22 L28,22"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+                <Path Grid.ColumnSpan="2"
+                      Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,22 L29,22 L34,17 L34,4"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
             </Grid>
         </Border>
 
         <Border x:Name="SquadsPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding SquadsVisibility}">
-            <StackPanel>
-                <TextBlock Text="{Binding SquadsTitle}" Style="{StaticResource OverlayTitle}" />
-                <ItemsControl ItemsSource="{Binding Squads}" Margin="0,12,0,0">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <DockPanel Margin="0,0,0,12">
-                                <Border Width="38"
-                                        Height="38"
-                                        Margin="0,0,10,0"
-                                        DockPanel.Dock="Left"
-                                        Visibility="{Binding IconVisibility}"
-                                        Background="{StaticResource FieldBackBrush}"
-                                        BorderBrush="{StaticResource AccentBrush}"
-                                        BorderThickness="1">
-                                    <Grid>
-                                        <Image Source="{Binding EmblemPath}" Stretch="UniformToFill" />
-                                        <TextBlock Text="{Binding Icon}"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
+            <Grid>
+                <StackPanel Margin="10,8,14,8">
+                    <TextBlock Text="{Binding SquadsTitle}" Style="{StaticResource OverlayTitle}" />
+                    <ItemsControl ItemsSource="{Binding Squads}" Margin="0,12,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <DockPanel Margin="0,0,0,12">
+                                    <Border Width="38"
+                                            Height="38"
+                                            Margin="0,0,10,0"
+                                            DockPanel.Dock="Left"
+                                            Visibility="{Binding IconVisibility}"
+                                            Background="{Binding DataContext.IconBackgroundBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            BorderBrush="{Binding DataContext.PanelBorderBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            BorderThickness="1">
+                                        <Grid>
+                                            <Image Source="{Binding EmblemPath}" Stretch="UniformToFill" />
+                                            <TextBlock Text="{Binding Icon}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{Binding DataContext.TitleBrush, RelativeSource={RelativeSource AncestorType=Window}}" />
+                                        </Grid>
+                                    </Border>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Name}"
+                                                   Foreground="{Binding DataContext.TextBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                   FontSize="12"
                                                    FontWeight="SemiBold" />
-                                    </Grid>
-                                </Border>
-                                <StackPanel>
-                                    <TextBlock Text="{Binding Name}" Style="{StaticResource OverlayText}" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding CommanderLine}" Style="{StaticResource OverlayMuted}" />
-                                </StackPanel>
-                            </DockPanel>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </StackPanel>
+                                        <TextBlock Text="{Binding CommanderLine}"
+                                                   Foreground="{Binding DataContext.MutedBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                   FontSize="10" />
+                                    </StackPanel>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+                <Path Style="{StaticResource OverlayScanPath}"
+                      Data="M0,34 L0,120"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Style="{StaticResource OverlayScanPath}"
+                      Data="M30,0 L120,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,18 L0,5 L5,0 L28,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,0 L29,0 L34,5 L34,18"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,4 L0,17 L5,22 L28,22"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,22 L29,22 L34,17 L34,4"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+            </Grid>
         </Border>
 
         <Border x:Name="MissionPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding MissionVisibility}">
-            <StackPanel>
-                <TextBlock Text="{Binding MissionTitle}" Style="{StaticResource OverlayTitle}" />
-                <TextBlock Text="{Binding FleetMission}" Style="{StaticResource OverlayText}" Margin="0,12,0,0" />
-                <TextBlock Text="{Binding SquadMission}" Style="{StaticResource OverlayText}" Margin="0,6,0,0" />
-                <TextBlock Text="{Binding RallyPoint}" Foreground="#FFFFF000" FontSize="12" Margin="0,6,0,0" />
-            </StackPanel>
+            <Grid>
+                <StackPanel Margin="10,8,14,8">
+                    <TextBlock Text="{Binding MissionTitle}" Style="{StaticResource OverlayTitle}" />
+                    <TextBlock Text="{Binding FleetMission}" Style="{StaticResource OverlayText}" Margin="0,12,0,0" />
+                    <TextBlock Text="{Binding SquadMission}" Style="{StaticResource OverlayText}" Margin="0,6,0,0" />
+                    <TextBlock Text="{Binding RallyPoint}" Foreground="{Binding AlertBrush}" FontSize="12" Margin="0,6,0,0" />
+                </StackPanel>
+                <Path Style="{StaticResource OverlayScanPath}"
+                      Data="M40,0 L160,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Style="{StaticResource OverlayScanPath}"
+                      Data="M0,28 L0,90"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,18 L0,5 L5,0 L28,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,0 L29,0 L34,5 L34,18"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,4 L0,17 L5,22 L28,22"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,22 L29,22 L34,17 L34,4"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+            </Grid>
         </Border>
 
         <Border x:Name="MembersPanel" Style="{StaticResource OverlayPanel}" Visibility="{Binding MembersVisibility}">
-            <StackPanel>
-                <TextBlock Text="{Binding MembersTitle}" Style="{StaticResource OverlayTitle}" />
-                <ItemsControl ItemsSource="{Binding Members}" Margin="0,10,0,0">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="0,0,0,9">
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="76" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding DisplayName}" Style="{StaticResource OverlayText}" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Column="1"
-                                           Text="{Binding Status}"
-                                           Foreground="{Binding StatusBrush}"
-                                           FontSize="11"
-                                           HorizontalAlignment="Center"
-                                           TextAlignment="Center" />
-                                <TextBlock Grid.Column="2"
-                                           Text="{Binding Location}"
-                                           Style="{StaticResource OverlayMuted}"
-                                           TextTrimming="CharacterEllipsis"
-                                           HorizontalAlignment="Right"
-                                           TextAlignment="Right" />
-                                <TextBlock Grid.Row="1"
-                                           Grid.ColumnSpan="3"
-                                           Text="{Binding Ship}"
-                                           Style="{StaticResource OverlayMuted}"
-                                           TextTrimming="CharacterEllipsis"
-                                           Margin="0,2,0,0" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </StackPanel>
+            <Grid>
+                <StackPanel Margin="10,8,14,8">
+                    <TextBlock Text="{Binding MembersTitle}" Style="{StaticResource OverlayTitle}" />
+                    <ItemsControl ItemsSource="{Binding Members}" Margin="0,10,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,0,0,9">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="76" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding DisplayName}"
+                                               Foreground="{Binding DataContext.TextBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                               FontSize="12"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding Status}"
+                                               Foreground="{Binding StatusBrush}"
+                                               FontSize="11"
+                                               HorizontalAlignment="Center"
+                                               TextAlignment="Center" />
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding Location}"
+                                               Foreground="{Binding DataContext.MutedBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               TextAlignment="Right" />
+                                    <TextBlock Grid.Row="1"
+                                               Grid.ColumnSpan="3"
+                                               Text="{Binding Ship}"
+                                               Foreground="{Binding DataContext.MutedBrush, RelativeSource={RelativeSource AncestorType=Window}}"
+                                               FontSize="10"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,2,0,0" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+                <Path Style="{StaticResource OverlayScanPath}"
+                      Data="M0,32 L0,110"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Style="{StaticResource OverlayScanPath}"
+                      Data="M36,0 L150,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,18 L0,5 L5,0 L28,0"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,0 L29,0 L34,5 L34,18"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M0,4 L0,17 L5,22 L28,22"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+                <Path Style="{StaticResource OverlayCornerPath}"
+                      Data="M6,22 L29,22 L34,17 L34,4"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom"
+                      Panel.ZIndex="3" />
+            </Grid>
         </Border>
 
         <TextBlock Canvas.Left="0"
@@ -146,7 +297,7 @@
                    Width="{Binding ActualWidth, ElementName=OverlayCanvas}"
                    Text="{Binding HotkeyToggleLabel}"
                    TextAlignment="Center"
-                   Foreground="#6689DFFF"
+                   Foreground="{Binding MutedBrush}"
                    FontSize="10" />
     </Canvas>
 </Window>

@@ -23,6 +23,8 @@ public static partial class ShipNameLocalizer
             : normalized;
     }
 
+    public static IReadOnlyDictionary<string, string> KnownChineseNames => ChineseNames.Value;
+
     public static string NormalizeCode(string? shipCode)
     {
         if (string.IsNullOrWhiteSpace(shipCode) ||

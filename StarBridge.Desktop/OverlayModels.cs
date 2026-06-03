@@ -12,6 +12,13 @@ public enum OverlayMemberNameMode
     GameNameOnly
 }
 
+public enum OverlayVisualTheme
+{
+    Default,
+    Anvil,
+    Drake
+}
+
 public sealed record OverlayDisplaySettings(
     bool HideMissionWhenIdle,
     OverlayMemberNameMode MemberNameMode,
@@ -22,7 +29,8 @@ public sealed record OverlayDisplaySettings(
     bool ShowNotice,
     bool ShowSquads,
     bool ShowMission,
-    bool ShowMembers)
+    bool ShowMembers,
+    OverlayVisualTheme Theme)
 {
     public static OverlayDisplaySettings Default { get; } = new(
         HideMissionWhenIdle: false,
@@ -34,7 +42,8 @@ public sealed record OverlayDisplaySettings(
         ShowNotice: true,
         ShowSquads: true,
         ShowMission: true,
-        ShowMembers: true);
+        ShowMembers: true,
+        Theme: OverlayVisualTheme.Default);
 
     public string Serialize()
     {
@@ -49,7 +58,8 @@ public sealed record OverlayDisplaySettings(
             ShowNotice ? "1" : "0",
             ShowSquads ? "1" : "0",
             ShowMission ? "1" : "0",
-            ShowMembers ? "1" : "0");
+            ShowMembers ? "1" : "0",
+            Theme);
     }
 
     public static OverlayDisplaySettings Parse(string? value)
@@ -77,7 +87,10 @@ public sealed record OverlayDisplaySettings(
             parts.Length <= 6 || parts[6] == "1",
             parts.Length <= 7 || parts[7] == "1",
             parts.Length <= 8 || parts[8] == "1",
-            parts.Length <= 9 || parts[9] == "1");
+            parts.Length <= 9 || parts[9] == "1",
+            parts.Length > 10 && Enum.TryParse<OverlayVisualTheme>(parts[10], out var theme)
+                ? theme
+                : Default.Theme);
     }
 }
 

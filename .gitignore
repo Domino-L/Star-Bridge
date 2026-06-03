@@ -9,6 +9,7 @@ obj/
 .localappdata/
 .nuget-packages/
 .build-verify/
+.verify-build/
 .repo-git/
 publish-*/
 dist/

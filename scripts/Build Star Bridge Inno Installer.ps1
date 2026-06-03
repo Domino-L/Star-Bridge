@@ -57,7 +57,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDir "Star Bridge.exe"))) {
 
 $publishConfigDir = Join-Path $publishDir "config"
 if (Test-Path -LiteralPath $publishConfigDir) {
-    Remove-Item -LiteralPath $publishConfigDir -Recurse -Force
+    $desktopConfig = Join-Path $publishConfigDir "desktop.config"
+    if (Test-Path -LiteralPath $desktopConfig) {
+        Remove-Item -LiteralPath $desktopConfig -Force
+    }
 }
 
 Write-Host "Publishing full self-contained Star Bridge Relay Server..."
@@ -78,4 +81,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Installer created:"
-Write-Host (Join-Path $root "dist\StarBridge-0.2.2-win-x64-setup.exe")
+Write-Host (Join-Path $root "dist\StarBridge-0.3.0-win-x64-setup.exe")
