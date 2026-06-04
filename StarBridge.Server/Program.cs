@@ -37,7 +37,7 @@ var smtpOptions = new SmtpOptions(
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.0",
+    version = "0.3.1",
     mode = string.IsNullOrWhiteSpace(serverKey) ? "open-test" : "protected",
     accounts = users.Count,
     players = players.Count,
@@ -73,9 +73,9 @@ app.MapPost("/api/auth/register", async (AuthRequest request) =>
         return Results.BadRequest(new { error = "Password must be 6+ chars." });
     }
 
-    if (callsign.Length is < 1 or > 24)
+    if (GetCallsignWeight(callsign) is < 1 or > 10)
     {
-        return Results.BadRequest(new { error = "Callsign must be between 1 and 24 characters." });
+        return Results.BadRequest(new { error = "Callsign is too long." });
     }
 
     if (!verificationCodes.TryGetValue(email, out var verification) ||
@@ -110,10 +110,7 @@ app.MapPost("/api/auth/send-code", async (EmailVerificationRequest request) =>
         return Results.BadRequest(new { error = "Email is required." });
     }
 
-    if (string.IsNullOrWhiteSpace(smtpOptions.Host) ||
-        string.IsNullOrWhiteSpace(smtpOptions.UserName) ||
-        string.IsNullOrWhiteSpace(smtpOptions.Password) ||
-        string.IsNullOrWhiteSpace(smtpOptions.FromAddress))
+    if (!IsSmtpConfigured(smtpOptions))
     {
         return Results.BadRequest(new { error = "Email service is not configured on the server." });
     }
@@ -132,6 +129,110 @@ app.MapPost("/api/auth/send-code", async (EmailVerificationRequest request) =>
     {
         return Results.BadRequest(new { error = $"Failed to send verification code: {ex.Message}" });
     }
+});
+
+app.MapPost("/api/feedback", async (HttpRequest request, FeedbackRequest feedback) =>
+{
+    if (string.IsNullOrWhiteSpace(feedback.Message))
+    {
+        return Results.BadRequest(new { error = "Feedback message is required." });
+    }
+
+    if (!IsSmtpConfigured(smtpOptions))
+    {
+        return Results.BadRequest(new { error = "Email service is not configured on the server." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    users.TryGetValue(userName ?? "", out var account);
+    var sender = account?.Email ?? feedback.Contact ?? "Guest";
+    var gameName = account?.GameName ?? feedback.GameName ?? "Unknown";
+    var callsign = account?.Callsign ?? feedback.Callsign ?? "Unknown";
+    var body = $"""
+StarBridge Feedback
+
+Time: {DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss} UTC
+Account: {sender}
+GameName: {gameName}
+Callsign: {callsign}
+Contact: {Normalize(feedback.Contact, "Not provided")}
+
+Message:
+{feedback.Message.Trim()}
+""";
+
+    try
+    {
+        await SendEmailAsync(smtpOptions, "ruiyanglyu0217@gmail.com", "StarBridge Feedback", body);
+        return Results.Ok(new { sent = true });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = $"Failed to send feedback: {ex.Message}" });
+    }
+});
+
+app.MapPost("/api/fleets/notify", async (HttpRequest request, FleetNotificationRequest notification) =>
+{
+    if (!IsWriteAllowed(request, serverKey, users))
+    {
+        return Results.Unauthorized();
+    }
+
+    if (string.IsNullOrWhiteSpace(notification.FleetCode) ||
+        string.IsNullOrWhiteSpace(notification.Subject) ||
+        string.IsNullOrWhiteSpace(notification.Body))
+    {
+        return Results.BadRequest(new { error = "Fleet code, subject and body are required." });
+    }
+
+    if (!IsSmtpConfigured(smtpOptions))
+    {
+        return Results.BadRequest(new { error = "Email service is not configured on the server." });
+    }
+
+    if (!fleets.TryGetValue(notification.FleetCode.Trim(), out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    var authorizedUser = GetAuthorizedUserName(request, users);
+    if (!string.IsNullOrWhiteSpace(fleet.OwnerAccount) &&
+        !string.IsNullOrWhiteSpace(authorizedUser) &&
+        !fleet.OwnerAccount.Equals(authorizedUser, StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.Unauthorized();
+    }
+
+    var memberNames = players.Values
+        .Where(player =>
+            string.Equals(player.Fleet, fleet.Name, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(player.Fleet, fleet.Code, StringComparison.OrdinalIgnoreCase))
+        .Select(player => player.Name)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    if (!string.IsNullOrWhiteSpace(fleet.Commander))
+    {
+        memberNames.Add(fleet.Commander);
+    }
+
+    var recipients = users.Values
+        .Where(user =>
+            !string.IsNullOrWhiteSpace(user.Email) &&
+            (!string.IsNullOrWhiteSpace(user.GameName) && memberNames.Contains(user.GameName) ||
+             !string.IsNullOrWhiteSpace(user.Callsign) && memberNames.Contains(user.Callsign)))
+        .Select(user => user.Email!)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    var sent = 0;
+    foreach (var recipient in recipients)
+    {
+        await SendEmailAsync(smtpOptions, recipient, notification.Subject.Trim(), notification.Body.Trim());
+        sent++;
+    }
+
+    return Results.Ok(new { sent });
 });
 
 app.MapPost("/api/auth/login", async (AuthRequest request) =>
@@ -161,6 +262,26 @@ app.MapPost("/api/auth/login", async (AuthRequest request) =>
     return Results.Ok(new AuthResponse(name, account.Email, account.Callsign, account.GameName, token));
 });
 
+app.MapPost("/api/auth/profile", async (HttpRequest request, ProfileUpdateRequest profile) =>
+{
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var callsign = string.IsNullOrWhiteSpace(profile.Callsign) ? null : profile.Callsign.Trim();
+    if (!string.IsNullOrWhiteSpace(callsign) && GetCallsignWeight(callsign) > 10)
+    {
+        return Results.BadRequest(new { error = "Callsign is too long." });
+    }
+
+    var updated = account with { Callsign = callsign };
+    users[userName] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(new AuthResponse(updated.UserName, updated.Email, updated.Callsign, updated.GameName, updated.AuthToken));
+});
+
 app.MapGet("/api/players", () => Results.Ok(players.Values
     .OrderByDescending(player => player.Online)
     .ThenBy(player => player.Name)
@@ -180,6 +301,15 @@ app.MapGet("/api/fleets", () =>
             {
                 OnlineMembers = members.Count(member => member.Online),
                 TotalMembers = members.Length,
+                LogoImageData = Normalize(fleet.LogoImageData, ""),
+                NoticeTitle = Normalize(fleet.NoticeTitle, ""),
+                NoticeContent = Normalize(fleet.NoticeContent, ""),
+                CurrentTaskTitle = Normalize(fleet.CurrentTaskTitle, ""),
+                CurrentTaskBrief = Normalize(fleet.CurrentTaskBrief, ""),
+                CurrentTaskParticipants = Normalize(fleet.CurrentTaskParticipants, ""),
+                CurrentTaskRally = Normalize(fleet.CurrentTaskRally, ""),
+                CurrentTaskShip = Normalize(fleet.CurrentTaskShip, ""),
+                ActionPlans = fleet.ActionPlans ?? [],
                 LastUpdated = DateTimeOffset.UtcNow
             };
         })
@@ -212,17 +342,51 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
         ActiveTime = Normalize(snapshot.ActiveTime, "20:00 - 23:59 UTC+8"),
         JoinPolicy = Normalize(snapshot.JoinPolicy, "Open"),
         LogoText = Normalize(snapshot.LogoText, "LOGO"),
+        LogoImageData = Normalize(snapshot.LogoImageData, ""),
+        NoticeTitle = Normalize(snapshot.NoticeTitle, ""),
+        NoticeContent = Normalize(snapshot.NoticeContent, ""),
+        CurrentTaskTitle = Normalize(snapshot.CurrentTaskTitle, ""),
+        CurrentTaskBrief = Normalize(snapshot.CurrentTaskBrief, ""),
+        CurrentTaskParticipants = Normalize(snapshot.CurrentTaskParticipants, ""),
+        CurrentTaskRally = Normalize(snapshot.CurrentTaskRally, ""),
+        CurrentTaskShip = Normalize(snapshot.CurrentTaskShip, ""),
+        CurrentTaskTime = snapshot.CurrentTaskTime,
+        ActionPlans = snapshot.ActionPlans ?? [],
         OwnerAccount = Normalize(snapshot.OwnerAccount, GetAuthorizedUserName(request, users) ?? ""),
         Squads = snapshot.Squads ?? [],
         LastUpdated = DateTimeOffset.UtcNow
     };
 
+    var authorizedUser = GetAuthorizedUserName(request, users) ?? "";
     var merged = fleets.AddOrUpdate(
         normalized.Code,
         normalized,
-        (_, existing) => normalized with
+        (_, existing) =>
         {
-            Squads = MergeSquads(existing.Squads, normalized.Squads)
+            var canOverwriteManagedState =
+                string.IsNullOrWhiteSpace(existing.OwnerAccount) ||
+                existing.OwnerAccount.Equals(authorizedUser, StringComparison.OrdinalIgnoreCase);
+
+            return normalized with
+            {
+                Description = canOverwriteManagedState ? normalized.Description : existing.Description,
+                Type = canOverwriteManagedState ? normalized.Type : existing.Type,
+                ActiveTime = canOverwriteManagedState ? normalized.ActiveTime : existing.ActiveTime,
+                JoinPolicy = canOverwriteManagedState ? normalized.JoinPolicy : existing.JoinPolicy,
+                LogoText = canOverwriteManagedState ? normalized.LogoText : existing.LogoText,
+                LogoImageData = canOverwriteManagedState ? normalized.LogoImageData : existing.LogoImageData,
+                NoticeTitle = canOverwriteManagedState ? normalized.NoticeTitle : existing.NoticeTitle,
+                NoticeContent = canOverwriteManagedState ? normalized.NoticeContent : existing.NoticeContent,
+                CurrentTaskTitle = canOverwriteManagedState ? normalized.CurrentTaskTitle : existing.CurrentTaskTitle,
+                CurrentTaskBrief = canOverwriteManagedState ? normalized.CurrentTaskBrief : existing.CurrentTaskBrief,
+                CurrentTaskParticipants = canOverwriteManagedState ? normalized.CurrentTaskParticipants : existing.CurrentTaskParticipants,
+                CurrentTaskRally = canOverwriteManagedState ? normalized.CurrentTaskRally : existing.CurrentTaskRally,
+                CurrentTaskShip = canOverwriteManagedState ? normalized.CurrentTaskShip : existing.CurrentTaskShip,
+                CurrentTaskTime = canOverwriteManagedState ? normalized.CurrentTaskTime : existing.CurrentTaskTime,
+                ActionPlans = canOverwriteManagedState ? normalized.ActionPlans : existing.ActionPlans,
+                OwnerAccount = canOverwriteManagedState ? normalized.OwnerAccount : existing.OwnerAccount,
+                Squads = MergeSquads(existing.Squads, normalized.Squads)
+            };
         });
     await storage.SaveAsync(players, fleets, users, verificationCodes);
     return Results.Ok(merged);
@@ -358,6 +522,24 @@ static string Normalize(string? value, string fallback)
     return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
 }
 
+static int GetCallsignWeight(string value)
+{
+    var total = 0;
+    foreach (var character in value)
+    {
+        total += IsCjk(character) ? 2 : 1;
+    }
+
+    return total;
+}
+
+static bool IsCjk(char character)
+{
+    return (character >= '\u4E00' && character <= '\u9FFF') ||
+           (character >= '\u3400' && character <= '\u4DBF') ||
+           (character >= '\uF900' && character <= '\uFAFF');
+}
+
 static NetworkSquadSnapshot[] MergeSquads(
     NetworkSquadSnapshot[]? existing,
     NetworkSquadSnapshot[]? incoming)
@@ -442,14 +624,31 @@ static string? GetAuthorizedUserName(HttpRequest request, ConcurrentDictionary<s
         user.AuthToken.Equals(token, StringComparison.Ordinal))?.UserName;
 }
 
+static bool IsSmtpConfigured(SmtpOptions smtpOptions)
+{
+    return !string.IsNullOrWhiteSpace(smtpOptions.Host) &&
+           !string.IsNullOrWhiteSpace(smtpOptions.UserName) &&
+           !string.IsNullOrWhiteSpace(smtpOptions.Password) &&
+           !string.IsNullOrWhiteSpace(smtpOptions.FromAddress);
+}
+
 static async Task SendVerificationCodeAsync(SmtpOptions smtpOptions, string email, string code)
+{
+    await SendEmailAsync(smtpOptions, email, "StarBridge", code);
+}
+
+static async Task SendEmailAsync(SmtpOptions smtpOptions, string to, string subject, string body)
 {
     using var client = new SmtpClient(smtpOptions.Host, smtpOptions.Port)
     {
         EnableSsl = smtpOptions.EnableSsl,
         Credentials = new NetworkCredential(smtpOptions.UserName, smtpOptions.Password)
     };
-    using var message = new MailMessage(smtpOptions.FromAddress!, email, "StarBridge", code);
+    using var message = new MailMessage(smtpOptions.FromAddress!, to, subject, body)
+    {
+        BodyEncoding = Encoding.UTF8,
+        SubjectEncoding = Encoding.UTF8
+    };
     await client.SendMailAsync(message);
 }
 
@@ -532,6 +731,20 @@ public sealed record AuthRequest(
 public sealed record EmailVerificationRequest(
     string Email);
 
+public sealed record ProfileUpdateRequest(
+    string? Callsign);
+
+public sealed record FeedbackRequest(
+    string? Contact,
+    string? GameName,
+    string? Callsign,
+    string Message);
+
+public sealed record FleetNotificationRequest(
+    string FleetCode,
+    string Subject,
+    string Body);
+
 public sealed record AuthResponse(
     string UserName,
     string? Email,
@@ -576,9 +789,19 @@ public sealed record NetworkFleetSnapshot(
     string? ActiveTime,
     string? JoinPolicy,
     string? LogoText,
+    string? LogoImageData,
     NetworkSquadSnapshot[]? Squads,
     int OnlineMembers,
     int TotalMembers,
+    string? NoticeTitle,
+    string? NoticeContent,
+    string? CurrentTaskTitle,
+    string? CurrentTaskBrief,
+    string? CurrentTaskParticipants,
+    string? CurrentTaskRally,
+    string? CurrentTaskShip,
+    DateTime? CurrentTaskTime,
+    NetworkActionPlanSnapshot[]? ActionPlans,
     DateTimeOffset LastUpdated,
     string? OwnerAccount = null);
 
@@ -591,6 +814,20 @@ public sealed record NetworkSquadSnapshot(
     string? Commander,
     string? Type,
     string? Description);
+
+public sealed record NetworkActionPlanSnapshot(
+    string Id,
+    string Title,
+    string Content,
+    DateTime StartTime,
+    bool NotifyMembers,
+    NetworkActionPlanParticipantSnapshot[]? Participants);
+
+public sealed record NetworkActionPlanParticipantSnapshot(
+    string Callsign,
+    string GameName,
+    string? AvatarPath,
+    string Initials);
 
 public sealed record SmtpOptions(
     string? Host,

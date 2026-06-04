@@ -26,7 +26,10 @@ public static partial class HangarShipImporter
             ["F8C Lightning"] = "ANVL_Lightning_F8C",
             ["Idris-P Frigate"] = "AEGS_Idris_P",
             ["Ironclad Assault"] = "DRAK_Ironclad_Assault",
+            ["M80"] = "ORIG_M80",
             ["Nox"] = "XIAN_Nox",
+            ["Origin M80"] = "ORIG_M80",
+            ["起源 M80"] = "ORIG_M80",
             ["Starfarer Gemini"] = "MISC_Starfarer_Gemini"
         };
 

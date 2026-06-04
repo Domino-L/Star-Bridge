@@ -125,6 +125,7 @@
                                         <Grid>
                                             <Image Source="{Binding EmblemPath}" Stretch="UniformToFill" />
                                             <TextBlock Text="{Binding Icon}"
+                                                       Visibility="{Binding IconTextVisibility}"
                                                        HorizontalAlignment="Center"
                                                        VerticalAlignment="Center"
                                                        FontWeight="SemiBold"

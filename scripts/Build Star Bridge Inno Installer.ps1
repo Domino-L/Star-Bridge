@@ -81,4 +81,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Installer created:"
-Write-Host (Join-Path $root "dist\StarBridge-0.3.0-win-x64-setup.exe")
+Write-Host (Join-Path $root "dist\StarBridge-0.3.1-win-x64-setup.exe")

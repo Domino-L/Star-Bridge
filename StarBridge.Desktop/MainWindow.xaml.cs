@@ -7,6 +7,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Reflection;
@@ -56,9 +57,19 @@ public sealed record NetworkFleetSnapshot(
     string? ActiveTime,
     string? JoinPolicy,
     string? LogoText,
+    string? LogoImageData,
     NetworkSquadSnapshot[]? Squads,
     int OnlineMembers,
     int TotalMembers,
+    string? NoticeTitle,
+    string? NoticeContent,
+    string? CurrentTaskTitle,
+    string? CurrentTaskBrief,
+    string? CurrentTaskParticipants,
+    string? CurrentTaskRally,
+    string? CurrentTaskShip,
+    DateTime? CurrentTaskTime,
+    NetworkActionPlanSnapshot[]? ActionPlans,
     DateTimeOffset LastUpdated,
     string? OwnerAccount = null);
 
@@ -67,6 +78,20 @@ public sealed record NetworkSquadSnapshot(
     string? Commander,
     string? Type,
     string? Description);
+
+public sealed record NetworkActionPlanSnapshot(
+    string Id,
+    string Title,
+    string Content,
+    DateTime StartTime,
+    bool NotifyMembers,
+    NetworkActionPlanParticipantSnapshot[]? Participants);
+
+public sealed record NetworkActionPlanParticipantSnapshot(
+    string Callsign,
+    string GameName,
+    string? AvatarPath,
+    string Initials);
 
 public sealed record AuthRequest(
     string UserName,
@@ -85,6 +110,20 @@ public sealed record AuthResponse(
 
 public sealed record EmailVerificationRequest(
     string Email);
+
+public sealed record ProfileUpdateRequest(
+    string? Callsign);
+
+public sealed record FeedbackRequest(
+    string? Contact,
+    string? GameName,
+    string? Callsign,
+    string Message);
+
+public sealed record FleetNotificationRequest(
+    string FleetCode,
+    string Subject,
+    string Body);
 
 public sealed record FleetDisbandRequest(
     string FleetCode,
@@ -116,7 +155,8 @@ public sealed record LocalFleetState(
     LocalSquadState[]? Squads,
     string? JoinedSquadName,
     LocalFleetActionPlan[]? ActionPlans,
-    string[]? JoinedActionPlanIds);
+    string[]? JoinedActionPlanIds,
+    LocalFleetEventLog[]? EventLog);
 
 public sealed record LocalFleetTaskHistory(
     string Key,
@@ -146,6 +186,13 @@ public sealed record LocalFleetActionPlan(
     bool NotifyMembers,
     ActionPlanParticipantRow[]? Participants);
 
+public sealed record LocalFleetEventLog(
+    string Id,
+    DateTimeOffset Timestamp,
+    string Type,
+    string Title,
+    string Detail);
+
 public sealed class ImagePathConverter : IValueConverter
 {
     public object? Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
@@ -158,6 +205,46 @@ public sealed class ImagePathConverter : IValueConverter
         try
         {
             var bytes = File.ReadAllBytes(path);
+            using var stream = new MemoryStream(bytes);
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        return System.Windows.Data.Binding.DoNothing;
+    }
+}
+
+public sealed class ImageDataConverter : IValueConverter
+{
+    public object? Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        if (value is not string data || string.IsNullOrWhiteSpace(data))
+        {
+            return null;
+        }
+
+        try
+        {
+            var payload = data;
+            var commaIndex = payload.IndexOf(',');
+            if (payload.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase) && commaIndex >= 0)
+            {
+                payload = payload[(commaIndex + 1)..];
+            }
+
+            var bytes = System.Convert.FromBase64String(payload);
             using var stream = new MemoryStream(bytes);
             var image = new BitmapImage();
             image.BeginInit();
@@ -199,10 +286,13 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SquadRow> _squads = [];
     private readonly ObservableCollection<SquadMemberStatusRow> _mySquadMembers = [];
     private readonly ObservableCollection<NetworkFleetCard> _networkFleets = [];
+    private readonly List<NetworkFleetCard> _allNetworkFleets = [];
     private readonly ObservableCollection<OwnedShipRecord> _ownedShips = [];
     private readonly ObservableCollection<FleetShipInventoryRow> _fleetShipInventory = [];
     private readonly ObservableCollection<FleetTaskHistoryRow> _fleetTaskHistory = [];
     private readonly ObservableCollection<FleetActionPlanRow> _fleetActionPlans = [];
+    private readonly ObservableCollection<FleetEventLogRow> _fleetEventLogs = [];
+    private readonly List<FleetEventLogRow> _allFleetEventLogs = [];
     private readonly Dictionary<string, NetworkPlayerSnapshot> _networkSnapshots = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _joinedActionPlanIds = new(StringComparer.OrdinalIgnoreCase);
     private SquadRow? _selectedSquad;
@@ -282,6 +372,7 @@ public partial class MainWindow : Window
         FleetShipDatabaseList.ItemsSource = _fleetShipInventory;
         FleetTaskHistoryList.ItemsSource = _fleetTaskHistory;
         FleetActionPlanList.ItemsSource = _fleetActionPlans;
+        FleetEventLogList.ItemsSource = _fleetEventLogs;
 
         _isLoadingSettings = true;
         var config = DesktopAppConfig.Load();
@@ -393,6 +484,41 @@ public partial class MainWindow : Window
         SetActiveNav(null);
     }
 
+    private async void SendFeedbackButton_Click(object sender, RoutedEventArgs e)
+    {
+        var message = FeedbackMessageBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            FeedbackStatusText.Text = "请先填写反馈内容。";
+            return;
+        }
+
+        FeedbackStatusText.Text = "正在发送反馈...";
+        try
+        {
+            var request = new FeedbackRequest(
+                FeedbackContactBox.Text.Trim(),
+                _localPlayer,
+                _callsign,
+                message);
+            var response = await PostNetworkJsonAsync("api/feedback", request);
+            if (!response.IsSuccessStatusCode)
+            {
+                FeedbackStatusText.Text = response.StatusCode == HttpStatusCode.NotFound
+                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.1 服务器后重试。"
+                    : $"发送失败：{await ReadResponseErrorAsync(response)}";
+                return;
+            }
+
+            FeedbackMessageBox.Clear();
+            FeedbackStatusText.Text = "反馈已发送，感谢。";
+        }
+        catch (Exception ex)
+        {
+            FeedbackStatusText.Text = $"发送失败：{ex.Message}";
+        }
+    }
+
     private void NetworkTestNav_Click(object sender, RoutedEventArgs e)
     {
         MainTabs.SelectedItem = MonitorTab;
@@ -432,7 +558,7 @@ public partial class MainWindow : Window
             LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
                 ? "已登录"
                 : $"已登录：{_accountName}";
-            CallsignBox.IsReadOnly = true;
+            CallsignBox.IsReadOnly = false;
             CallsignBox.IsEnabled = true;
             CallsignBox.Text = _callsign ?? "";
             ChooseAvatarButton.IsEnabled = true;
@@ -523,6 +649,7 @@ public partial class MainWindow : Window
         LocalFleetText.Text = $"{CreateFleetNameBox.Text.Trim()} [{CreateFleetCodeBox.Text.Trim()}]";
         RefreshFleetHeader();
         UpdateFleetEntryPanels();
+        AddFleetLog("舰队", "创建舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 创建 {_fleetName}");
         SaveCurrentConfig();
         _ = PushFleetDirectoryAsync(silent: true);
         _ = PushLocalSnapshotAsync(silent: true);
@@ -791,7 +918,7 @@ public partial class MainWindow : Window
                     ? "Low"
                     : networkSnapshot.ShipConfidence!;
                 displayLocation = online && !string.IsNullOrWhiteSpace(networkSnapshot.Location)
-                    ? networkSnapshot.Location!
+                    ? FormatLocation(networkSnapshot.Location!, "")
                     : displayLocation;
             }
 
@@ -884,13 +1011,15 @@ public partial class MainWindow : Window
 
     private static string FormatLocation(string location, string navigationTarget)
     {
-        if (string.IsNullOrWhiteSpace(navigationTarget) ||
-            navigationTarget.Equals("None", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(location))
         {
-            return location;
+            return "Unknown";
         }
 
-        return $"{location} -> {navigationTarget}";
+        var separator = location.IndexOf(" -> ", StringComparison.Ordinal);
+        return separator > 0
+            ? location[..separator].Trim()
+            : location.Trim();
     }
 
     private void UpdateLocalOnlineStateFromGameProcess()
@@ -1192,6 +1321,24 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task UpdateProfileAsync()
+    {
+        if (!IsLoggedIn)
+        {
+            return;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync("api/auth/profile", new ProfileUpdateRequest(_callsign));
+            response.EnsureSuccessStatusCode();
+        }
+        catch
+        {
+            // Ignore transient relay errors and keep local profile changes.
+        }
+    }
+
     private async Task TestNetworkAsync(bool silent = false)
     {
         try
@@ -1337,16 +1484,18 @@ public partial class MainWindow : Window
         try
         {
             var snapshots = await _networkClient.GetFromJsonAsync<NetworkFleetSnapshot[]>(BuildNetworkUri("api/fleets")) ?? [];
-            _networkFleets.Clear();
+            _allNetworkFleets.Clear();
             foreach (var snapshot in snapshots)
             {
                 if (IsSameFleet(snapshot.Name) || IsSameFleet(snapshot.Code))
                 {
-                    MergeNetworkFleetSquads(snapshot);
+                    MergeNetworkFleetState(snapshot);
                 }
 
-                _networkFleets.Add(NetworkFleetCard.FromSnapshot(snapshot));
+                _allNetworkFleets.Add(NetworkFleetCard.FromSnapshot(snapshot, _fleetName, _fleetCode, _hasFleet));
             }
+
+            ApplyFleetSearchFilter();
 
             if (!silent)
             {
@@ -1364,6 +1513,154 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ApplyFleetSearchFilter()
+    {
+        if (FindFleetSearchBox is null)
+        {
+            return;
+        }
+
+        var query = FindFleetSearchBox.Text.Trim();
+        var matches = _allNetworkFleets
+            .Select(card => card with { SearchScore = CalculateFleetSearchScore(card, query) })
+            .Where(card => string.IsNullOrWhiteSpace(query) || card.SearchScore > 0)
+            .OrderByDescending(card => card.SearchScore)
+            .ThenByDescending(card => card.Snapshot.OnlineMembers)
+            .ThenBy(card => card.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        _networkFleets.Clear();
+        foreach (var card in matches)
+        {
+            _networkFleets.Add(card);
+        }
+
+        if (FindFleetSearchCountText is not null)
+        {
+            FindFleetSearchCountText.Text = string.IsNullOrWhiteSpace(query)
+                ? $"{_networkFleets.Count} 个舰队"
+                : $"匹配 {_networkFleets.Count}";
+        }
+    }
+
+    private static int CalculateFleetSearchScore(NetworkFleetCard card, string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return 1;
+        }
+
+        var name = card.Name ?? "";
+        var code = card.Snapshot.Code ?? "";
+        if (code.Equals(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 100;
+        }
+
+        if (name.Equals(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 95;
+        }
+
+        if (code.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 80;
+        }
+
+        if (name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 70;
+        }
+
+        if (code.Contains(query, StringComparison.OrdinalIgnoreCase))
+        {
+            return 50;
+        }
+
+        return name.Contains(query, StringComparison.OrdinalIgnoreCase) ? 40 : 0;
+    }
+
+    private void FindFleetSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        ApplyFleetSearchFilter();
+    }
+
+    private void MergeNetworkFleetState(NetworkFleetSnapshot snapshot)
+    {
+        MergeNetworkFleetSquads(snapshot);
+
+        if (string.IsNullOrWhiteSpace(snapshot.Name) || string.IsNullOrWhiteSpace(snapshot.Code))
+        {
+            return;
+        }
+
+        _fleetName = snapshot.Name;
+        _fleetCode = snapshot.Code;
+        _fleetChiefCommander = string.IsNullOrWhiteSpace(snapshot.Commander) ? _fleetChiefCommander : snapshot.Commander!;
+        _fleetDescription = string.IsNullOrWhiteSpace(snapshot.Description) ? _fleetDescription : snapshot.Description!;
+        _fleetType = string.IsNullOrWhiteSpace(snapshot.Type) ? _fleetType : snapshot.Type!;
+        _fleetActiveTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? _fleetActiveTime : snapshot.ActiveTime!;
+        _fleetJoinPolicy = string.IsNullOrWhiteSpace(snapshot.JoinPolicy) ? _fleetJoinPolicy : snapshot.JoinPolicy!;
+        _fleetLogoPath = SaveNetworkFleetLogo(snapshot);
+
+        var isCommander = IsCurrentUserFleetCommander();
+        var remoteHasNotice = !string.IsNullOrWhiteSpace(snapshot.NoticeTitle) ||
+                              !string.IsNullOrWhiteSpace(snapshot.NoticeContent);
+        var localHasNotice = !string.IsNullOrWhiteSpace(_fleetNoticeTitle) ||
+                             !string.IsNullOrWhiteSpace(_fleetNoticeContent);
+        if (remoteHasNotice || !localHasNotice || !isCommander)
+        {
+            _fleetNoticeTitle = snapshot.NoticeTitle ?? "";
+            _fleetNoticeContent = snapshot.NoticeContent ?? "";
+        }
+
+        var remoteHasTask = !string.IsNullOrWhiteSpace(snapshot.CurrentTaskTitle);
+        var localHasTask = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle);
+        if (remoteHasTask || !localHasTask || !isCommander)
+        {
+            _fleetCurrentTaskTitle = snapshot.CurrentTaskTitle ?? "";
+            _fleetCurrentTaskBrief = snapshot.CurrentTaskBrief ?? "";
+            _fleetCurrentTaskParticipants = snapshot.CurrentTaskParticipants ?? "";
+            _fleetCurrentTaskRally = snapshot.CurrentTaskRally ?? "";
+            _fleetCurrentTaskShip = snapshot.CurrentTaskShip ?? "";
+            _fleetCurrentTaskTime = snapshot.CurrentTaskTime;
+        }
+
+        var remotePlans = snapshot.ActionPlans ?? [];
+        if (remotePlans.Length > 0 || _fleetActionPlans.Count == 0 || !isCommander)
+        {
+            _fleetActionPlans.Clear();
+            foreach (var actionPlan in remotePlans)
+            {
+                var row = new FleetActionPlanRow(
+                    actionPlan.Id,
+                    actionPlan.Title,
+                    actionPlan.Content,
+                    actionPlan.StartTime,
+                    actionPlan.NotifyMembers);
+
+                foreach (var participant in actionPlan.Participants ?? [])
+                {
+                    row.Participants.Add(new ActionPlanParticipantRow(
+                        participant.Callsign,
+                        participant.GameName,
+                        participant.AvatarPath,
+                        participant.Initials));
+                }
+
+                row.RefreshParticipantSummary();
+                _fleetActionPlans.Add(row);
+            }
+        }
+
+        SaveCurrentConfig();
+        RefreshOverlayWindow();
+        RenderState();
+        RefreshFleetInfoPanel();
+        RefreshTaskManagementPanel();
+        SelectFeaturedActionPlan();
+    }
+
     private void ApplyNetworkSnapshot(NetworkPlayerSnapshot snapshot)
     {
         if (string.IsNullOrWhiteSpace(snapshot.Name) ||
@@ -1372,9 +1669,32 @@ public partial class MainWindow : Window
             return;
         }
 
+        _networkSnapshots.TryGetValue(snapshot.Name, out var previousSnapshot);
+        var wasInFleet = previousSnapshot is not null && IsSameFleet(previousSnapshot.Fleet);
+        var isInFleet = IsSameFleet(snapshot.Fleet);
         _networkSnapshots[snapshot.Name] = snapshot;
 
-        if (_hasFleet && !IsSameFleet(snapshot.Fleet))
+        if (_hasFleet)
+        {
+            var displayName = FormatCommanderName(snapshot.Callsign, snapshot.Name, snapshot.Name);
+            if (!wasInFleet && isInFleet)
+            {
+                AddFleetLog("成员", "玩家加入", $"{displayName} 加入舰队");
+            }
+            else if (wasInFleet && !isInFleet)
+            {
+                AddFleetLog("成员", "玩家离开", $"{displayName} 离开舰队");
+            }
+            else if (isInFleet &&
+                     previousSnapshot is not null &&
+                     previousSnapshot.Online &&
+                     !snapshot.Online)
+            {
+                AddFleetLog("成员", "玩家离线", $"{displayName} 离线");
+            }
+        }
+
+        if (_hasFleet && !isInFleet)
         {
             return;
         }
@@ -1487,6 +1807,62 @@ public partial class MainWindow : Window
         return _networkClient.SendAsync(request);
     }
 
+    private async Task SendFleetEmailNotificationAsync(string subject, string body, bool silent = false)
+    {
+        if (!IsLoggedIn || !_hasFleet || string.IsNullOrWhiteSpace(_fleetCode))
+        {
+            return;
+        }
+
+        try
+        {
+            var request = new FleetNotificationRequest(_fleetCode, subject, body);
+            var response = await PostNetworkJsonAsync("api/fleets/notify", request);
+            if (!response.IsSuccessStatusCode)
+            {
+                if (!silent)
+                {
+                    var error = response.StatusCode == HttpStatusCode.NotFound
+                        ? "server notify endpoint is not available; deploy StarBridge 0.3.1 relay"
+                        : await ReadResponseErrorAsync(response);
+                    AppendOutput($"Fleet email notification failed: {error}");
+                }
+
+                return;
+            }
+
+            if (!silent)
+            {
+                AppendOutput("Fleet email notification sent.");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+            {
+                AppendOutput($"Fleet email notification failed: {ex.Message}");
+            }
+        }
+    }
+
+    private static async Task<string> ReadResponseErrorAsync(HttpResponseMessage response)
+    {
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync();
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                return $"{(int)response.StatusCode} {body}";
+            }
+        }
+        catch
+        {
+            // Fall back to the HTTP status line when the server body is unavailable.
+        }
+
+        return $"{(int)response.StatusCode} {response.ReasonPhrase}";
+    }
+
     private NetworkFleetSnapshot BuildLocalFleetSnapshot()
     {
         var squads = _squads
@@ -1495,6 +1871,22 @@ public partial class MainWindow : Window
                 squad.Commander,
                 squad.Type,
                 squad.Description))
+            .ToArray();
+
+        var actionPlans = _fleetActionPlans
+            .Select(plan => new NetworkActionPlanSnapshot(
+                plan.Id,
+                plan.Title,
+                plan.Content,
+                plan.StartTime,
+                plan.NotifyMembers,
+                plan.Participants
+                    .Select(participant => new NetworkActionPlanParticipantSnapshot(
+                        participant.Callsign,
+                        participant.GameName,
+                        participant.AvatarPath,
+                        participant.Initials))
+                    .ToArray()))
             .ToArray();
 
         return new NetworkFleetSnapshot(
@@ -1506,11 +1898,84 @@ public partial class MainWindow : Window
             _fleetActiveTime,
             _fleetJoinPolicy,
             string.IsNullOrWhiteSpace(_fleetCode) ? "LOGO" : _fleetCode,
+            BuildFleetLogoImageData(),
             squads,
             _players.Count(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase)),
             Math.Max(1, _players.Count),
+            _fleetNoticeTitle,
+            _fleetNoticeContent,
+            _fleetCurrentTaskTitle,
+            _fleetCurrentTaskBrief,
+            _fleetCurrentTaskParticipants,
+            _fleetCurrentTaskRally,
+            _fleetCurrentTaskShip,
+            _fleetCurrentTaskTime,
+            actionPlans,
             DateTimeOffset.UtcNow,
             _accountName);
+    }
+
+    private string? BuildFleetLogoImageData()
+    {
+        if (string.IsNullOrWhiteSpace(_fleetLogoPath) || !File.Exists(_fleetLogoPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var bytes = File.ReadAllBytes(_fleetLogoPath);
+            if (bytes.Length > 768 * 1024)
+            {
+                return null;
+            }
+
+            return Convert.ToBase64String(bytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string? SaveNetworkFleetLogo(NetworkFleetSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(snapshot.LogoImageData))
+        {
+            return null;
+        }
+
+        try
+        {
+            var payload = snapshot.LogoImageData;
+            var commaIndex = payload.IndexOf(',');
+            if (payload.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase) && commaIndex >= 0)
+            {
+                payload = payload[(commaIndex + 1)..];
+            }
+
+            var bytes = Convert.FromBase64String(payload);
+            if (bytes.Length == 0 || bytes.Length > 768 * 1024)
+            {
+                return null;
+            }
+
+            var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
+            Directory.CreateDirectory(directory);
+            var safeCode = new string(snapshot.Code.Where(char.IsLetterOrDigit).ToArray());
+            if (string.IsNullOrWhiteSpace(safeCode))
+            {
+                safeCode = "fleet";
+            }
+
+            var path = Path.Combine(directory, $"fleet-{safeCode}-logo.png");
+            File.WriteAllBytes(path, bytes);
+            return path;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async void RefreshFleetDirectory_Click(object sender, RoutedEventArgs e)
@@ -1531,7 +1996,33 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!card.CanJoin || IsSameFleet(card.Snapshot.Name) || IsSameFleet(card.Snapshot.Code))
+        {
+            NetworkStatusText.Text = "你已经在该舰队中。";
+            return;
+        }
+
+        var confirmText = _hasFleet
+            ? $"当前已经加入 {_fleetName}。是否退出当前舰队并加入 {card.Name}？"
+            : $"是否加入舰队 {card.Name}？";
+        var result = System.Windows.MessageBox.Show(
+            this,
+            confirmText,
+            "确认加入舰队",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        if (_hasFleet)
+        {
+            AddFleetLog("成员", "离开舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 离开 {_fleetName}");
+        }
+
         JoinNetworkFleet(card.Snapshot);
+        AddFleetLog("成员", "加入舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 加入 {card.Name}");
         await PushLocalSnapshotAsync(silent: true);
         await PullNetworkSnapshotsAsync(silent: true);
         NetworkStatusText.Text = $"已加入舰队：{card.Name}";
@@ -1550,6 +2041,7 @@ public partial class MainWindow : Window
         _fleetType = string.IsNullOrWhiteSpace(snapshot.Type) ? "Combat" : snapshot.Type!;
         _fleetJoinPolicy = string.IsNullOrWhiteSpace(snapshot.JoinPolicy) ? "Open" : snapshot.JoinPolicy!;
         _fleetActiveTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? "20:00 - 23:59 UTC+8" : snapshot.ActiveTime!;
+        _fleetLogoPath = SaveNetworkFleetLogo(snapshot);
         LocalFleetText.Text = $"{_fleetName} [{_fleetCode}]";
 
         _squads.Clear();
@@ -1654,6 +2146,8 @@ public partial class MainWindow : Window
         _fleetTaskHistory.Clear();
         _fleetActionPlans.Clear();
         _joinedActionPlanIds.Clear();
+        _allFleetEventLogs.Clear();
+        _fleetEventLogs.Clear();
         _joinedSquad = null;
         _selectedSquad = null;
         LocalFleetText.Text = "未加入舰队";
@@ -1662,6 +2156,66 @@ public partial class MainWindow : Window
         RenderSquads();
         RenderMySquad();
         RefreshOverlayWindow();
+    }
+
+    private void AddFleetLog(string type, string title, string detail)
+    {
+        if (!_hasFleet)
+        {
+            return;
+        }
+
+        var row = new FleetEventLogRow(
+            Guid.NewGuid().ToString("N"),
+            DateTimeOffset.Now,
+            type,
+            title,
+            detail);
+        _allFleetEventLogs.Insert(0, row);
+        ApplyFleetEventLogFilter();
+        SaveCurrentConfig();
+    }
+
+    private void ApplyFleetEventLogFilter()
+    {
+        if (FleetLogFilterBox is null)
+        {
+            return;
+        }
+
+        var selectedType = "All";
+        if (FleetLogFilterBox.SelectedItem is ComboBoxItem { Tag: string tag })
+        {
+            selectedType = tag;
+        }
+
+        var query = FleetLogSearchBox?.Text.Trim() ?? "";
+        var rows = _allFleetEventLogs
+            .Where(row => selectedType.Equals("All", StringComparison.OrdinalIgnoreCase) ||
+                          row.Type.Equals(selectedType, StringComparison.OrdinalIgnoreCase))
+            .Where(row => string.IsNullOrWhiteSpace(query) ||
+                          row.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                          row.Detail.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(row => row.Timestamp)
+            .ToArray();
+
+        _fleetEventLogs.Clear();
+        foreach (var row in rows)
+        {
+            _fleetEventLogs.Add(row);
+        }
+
+        if (FleetLogEmptyText is not null)
+        {
+            FleetLogEmptyText.Visibility = _fleetEventLogs.Count == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+    }
+
+    private void FleetLogFilter_Changed(object sender, EventArgs e)
+    {
+        ApplyFleetEventLogFilter();
     }
 
     private void PlayersList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -1776,7 +2330,13 @@ public partial class MainWindow : Window
                 plan.StartTime,
                 plan.NotifyMembers,
                 plan.Participants.ToArray())).ToArray(),
-            _joinedActionPlanIds.ToArray());
+            _joinedActionPlanIds.ToArray(),
+            _allFleetEventLogs.Select(row => new LocalFleetEventLog(
+                row.Id,
+                row.Timestamp,
+                row.Type,
+                row.Title,
+                row.Detail)).ToArray());
         return JsonSerializer.Serialize(cache);
     }
 
@@ -1881,6 +2441,19 @@ public partial class MainWindow : Window
                     _joinedActionPlanIds.Add(id);
                 }
             }
+
+            _allFleetEventLogs.Clear();
+            foreach (var item in cache.EventLog ?? [])
+            {
+                _allFleetEventLogs.Add(new FleetEventLogRow(
+                    item.Id,
+                    item.Timestamp,
+                    item.Type,
+                    item.Title,
+                    item.Detail));
+            }
+
+            ApplyFleetEventLogFilter();
 
             LocalFleetText.Text = _hasFleet ? $"{_fleetName} [{_fleetCode}]" : "未加入舰队";
         }
@@ -2399,11 +2972,54 @@ public partial class MainWindow : Window
             return;
         }
 
-        _callsign = string.IsNullOrWhiteSpace(CallsignBox.Text)
+        if (!IsLoggedIn)
+        {
+            return;
+        }
+
+        var limited = LimitCallsign(CallsignBox.Text);
+        if (!CallsignBox.Text.Equals(limited, StringComparison.Ordinal))
+        {
+            var caret = Math.Min(CallsignBox.CaretIndex, limited.Length);
+            CallsignBox.Text = limited;
+            CallsignBox.CaretIndex = caret;
+            return;
+        }
+
+        _callsign = string.IsNullOrWhiteSpace(limited)
             ? null
-            : CallsignBox.Text.Trim();
+            : limited.Trim();
         SaveCurrentConfig();
         RenderState();
+        _ = UpdateProfileAsync();
+        _ = PushLocalSnapshotAsync(silent: true);
+        _ = PushFleetDirectoryAsync(silent: true);
+    }
+
+    private static string LimitCallsign(string value)
+    {
+        var total = 0;
+        var builder = new System.Text.StringBuilder();
+        foreach (var character in value)
+        {
+            var weight = IsCjk(character) ? 2 : 1;
+            if (total + weight > 10)
+            {
+                break;
+            }
+
+            builder.Append(character);
+            total += weight;
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool IsCjk(char character)
+    {
+        return (character >= '\u4E00' && character <= '\u9FFF') ||
+               (character >= '\u3400' && character <= '\u4DBF') ||
+               (character >= '\uF900' && character <= '\uFAFF');
     }
 
     private void MySquadDescriptionBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -2511,6 +3127,7 @@ public partial class MainWindow : Window
         SquadSelectionList.SelectedItem = squad;
         CreateSquadPanel.Visibility = Visibility.Collapsed;
         JoinSquadHintText.Text = $"已创建并加入 {squad.Name}";
+        AddFleetLog("成员", "创建小队", $"{FormatCommanderName(_callsign, _localPlayer)} 创建 {squad.Name}");
         RenderSquads();
         RenderMySquad();
         RefreshOverlayWindow();
@@ -2568,6 +3185,7 @@ public partial class MainWindow : Window
 
         _joinedSquad = _selectedSquad;
         JoinSquadHintText.Text = $"已加入 {_joinedSquad.Name}";
+        AddFleetLog("成员", "加入小队", $"{FormatCommanderName(_callsign, _localPlayer)} 加入 {_joinedSquad.Name}");
         RenderState();
         _ = PushLocalSnapshotAsync(silent: true);
     }
@@ -2685,11 +3303,30 @@ public partial class MainWindow : Window
         }
 
         UpsertCurrentTaskHistory("进行中");
+        AddFleetLog("任务", "任务发布", $"{objective} / {participants}");
         _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
         PublishTaskPanel.Visibility = Visibility.Collapsed;
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
+        SaveCurrentConfig();
+        _ = PushFleetDirectoryAsync(silent: true);
+        if (emailCall)
+        {
+            _ = SendFleetEmailNotificationAsync(
+                $"StarBridge 舰队任务：{objective}",
+                $"""
+舰队：{_fleetName} ({_fleetCode})
+任务目标：{objective}
+任务简述：{NormalizeOptionalField(_fleetCurrentTaskBrief)}
+参与范围：{participants}
+集结点：{NormalizeOptionalField(_fleetCurrentTaskRally)}
+指定舰船：{NormalizeOptionalField(_fleetCurrentTaskShip)}
+发布时间：{_fleetCurrentTaskTime:yyyy-MM-dd HH:mm}
+""",
+                silent: true);
+        }
+
         AppendOutput($"Fleet task published: {objective}");
     }
 
@@ -2721,10 +3358,13 @@ public partial class MainWindow : Window
         }
 
         UpsertCurrentTaskHistory("已完成");
+        AddFleetLog("任务", "任务完成", _fleetCurrentTaskTitle);
         ClearCurrentTask();
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
+        SaveCurrentConfig();
+        _ = PushFleetDirectoryAsync(silent: true);
     }
 
     private void DeleteCurrentTaskButton_Click(object sender, RoutedEventArgs e)
@@ -2740,10 +3380,13 @@ public partial class MainWindow : Window
         }
 
         UpsertCurrentTaskHistory("已删除");
+        AddFleetLog("任务", "任务删除", _fleetCurrentTaskTitle);
         ClearCurrentTask();
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
+        SaveCurrentConfig();
+        _ = PushFleetDirectoryAsync(silent: true);
     }
 
     private void RenotifyCurrentTaskButton_Click(object sender, RoutedEventArgs e)
@@ -2760,8 +3403,21 @@ public partial class MainWindow : Window
 
         _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
         _fleetCurrentTaskNoticeRevision++;
+        AddFleetLog("任务", "再次通知", _fleetCurrentTaskTitle);
         RefreshFleetInfoPanel();
         RefreshOverlayWindow();
+        SaveCurrentConfig();
+        _ = SendFleetEmailNotificationAsync(
+            $"StarBridge 舰队任务提醒：{_fleetCurrentTaskTitle}",
+            $"""
+舰队：{_fleetName} ({_fleetCode})
+任务目标：{_fleetCurrentTaskTitle}
+任务简述：{NormalizeOptionalField(_fleetCurrentTaskBrief)}
+参与范围：{NormalizeOptionalField(_fleetCurrentTaskParticipants)}
+集结点：{NormalizeOptionalField(_fleetCurrentTaskRally)}
+指定舰船：{NormalizeOptionalField(_fleetCurrentTaskShip)}
+""",
+            silent: true);
         AppendOutput($"Fleet task re-notified: {_fleetCurrentTaskTitle}");
     }
 
@@ -2885,7 +3541,7 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.0";
+            : "0.3.1";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -2939,10 +3595,36 @@ public partial class MainWindow : Window
 
         _fleetNoticeTitle = title;
         _fleetNoticeContent = NormalizeOptionalField(content);
+        AddFleetLog("公告", "公告更新", title);
         _selectedFleetInfoPanel = FleetInfoPanelKind.Notice;
         FleetNoticeEditorPanel.Visibility = Visibility.Collapsed;
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
+        RefreshOverlayWindow();
+        SaveCurrentConfig();
+        _ = PushFleetDirectoryAsync(silent: true);
+    }
+
+    private void SaveFleetDescriptionButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("修改舰队介绍需要先登录。"))
+        {
+            return;
+        }
+
+        if (!IsCurrentUserFleetCommander())
+        {
+            FleetDescriptionStatusText.Text = "只有舰队指挥官可以修改舰队介绍。";
+            return;
+        }
+
+        _fleetDescription = NormalizeOptionalField(FleetDescriptionEditBox.Text);
+        FleetDescriptionStatusText.Text = "舰队介绍已保存。";
+        AddFleetLog("舰队", "舰队介绍更新", _fleetDescription);
+        RefreshFleetHeader();
+        RefreshTaskManagementPanel();
+        SaveCurrentConfig();
+        _ = PushFleetDirectoryAsync(silent: true);
     }
 
     private void OpenCurrentTaskDetail()
@@ -3046,11 +3728,26 @@ public partial class MainWindow : Window
             startTime,
             ActionPlanNotifyFleetCheck.IsChecked == true);
         _fleetActionPlans.Add(plan);
+        AddFleetLog("计划", "行动计划创建", $"{title} / {startTime:yyyy-MM-dd HH:mm}");
         SelectFeaturedActionPlan();
         _selectedFleetInfoPanel = FleetInfoPanelKind.ActionPlan;
         ActionPlanEditorPanel.Visibility = Visibility.Collapsed;
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
+        RefreshOverlayWindow();
+        _ = PushFleetDirectoryAsync(silent: true);
+        if (plan.NotifyMembers)
+        {
+            _ = SendFleetEmailNotificationAsync(
+                $"StarBridge 行动计划：{title}",
+                $"""
+舰队：{_fleetName} ({_fleetCode})
+行动标题：{title}
+行动内容：{content}
+行动时间：{startTime:yyyy-MM-dd HH:mm}
+""",
+                silent: true);
+        }
     }
 
     private bool TryReadActionPlanStartTime(out DateTime startTime, out string message)
@@ -3388,7 +4085,7 @@ public partial class MainWindow : Window
 
         OverlayEditorCanvas.Children.Clear();
 
-        foreach (var item in _overlayLayout)
+        foreach (var item in _overlayLayout.Where(IsOverlayEditorItemVisible))
         {
             var panel = CreateOverlayEditorPanel(item);
             Canvas.SetLeft(panel, item.X * OverlayEditorCanvas.Width);
@@ -3397,6 +4094,18 @@ public partial class MainWindow : Window
             panel.Height = item.Height * OverlayEditorCanvas.Height;
             OverlayEditorCanvas.Children.Add(panel);
         }
+    }
+
+    private bool IsOverlayEditorItemVisible(OverlayLayoutItem item)
+    {
+        return item.Key switch
+        {
+            "Notice" => _overlaySettings.ShowNotice,
+            "Squads" => _overlaySettings.ShowSquads,
+            "Mission" => _overlaySettings.ShowMission,
+            "Members" => _overlaySettings.ShowMembers,
+            _ => true
+        };
     }
 
     private FrameworkElement CreateOverlayEditorPanel(OverlayLayoutItem item)
@@ -4061,6 +4770,10 @@ public partial class MainWindow : Window
         ManageFleetNoticeSummaryText.Text = string.IsNullOrWhiteSpace(_fleetNoticeContent)
             ? "舰队公告会显示在我的舰队信息栏与 Overlay 通知区域。"
             : _fleetNoticeContent;
+        if (FleetDescriptionEditBox is not null && !FleetDescriptionEditBox.IsKeyboardFocusWithin)
+        {
+            FleetDescriptionEditBox.Text = _fleetDescription;
+        }
 
         SelectFeaturedActionPlan();
         foreach (var plan in _fleetActionPlans)
@@ -4088,6 +4801,7 @@ public partial class MainWindow : Window
         FleetTaskHistoryEmptyText.Visibility = _fleetTaskHistory.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+        ApplyFleetEventLogFilter();
     }
 
     private bool IsLocalPlayer(string playerName)
@@ -4342,6 +5056,16 @@ public sealed record FleetTaskHistoryRow(
     string RequiredShip,
     string PublishedAtText);
 
+public sealed record FleetEventLogRow(
+    string Id,
+    DateTimeOffset Timestamp,
+    string Type,
+    string Title,
+    string Detail)
+{
+    public string TimestampText => Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+}
+
 public sealed class FleetActionPlanRow : INotifyPropertyChanged
 {
     public FleetActionPlanRow(string id, string title, string content, DateTime startTime, bool notifyMembers)
@@ -4381,15 +5105,24 @@ public sealed record NetworkFleetCard(
     NetworkFleetSnapshot Snapshot,
     string Name,
     string LogoText,
+    string? LogoImageData,
+    Visibility LogoTextVisibility,
     string CodeLine,
     string CommanderLine,
     string JoinPolicyLine,
     string Description,
     string TypeLine,
     string ActiveTimeLine,
-    string MembersLine)
+    string MembersLine,
+    bool CanJoin,
+    string JoinButtonText,
+    int SearchScore = 1)
 {
-    public static NetworkFleetCard FromSnapshot(NetworkFleetSnapshot snapshot)
+    public static NetworkFleetCard FromSnapshot(
+        NetworkFleetSnapshot snapshot,
+        string currentFleetName,
+        string currentFleetCode,
+        bool hasFleet)
     {
         var code = string.IsNullOrWhiteSpace(snapshot.Code) ? "N/A" : snapshot.Code;
         var commander = string.IsNullOrWhiteSpace(snapshot.Commander) ? "Unassigned" : snapshot.Commander;
@@ -4397,11 +5130,17 @@ public sealed record NetworkFleetCard(
         var description = string.IsNullOrWhiteSpace(snapshot.Description) ? "No fleet description." : snapshot.Description;
         var type = string.IsNullOrWhiteSpace(snapshot.Type) ? "Unknown" : snapshot.Type;
         var activeTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? "Unassigned" : snapshot.ActiveTime;
+        var isCurrentFleet = hasFleet &&
+                             (snapshot.Name.Equals(currentFleetName, StringComparison.OrdinalIgnoreCase) ||
+                              code.Equals(currentFleetCode, StringComparison.OrdinalIgnoreCase));
+        var hasLogoImage = !string.IsNullOrWhiteSpace(snapshot.LogoImageData);
 
         return new NetworkFleetCard(
             snapshot,
             snapshot.Name,
             string.IsNullOrWhiteSpace(snapshot.LogoText) ? code : snapshot.LogoText!,
+            snapshot.LogoImageData,
+            hasLogoImage ? Visibility.Collapsed : Visibility.Visible,
             $"Code / {code}",
             $"Commander / {commander}",
             joinPolicy.Equals("需要申请", StringComparison.OrdinalIgnoreCase) ||
@@ -4411,7 +5150,9 @@ public sealed record NetworkFleetCard(
             description!,
             $"Type / {type}",
             $"Active / {activeTime}",
-            $"{snapshot.OnlineMembers} Online / {snapshot.TotalMembers} Members");
+            $"{snapshot.OnlineMembers} Online / {snapshot.TotalMembers} Members",
+            !isCurrentFleet,
+            isCurrentFleet ? "已加入" : "加入");
     }
 }
 

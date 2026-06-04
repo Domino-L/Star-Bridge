@@ -10,6 +10,9 @@ obj/
 .nuget-packages/
 .build-verify/
 .verify-build/
+.tmp-dotnet/
+.tmp-appdata/
+.tmp-nuget/
 .repo-git/
 publish-*/
 dist/

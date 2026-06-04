@@ -464,18 +464,21 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
                 "!",
                 zh ? "请先加入或创建舰队" : "Join or create a fleet first",
                 null,
-                settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible));
+                settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible,
+                Visibility.Visible));
             return;
         }
 
         foreach (var squad in squads)
         {
+            var hasEmblem = !string.IsNullOrWhiteSpace(squad.EmblemPath);
             Squads.Add(new OverlaySquadRow(
                 squad.Name,
                 squad.Icon,
                 squad.CommanderLine,
                 squad.EmblemPath,
-                settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible));
+                settings.HideSquadIcons ? Visibility.Collapsed : Visibility.Visible,
+                hasEmblem ? Visibility.Collapsed : Visibility.Visible));
         }
     }
 
@@ -596,7 +599,8 @@ public sealed record OverlaySquadRow(
     string Icon,
     string CommanderLine,
     string? EmblemPath,
-    Visibility IconVisibility);
+    Visibility IconVisibility,
+    Visibility IconTextVisibility);
 
 public sealed record OverlayMemberRow(
     string DisplayName,
