@@ -26,6 +26,10 @@ var users = new ConcurrentDictionary<string, UserAccount>(
 var verificationCodes = new ConcurrentDictionary<string, VerificationCodeRecord>(
     state.VerificationCodes ?? [],
     StringComparer.OrdinalIgnoreCase);
+var verificationEmailLastSentAt = new ConcurrentDictionary<string, DateTimeOffset>(
+    StringComparer.OrdinalIgnoreCase);
+var verificationIpWindows = new ConcurrentDictionary<string, VerificationRateWindow>(
+    StringComparer.OrdinalIgnoreCase);
 var smtpOptions = new SmtpOptions(
     Environment.GetEnvironmentVariable("STARBRIDGE_SMTP_HOST"),
     int.TryParse(Environment.GetEnvironmentVariable("STARBRIDGE_SMTP_PORT"), out var smtpPort) ? smtpPort : 587,
@@ -55,6 +59,13 @@ app.MapGet("/health", () => Results.Ok(new
     fleets = fleets.Count,
     time = DateTimeOffset.UtcNow
 }));
+
+app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.1",
+    Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
+    Environment.GetEnvironmentVariable("STARBRIDGE_RELEASE_NOTES") ?? "当前服务器未配置新版安装包。",
+    string.Equals(Environment.GetEnvironmentVariable("STARBRIDGE_UPDATE_REQUIRED"), "true", StringComparison.OrdinalIgnoreCase),
+    DateTimeOffset.UtcNow)));
 
 app.MapPost("/api/auth/register", async (AuthRequest request) =>
 {
@@ -103,7 +114,7 @@ app.MapPost("/api/auth/register", async (AuthRequest request) =>
     return Results.Ok(new AuthResponse(account.UserName, account.Email, account.Callsign, account.GameName, account.AuthToken));
 });
 
-app.MapPost("/api/auth/send-code", async (EmailVerificationRequest request) =>
+app.MapPost("/api/auth/send-code", async (HttpContext context, EmailVerificationRequest request) =>
 {
     if (string.IsNullOrWhiteSpace(request.Email))
     {
@@ -116,6 +127,17 @@ app.MapPost("/api/auth/send-code", async (EmailVerificationRequest request) =>
     }
 
     var email = request.Email.Trim();
+    var rateLimitError = ValidateVerificationRateLimit(
+        verificationEmailLastSentAt,
+        verificationIpWindows,
+        email,
+        GetClientIp(context),
+        DateTimeOffset.UtcNow);
+    if (rateLimitError is not null)
+    {
+        return Results.BadRequest(new { error = rateLimitError });
+    }
+
     var code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("000000");
     verificationCodes[email] = new VerificationCodeRecord(email, code, DateTimeOffset.UtcNow.AddMinutes(10));
 
@@ -517,6 +539,51 @@ static bool IsWriteAllowed(
     return false;
 }
 
+static string? ValidateVerificationRateLimit(
+    ConcurrentDictionary<string, DateTimeOffset> emailLastSentAt,
+    ConcurrentDictionary<string, VerificationRateWindow> ipWindows,
+    string email,
+    string clientIp,
+    DateTimeOffset now)
+{
+    var emailKey = email.Trim().ToLowerInvariant();
+    if (emailLastSentAt.TryGetValue(emailKey, out var lastSentAt) &&
+        now - lastSentAt < TimeSpan.FromSeconds(60))
+    {
+        return "Please wait before requesting another verification code.";
+    }
+
+    var ipWindow = ipWindows.AddOrUpdate(
+        clientIp,
+        _ => new VerificationRateWindow(now, 1),
+        (_, existing) => now - existing.StartedAt >= TimeSpan.FromMinutes(1)
+            ? new VerificationRateWindow(now, 1)
+            : existing with { Count = existing.Count + 1 });
+
+    if (ipWindow.Count > 5)
+    {
+        return "Too many verification requests. Please try again later.";
+    }
+
+    emailLastSentAt[emailKey] = now;
+    return null;
+}
+
+static string GetClientIp(HttpContext context)
+{
+    if (context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor))
+    {
+        var first = forwardedFor.ToString().Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(first))
+        {
+            return first;
+        }
+    }
+
+    return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+}
+
 static string Normalize(string? value, string fallback)
 {
     return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
@@ -740,6 +807,13 @@ public sealed record FeedbackRequest(
     string? Callsign,
     string Message);
 
+public sealed record UpdateManifest(
+    string Version,
+    string? DownloadUrl,
+    string? Notes,
+    bool Required = false,
+    DateTimeOffset? PublishedAt = null);
+
 public sealed record FleetNotificationRequest(
     string FleetCode,
     string Subject,
@@ -767,6 +841,10 @@ public sealed record VerificationCodeRecord(
     string Email,
     string Code,
     DateTimeOffset ExpiresAt);
+
+public sealed record VerificationRateWindow(
+    DateTimeOffset StartedAt,
+    int Count);
 
 public sealed record NetworkPlayerSnapshot(
     string Name,

@@ -1,0 +1,14 @@
+[Unit]
+Description=Star Bridge Relay Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/starbridge/server
+ExecStart=/usr/bin/dotnet "/opt/starbridge/server/Star Bridge Relay Server.dll"
+Restart=always
+RestartSec=5
+EnvironmentFile=/etc/starbridge/relay.env
+
+[Install]
+WantedBy=multi-user.target
