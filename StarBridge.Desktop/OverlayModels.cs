@@ -16,7 +16,12 @@ public enum OverlayVisualTheme
 {
     Default,
     Anvil,
-    Drake
+    Drake,
+    Argo,
+    Mirai,
+    Crusader,
+    Aegis,
+    Rsi
 }
 
 public sealed record OverlayDisplaySettings(
@@ -30,7 +35,8 @@ public sealed record OverlayDisplaySettings(
     bool ShowSquads,
     bool ShowMission,
     bool ShowMembers,
-    OverlayVisualTheme Theme)
+    OverlayVisualTheme Theme,
+    bool AutoThemeByShip)
 {
     public static OverlayDisplaySettings Default { get; } = new(
         HideMissionWhenIdle: false,
@@ -43,7 +49,8 @@ public sealed record OverlayDisplaySettings(
         ShowSquads: true,
         ShowMission: true,
         ShowMembers: true,
-        Theme: OverlayVisualTheme.Default);
+        Theme: OverlayVisualTheme.Default,
+        AutoThemeByShip: false);
 
     public string Serialize()
     {
@@ -59,7 +66,8 @@ public sealed record OverlayDisplaySettings(
             ShowSquads ? "1" : "0",
             ShowMission ? "1" : "0",
             ShowMembers ? "1" : "0",
-            Theme);
+            Theme,
+            AutoThemeByShip ? "1" : "0");
     }
 
     public static OverlayDisplaySettings Parse(string? value)
@@ -90,7 +98,8 @@ public sealed record OverlayDisplaySettings(
             parts.Length <= 9 || parts[9] == "1",
             parts.Length > 10 && Enum.TryParse<OverlayVisualTheme>(parts[10], out var theme)
                 ? theme
-                : Default.Theme);
+                : Default.Theme,
+            parts.Length > 11 && parts[11] == "1");
     }
 }
 

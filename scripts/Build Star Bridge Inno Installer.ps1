@@ -57,10 +57,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $publishDir "Star Bridge.exe"))) {
 
 $publishConfigDir = Join-Path $publishDir "config"
 if (Test-Path -LiteralPath $publishConfigDir) {
-    $desktopConfig = Join-Path $publishConfigDir "desktop.config"
-    if (Test-Path -LiteralPath $desktopConfig) {
-        Remove-Item -LiteralPath $desktopConfig -Force
-    }
+    Remove-Item -LiteralPath $publishConfigDir -Recurse -Force
 }
 
 Write-Host "Publishing full self-contained Star Bridge Relay Server..."

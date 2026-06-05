@@ -40,6 +40,10 @@ if (Test-Path -LiteralPath $stageDir) {
 }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $publishDir "*") -Destination $stageDir -Recurse -Force
+$stageConfigDir = Join-Path $stageDir "config"
+if (Test-Path -LiteralPath $stageConfigDir) {
+    Remove-Item -LiteralPath $stageConfigDir -Recurse -Force
+}
 
 @'
 @echo off

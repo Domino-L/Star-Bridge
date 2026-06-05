@@ -120,6 +120,13 @@ public sealed record FeedbackRequest(
     string? Callsign,
     string Message);
 
+public sealed record UpdateManifest(
+    string Version,
+    string? DownloadUrl,
+    string? Notes,
+    bool Required = false,
+    DateTimeOffset? PublishedAt = null);
+
 public sealed record FleetNotificationRequest(
     string FleetCode,
     string Subject,
@@ -352,6 +359,9 @@ public partial class MainWindow : Window
     private bool _isLoadingSettings;
     private bool _startupLoginPromptShown;
     private bool _isLoginDialogOpen;
+    private bool _isClosingAfterOfflineUpload;
+    private bool _isNetworkSyncRunning;
+    private DateTimeOffset _lastProcessDrivenRenderAt = DateTimeOffset.MinValue;
     private HwndSource? _hotkeySource;
     private bool _hotkeyRegistered;
     private bool _hasFleet;
@@ -427,6 +437,7 @@ public partial class MainWindow : Window
             }
 
             _ = InitializeLoginAndNetworkAsync();
+            _ = CheckForInstallerUpdateAsync(silent: true);
         };
         _gameProcessTimer.Tick += (_, _) => UpdateLocalOnlineStateFromGameProcess();
         _gameProcessTimer.Start();
@@ -482,6 +493,64 @@ public partial class MainWindow : Window
     {
         MainTabs.SelectedItem = SupportTab;
         SetActiveNav(null);
+    }
+
+    private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e)
+    {
+        await CheckForInstallerUpdateAsync(silent: false);
+    }
+
+    private async Task CheckForInstallerUpdateAsync(bool silent)
+    {
+        var currentVersion = GetAppVersion();
+        try
+        {
+            if (!silent)
+            {
+                UpdateStatusText.Text = $"正在检查更新... 当前版本 V{currentVersion}";
+            }
+
+            var manifest = await _networkClient.GetFromJsonAsync<UpdateManifest>(BuildNetworkUri("api/updates/latest"));
+            if (manifest is null || string.IsNullOrWhiteSpace(manifest.Version))
+            {
+                if (!silent)
+                {
+                    UpdateStatusText.Text = $"服务器没有返回更新信息。当前版本 V{currentVersion}";
+                }
+
+                return;
+            }
+
+            if (!IsNewerVersion(manifest.Version, currentVersion))
+            {
+                UpdateStatusText.Text = $"当前已是最新版本 V{currentVersion}。";
+                return;
+            }
+
+            var notes = string.IsNullOrWhiteSpace(manifest.Notes) ? "无版本说明。" : manifest.Notes.Trim();
+            UpdateStatusText.Text = $"发现新版本 V{manifest.Version}。{notes}";
+            if (string.IsNullOrWhiteSpace(manifest.DownloadUrl))
+            {
+                UpdateStatusText.Text += " 服务器尚未配置下载地址。";
+                return;
+            }
+
+            var message = $"发现新版本 V{manifest.Version}。\n\n{notes}\n\n是否打开安装包下载链接？";
+            if (System.Windows.MessageBox.Show(this, message, "星海舰桥更新", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+            {
+                Process.Start(new ProcessStartInfo(manifest.DownloadUrl)
+                {
+                    UseShellExecute = true
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+            {
+                UpdateStatusText.Text = $"检查更新失败：{ex.Message}";
+            }
+        }
     }
 
     private async void SendFeedbackButton_Click(object sender, RoutedEventArgs e)
@@ -870,6 +939,8 @@ public partial class MainWindow : Window
         {
             _localPlayer = fleetEvent.Player;
             _localPlayerId = fleetEvent.PlayerId;
+            _isGameProcessRunning = true;
+            _lastProcessDrivenRenderAt = DateTimeOffset.Now;
             if (IsLoggedIn)
             {
                 GameNameText.Text = _localPlayer;
@@ -893,7 +964,6 @@ public partial class MainWindow : Window
 
     private void RenderState()
     {
-        _isGameProcessRunning = IsStarCitizenRunning();
         if (!string.IsNullOrWhiteSpace(_localPlayer))
         {
             _fleetState.SetPlayerOnlineState(_localPlayer, _isGameProcessRunning, DateTimeOffset.Now);
@@ -950,11 +1020,6 @@ public partial class MainWindow : Window
         RenderSquads();
         RenderMySquad();
         RefreshOverlayWindow();
-        if (IsLoggedIn)
-        {
-            _ = PushFleetDirectoryAsync(silent: true);
-            _ = PushLocalSnapshotAsync(silent: true);
-        }
 
         var local = _players.FirstOrDefault(player =>
             player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
@@ -1024,21 +1089,44 @@ public partial class MainWindow : Window
 
     private void UpdateLocalOnlineStateFromGameProcess()
     {
+        var wasRunning = _isGameProcessRunning;
         _isGameProcessRunning = IsStarCitizenRunning();
+        var now = DateTimeOffset.Now;
+        var shouldRefresh = wasRunning != _isGameProcessRunning ||
+                            now - _lastProcessDrivenRenderAt >= TimeSpan.FromSeconds(30);
         if (string.IsNullOrWhiteSpace(_localPlayer))
         {
-            RenderState();
+            if (shouldRefresh)
+            {
+                _lastProcessDrivenRenderAt = now;
+                RenderState();
+            }
+
             return;
         }
 
         if (_isGameProcessRunning)
         {
-            RenderState();
+            if (shouldRefresh)
+            {
+                _lastProcessDrivenRenderAt = now;
+                RenderState();
+            }
+
             return;
         }
 
-        _fleetState.Apply(new FleetEvent(FleetEventType.PlayerOffline, _localPlayer));
-        RenderState();
+        if (wasRunning)
+        {
+            _fleetState.Apply(new FleetEvent(FleetEventType.PlayerOffline, _localPlayer));
+        }
+
+        if (shouldRefresh)
+        {
+            _lastProcessDrivenRenderAt = now;
+            RenderState();
+        }
+
         ProfileStatusText.Text = "Offline - game process not detected";
     }
 
@@ -1053,19 +1141,22 @@ public partial class MainWindow : Window
             "StarCitizen_TECH-PREVIEW"
         ];
 
-        return Process.GetProcesses()
-            .Any(process =>
+        foreach (var processName in processNames)
+        {
+            try
             {
-                try
+                if (Process.GetProcessesByName(processName).Length > 0)
                 {
-                    return processNames.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase) ||
-                           process.ProcessName.StartsWith("StarCitizen", StringComparison.OrdinalIgnoreCase);
+                    return true;
                 }
-                catch
-                {
-                    return false;
-                }
-            });
+            }
+            catch
+            {
+                // Ignore transient process-list access issues.
+            }
+        }
+
+        return false;
     }
 
     private static IEnumerable<string> ReadSharedLines(string path)
@@ -1154,10 +1245,23 @@ public partial class MainWindow : Window
             return;
         }
 
-        await PushFleetDirectoryAsync(silent: true);
-        await PushLocalSnapshotAsync(silent: true);
-        await PullNetworkFleetsAsync(silent: true);
-        await PullNetworkSnapshotsAsync(silent: true);
+        if (_isNetworkSyncRunning)
+        {
+            return;
+        }
+
+        _isNetworkSyncRunning = true;
+        try
+        {
+            await PushFleetDirectoryAsync(silent: true);
+            await PushLocalSnapshotAsync(silent: true);
+            await PullNetworkFleetsAsync(silent: true);
+            await PullNetworkSnapshotsAsync(silent: true);
+        }
+        finally
+        {
+            _isNetworkSyncRunning = false;
+        }
     }
 
     private async Task InitializeLoginAndNetworkAsync()
@@ -1411,6 +1515,73 @@ public partial class MainWindow : Window
             {
                 AppendOutput($"NETWORK | push failed={ex.Message}");
             }
+        }
+    }
+
+    private static bool IsNewerVersion(string remoteVersion, string currentVersion)
+    {
+        return Version.TryParse(NormalizeVersionForCompare(remoteVersion), out var remote) &&
+               Version.TryParse(NormalizeVersionForCompare(currentVersion), out var current) &&
+               remote > current;
+    }
+
+    private static string NormalizeVersionForCompare(string value)
+    {
+        var version = value.Trim().TrimStart('v', 'V');
+        var parts = version.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length switch
+        {
+            1 => $"{parts[0]}.0.0",
+            2 => $"{parts[0]}.{parts[1]}.0",
+            _ => version
+        };
+    }
+
+    private async Task PushOfflineSnapshotOnShutdownAsync()
+    {
+        if (!IsLoggedIn || string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            return;
+        }
+
+        _fleetState.Apply(new FleetEvent(FleetEventType.PlayerOffline, _localPlayer));
+
+        var snapshot = new NetworkPlayerSnapshot(
+            _localPlayer,
+            _callsign,
+            _hasFleet ? _fleetName : "No Fleet",
+            _joinedSquad?.Name ?? "Unassigned",
+            false,
+            "Unknown",
+            "None",
+            "Unknown",
+            "None",
+            DateTimeOffset.UtcNow);
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, BuildNetworkUri("api/players"))
+            {
+                Content = JsonContent.Create(snapshot)
+            };
+            var key = NetworkServerKeyBox.Password.Trim();
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                request.Headers.Add("X-StarBridge-Key", key);
+            }
+
+            if (!string.IsNullOrWhiteSpace(_authToken))
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _authToken);
+            }
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var response = await _networkClient.SendAsync(request, timeout.Token);
+            response.EnsureSuccessStatusCode();
+        }
+        catch
+        {
+            // The app must still close even if the relay is unreachable.
         }
     }
 
@@ -2577,9 +2748,20 @@ public partial class MainWindow : Window
             : Visibility.Collapsed;
     }
 
-    private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         SaveCurrentConfig();
+        if (!_isClosingAfterOfflineUpload && IsLoggedIn && !string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            e.Cancel = true;
+            _isClosingAfterOfflineUpload = true;
+            _gameProcessTimer.Stop();
+            _networkSyncTimer.Stop();
+            await PushOfflineSnapshotOnShutdownAsync();
+            Close();
+            return;
+        }
+
         CloseOverlayWindow();
     }
 
@@ -2639,7 +2821,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        _overlayWindow = new OverlayWindow(_squads, GetOverlayPlayers(), _overlayLayout, _overlaySettings, _language, _hasFleet, BuildOverlayCommandState());
+        _overlayWindow = new OverlayWindow(_squads, GetOverlayPlayers(), _overlayLayout, GetEffectiveOverlaySettings(), _language, _hasFleet, BuildOverlayCommandState());
         _overlayWindow.Closed += (_, _) => _overlayWindow = null;
         _overlayWindow.Show();
     }
@@ -2812,7 +2994,42 @@ public partial class MainWindow : Window
         }
 
         RenderSquads();
-        _overlayWindow.Refresh(_squads, GetOverlayPlayers(), _overlaySettings, _language, _hasFleet, BuildOverlayCommandState());
+        _overlayWindow.Refresh(_squads, GetOverlayPlayers(), GetEffectiveOverlaySettings(), _language, _hasFleet, BuildOverlayCommandState());
+    }
+
+    private OverlayDisplaySettings GetEffectiveOverlaySettings()
+    {
+        if (!_overlaySettings.AutoThemeByShip)
+        {
+            return _overlaySettings;
+        }
+
+        var localShip = _players.FirstOrDefault(player =>
+            player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase))?.RawShip;
+        var shipTheme = GetOverlayThemeForShip(localShip);
+        return _overlaySettings with { Theme = shipTheme };
+    }
+
+    private static OverlayVisualTheme GetOverlayThemeForShip(string? shipCode)
+    {
+        var code = ShipNameLocalizer.NormalizeCode(shipCode);
+        if (string.IsNullOrWhiteSpace(code) ||
+            code.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return OverlayVisualTheme.Default;
+        }
+
+        return code.Split('_', 2)[0].ToUpperInvariant() switch
+        {
+            "ANVL" => OverlayVisualTheme.Anvil,
+            "DRAK" => OverlayVisualTheme.Drake,
+            "ARGO" => OverlayVisualTheme.Argo,
+            "MRAI" or "MIRAI" => OverlayVisualTheme.Mirai,
+            "CRUS" => OverlayVisualTheme.Crusader,
+            "AEGS" => OverlayVisualTheme.Aegis,
+            "RSI" => OverlayVisualTheme.Rsi,
+            _ => OverlayVisualTheme.Default
+        };
     }
 
     private OverlayCommandState BuildOverlayCommandState()
@@ -2896,6 +3113,7 @@ public partial class MainWindow : Window
             ShowSquadsPanelCheck is null ||
             ShowMissionPanelCheck is null ||
             ShowMembersPanelCheck is null ||
+            AutoThemeByShipCheck is null ||
             OverlayThemeBox is null)
         {
             return;
@@ -2922,8 +3140,14 @@ public partial class MainWindow : Window
             {
                 1 => OverlayVisualTheme.Anvil,
                 2 => OverlayVisualTheme.Drake,
+                3 => OverlayVisualTheme.Argo,
+                4 => OverlayVisualTheme.Mirai,
+                5 => OverlayVisualTheme.Crusader,
+                6 => OverlayVisualTheme.Aegis,
+                7 => OverlayVisualTheme.Rsi,
                 _ => OverlayVisualTheme.Default
-            });
+            },
+            AutoThemeByShipCheck.IsChecked == true);
 
         SaveCurrentConfig();
         RefreshOverlayWindow();
@@ -4354,10 +4578,16 @@ public partial class MainWindow : Window
         ShowSquadsPanelCheck.IsChecked = _overlaySettings.ShowSquads;
         ShowMissionPanelCheck.IsChecked = _overlaySettings.ShowMission;
         ShowMembersPanelCheck.IsChecked = _overlaySettings.ShowMembers;
+        AutoThemeByShipCheck.IsChecked = _overlaySettings.AutoThemeByShip;
         OverlayThemeBox.SelectedIndex = _overlaySettings.Theme switch
         {
             OverlayVisualTheme.Anvil => 1,
             OverlayVisualTheme.Drake => 2,
+            OverlayVisualTheme.Argo => 3,
+            OverlayVisualTheme.Mirai => 4,
+            OverlayVisualTheme.Crusader => 5,
+            OverlayVisualTheme.Aegis => 6,
+            OverlayVisualTheme.Rsi => 7,
             _ => 0
         };
         OverlayOpacitySlider.Value = Math.Clamp(_overlaySettings.Opacity, 0.15, 1.0) * 100.0;
@@ -4443,11 +4673,17 @@ public partial class MainWindow : Window
         ShowCallsignOnlyRadio.Content = zh ? "只显示呼号" : "Only callsign";
         ShowGameNameOnlyRadio.Content = zh ? "只显示游戏名" : "Only game name";
         OverlayThemeLabel.Text = zh ? "外观风格" : "APPEARANCE";
-        if (OverlayThemeBox.Items.Count >= 3)
+        AutoThemeByShipCheck.Content = zh ? "自动切换至当前飞船厂商风格" : "Auto switch to current ship manufacturer style";
+        if (OverlayThemeBox.Items.Count >= 8)
         {
             ((ComboBoxItem)OverlayThemeBox.Items[0]).Content = zh ? "默认" : "Default";
             ((ComboBoxItem)OverlayThemeBox.Items[1]).Content = zh ? "铁砧" : "Anvil";
             ((ComboBoxItem)OverlayThemeBox.Items[2]).Content = zh ? "德雷克" : "Drake";
+            ((ComboBoxItem)OverlayThemeBox.Items[3]).Content = zh ? "南船座" : "Argo";
+            ((ComboBoxItem)OverlayThemeBox.Items[4]).Content = zh ? "武藏" : "Mirai";
+            ((ComboBoxItem)OverlayThemeBox.Items[5]).Content = zh ? "十字军" : "Crusader";
+            ((ComboBoxItem)OverlayThemeBox.Items[6]).Content = zh ? "圣盾" : "Aegis";
+            ((ComboBoxItem)OverlayThemeBox.Items[7]).Content = "RSI";
         }
         BackgroundModeLabel.Text = zh ? "后台模式" : "BACKGROUND";
         TrayModeCheck.Content = zh ? "窗口最小化时仍然可以显示 Overlay" : "Keep Overlay visible when minimized";

@@ -21,6 +21,10 @@ if (Test-Path -LiteralPath $packageDir) {
 }
 New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $publishDir "*") -Destination $packageDir -Recurse -Force
+$packageConfigDir = Join-Path $packageDir "config"
+if (Test-Path -LiteralPath $packageConfigDir) {
+    Remove-Item -LiteralPath $packageConfigDir -Recurse -Force
+}
 
 @"
 Star Bridge / 星海舰桥 0.3.1

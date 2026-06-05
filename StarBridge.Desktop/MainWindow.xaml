@@ -3194,12 +3194,22 @@
                                 <TextBlock x:Name="OverlayThemeLabel" Text="APPEARANCE" Style="{StaticResource HudCaptionText}" Margin="0,0,0,8" />
                                 <ComboBox x:Name="OverlayThemeBox"
                                           Height="32"
-                                          Margin="0,0,0,18"
+                                          Margin="0,0,0,8"
                                           SelectionChanged="OverlayThemeBox_SelectionChanged">
                                     <ComboBoxItem Content="默认" />
                                     <ComboBoxItem Content="铁砧" />
                                     <ComboBoxItem Content="德雷克" />
+                                    <ComboBoxItem Content="南船座" />
+                                    <ComboBoxItem Content="武藏" />
+                                    <ComboBoxItem Content="十字军" />
+                                    <ComboBoxItem Content="圣盾" />
+                                    <ComboBoxItem Content="RSI" />
                                 </ComboBox>
+                                <CheckBox x:Name="AutoThemeByShipCheck"
+                                          Content="自动切换至当前飞船厂商风格"
+                                          Margin="0,0,0,18"
+                                          Checked="OverlaySetting_Changed"
+                                          Unchecked="OverlaySetting_Changed" />
 
                                 <TextBlock x:Name="BackgroundModeLabel" Text="BACKGROUND" Style="{StaticResource HudCaptionText}" Margin="0,0,0,8" />
                                 <TextBlock x:Name="OverlayOpacityLabel"
@@ -3454,6 +3464,35 @@
                                    Margin="0,18,0,0"
                                    Foreground="{StaticResource MutedTextBrush}"
                                    TextWrapping="Wrap" />
+                        <Border Margin="0,26,0,0"
+                                Padding="18"
+                                Background="{StaticResource FieldBackBrush}"
+                                BorderBrush="{StaticResource AccentDimBrush}"
+                                BorderThickness="1">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="180" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="安装器更新"
+                                               Foreground="{StaticResource PrimaryTextBrush}"
+                                               FontSize="18"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock x:Name="UpdateStatusText"
+                                               Text="当前版本"
+                                               Margin="0,8,0,0"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        x:Name="CheckUpdateButton"
+                                        Content="检查更新"
+                                        Style="{StaticResource PrimaryButton}"
+                                        VerticalAlignment="Center"
+                                        Click="CheckUpdateButton_Click" />
+                            </Grid>
+                        </Border>
                         <Border Margin="0,26,0,0"
                                 Padding="18"
                                 Background="{StaticResource FieldBackBrush}"

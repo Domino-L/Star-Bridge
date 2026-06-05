@@ -429,6 +429,76 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             return;
         }
 
+        if (theme == OverlayVisualTheme.Argo)
+        {
+            PanelBackgroundBrush = BrushFromArgb(184, 23, 12, 3);
+            PanelBorderBrush = BrushFromRgb(255, 111, 55);
+            TitleBrush = BrushFromRgb(255, 132, 73);
+            TextBrush = BrushFromRgb(255, 235, 211);
+            MutedBrush = BrushFromRgb(255, 167, 113);
+            AlertBrush = BrushFromRgb(142, 255, 116);
+            IconBackgroundBrush = BrushFromArgb(118, 64, 22, 8);
+            OnlineBrush = BrushFromRgb(125, 255, 126);
+            OfflineBrush = BrushFromRgb(255, 78, 61);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Mirai)
+        {
+            PanelBackgroundBrush = BrushFromArgb(188, 20, 17, 5);
+            PanelBorderBrush = BrushFromRgb(255, 212, 98);
+            TitleBrush = BrushFromRgb(255, 228, 128);
+            TextBrush = BrushFromRgb(255, 246, 214);
+            MutedBrush = BrushFromRgb(131, 242, 221);
+            AlertBrush = BrushFromRgb(91, 255, 230);
+            IconBackgroundBrush = BrushFromArgb(124, 48, 40, 12);
+            OnlineBrush = BrushFromRgb(94, 255, 225);
+            OfflineBrush = BrushFromRgb(255, 111, 95);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Crusader)
+        {
+            PanelBackgroundBrush = BrushFromArgb(178, 4, 16, 34);
+            PanelBorderBrush = BrushFromRgb(20, 145, 255);
+            TitleBrush = BrushFromRgb(110, 205, 255);
+            TextBrush = BrushFromRgb(240, 250, 255);
+            MutedBrush = BrushFromRgb(146, 202, 255);
+            AlertBrush = BrushFromRgb(84, 255, 107);
+            IconBackgroundBrush = BrushFromArgb(110, 3, 32, 68);
+            OnlineBrush = BrushFromRgb(97, 255, 126);
+            OfflineBrush = BrushFromRgb(255, 104, 122);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Aegis)
+        {
+            PanelBackgroundBrush = BrushFromArgb(186, 0, 18, 16);
+            PanelBorderBrush = BrushFromRgb(55, 224, 214);
+            TitleBrush = BrushFromRgb(84, 245, 232);
+            TextBrush = BrushFromRgb(224, 255, 250);
+            MutedBrush = BrushFromRgb(112, 201, 193);
+            AlertBrush = BrushFromRgb(255, 51, 41);
+            IconBackgroundBrush = BrushFromArgb(118, 0, 44, 42);
+            OnlineBrush = BrushFromRgb(92, 255, 185);
+            OfflineBrush = BrushFromRgb(255, 63, 55);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Rsi)
+        {
+            PanelBackgroundBrush = BrushFromArgb(184, 20, 12, 34);
+            PanelBorderBrush = BrushFromRgb(150, 143, 255);
+            TitleBrush = BrushFromRgb(214, 201, 255);
+            TextBrush = BrushFromRgb(250, 246, 255);
+            MutedBrush = BrushFromRgb(187, 166, 220);
+            AlertBrush = BrushFromRgb(255, 151, 58);
+            IconBackgroundBrush = BrushFromArgb(124, 35, 22, 64);
+            OnlineBrush = BrushFromRgb(116, 238, 210);
+            OfflineBrush = BrushFromRgb(255, 112, 86);
+            return;
+        }
+
         PanelBackgroundBrush = BrushFromArgb(176, 5, 10, 17);
         PanelBorderBrush = BrushFromRgb(69, 174, 255);
         TitleBrush = BrushFromRgb(83, 190, 255);

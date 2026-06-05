@@ -37,7 +37,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "config\*"
 Source: "{#MyRelaySourceDir}\*"; DestDir: "{app}\RelayServer"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\scripts\Start Star Bridge Relay Server.cmd"; DestDir: "{app}\Tools"; Flags: ignoreversion
 
