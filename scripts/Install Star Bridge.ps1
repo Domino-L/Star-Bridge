@@ -42,7 +42,7 @@ foreach ($shortcutPath in @($desktopShortcut, $startMenuShortcut)) {
     $shortcut.TargetPath = $exePath
     $shortcut.WorkingDirectory = $installDir
     $shortcut.IconLocation = "$exePath,0"
-    $shortcut.Description = "Star Bridge - æ˜Ÿæµ·èˆ°æ¡¥"
+    $shortcut.Description = "Star Bridge - 星海舰桥"
     $shortcut.Save()
 }
 

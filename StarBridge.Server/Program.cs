@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Mail;
 using System.Security.Cryptography;
@@ -41,7 +41,7 @@ var smtpOptions = new SmtpOptions(
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.1",
+    version = "0.3.5",
     mode = string.IsNullOrWhiteSpace(serverKey) ? "open-test" : "protected",
     accounts = users.Count,
     players = players.Count,
@@ -61,7 +61,7 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
-    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.1",
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.5",
     Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_RELEASE_NOTES") ?? "当前服务器未配置新版安装包。",
     string.Equals(Environment.GetEnvironmentVariable("STARBRIDGE_UPDATE_REQUIRED"), "true", StringComparison.OrdinalIgnoreCase),

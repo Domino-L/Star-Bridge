@@ -5,7 +5,7 @@ $root = Split-Path -Parent $scriptsDir
 $project = Join-Path $root "StarBridge.Desktop\StarBridge.Desktop.csproj"
 $nugetConfig = Join-Path $root "NuGet.Config"
 $distDir = Join-Path $root "dist"
-$version = "0.3.1"
+$version = "0.3.5"
 $publishDir = Join-Path $root "StarBridge.Desktop\bin\Release\net8.0-windows\win-x64\publish"
 $stageDir = Join-Path $distDir "StarBridge-$version-win-x64-full"
 $installerExe = Join-Path $distDir "StarBridge-$version-win-x64-full-installer.exe"
@@ -83,7 +83,7 @@ foreach ($shortcutPath in @($desktopShortcut, $startMenuShortcut)) {
     $shortcut.TargetPath = $exePath
     $shortcut.WorkingDirectory = $installDir
     $shortcut.IconLocation = "$exePath,0"
-    $shortcut.Description = "Star Bridge - æ˜Ÿæµ·èˆ°æ¡¥"
+    $shortcut.Description = "Star Bridge - 星海舰桥"
     $shortcut.Save()
 }
 
@@ -119,7 +119,7 @@ Write-Host "Star Bridge removed."
 '@ | Set-Content -LiteralPath (Join-Path $stageDir "UninstallFromPackage.ps1") -Encoding UTF8
 
 @"
-Star Bridge / æ˜Ÿæµ·èˆ°æ¡¥ $version
+Star Bridge / 星海舰桥 $version
 
 This is the full Windows x64 installer build.
 It includes the .NET runtime files produced by self-contained publishing.

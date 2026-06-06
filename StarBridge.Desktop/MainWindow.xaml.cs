@@ -574,7 +574,7 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 FeedbackStatusText.Text = response.StatusCode == HttpStatusCode.NotFound
-                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.1 服务器后重试。"
+                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.5 服务器后重试。"
                     : $"发送失败：{await ReadResponseErrorAsync(response)}";
                 return;
             }
@@ -1994,7 +1994,7 @@ public partial class MainWindow : Window
                 if (!silent)
                 {
                     var error = response.StatusCode == HttpStatusCode.NotFound
-                        ? "server notify endpoint is not available; deploy StarBridge 0.3.1 relay"
+                        ? "server notify endpoint is not available; deploy StarBridge 0.3.5 relay"
                         : await ReadResponseErrorAsync(response);
                     AppendOutput($"Fleet email notification failed: {error}");
                 }
@@ -3765,7 +3765,7 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.1";
+            : "0.3.5";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
