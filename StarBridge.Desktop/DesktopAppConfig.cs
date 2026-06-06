@@ -16,7 +16,8 @@ internal sealed record DesktopAppConfig(
     string? NetworkServerKey,
     string? AccountName,
     string? AuthToken,
-    string? FleetStateJson)
+    string? FleetStateJson,
+    bool AllowEmailNotifications = true)
 {
     public static readonly string ConfigDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -67,7 +68,10 @@ internal sealed record DesktopAppConfig(
             lines.Length > 10 ? EmptyToNull(lines[10]) : null,
             lines.Length > 11 ? EmptyToNull(lines[11]) : null,
             lines.Length > 12 ? EmptyToNull(lines[12]) : null,
-            lines.Length > 13 ? EmptyToNull(lines[13]) : null);
+            lines.Length > 13 ? EmptyToNull(lines[13]) : null,
+            lines.Length > 14 && bool.TryParse(lines[14], out var allowEmailNotifications)
+                ? allowEmailNotifications
+                : true);
     }
 
     public static void Save(DesktopAppConfig config)
@@ -87,7 +91,8 @@ internal sealed record DesktopAppConfig(
             config.NetworkServerKey ?? "",
             config.AccountName ?? "",
             config.AuthToken ?? "",
-            config.FleetStateJson ?? ""
+            config.FleetStateJson ?? "",
+            config.AllowEmailNotifications.ToString()
         };
 
         try

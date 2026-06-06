@@ -41,7 +41,7 @@ var smtpOptions = new SmtpOptions(
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.5",
+    version = "0.3.6",
     mode = string.IsNullOrWhiteSpace(serverKey) ? "open-test" : "protected",
     accounts = users.Count,
     players = players.Count,
@@ -61,8 +61,9 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
-    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.5",
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.6",
     Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
+    Environment.GetEnvironmentVariable("STARBRIDGE_PACKAGE_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_RELEASE_NOTES") ?? "当前服务器未配置新版安装包。",
     string.Equals(Environment.GetEnvironmentVariable("STARBRIDGE_UPDATE_REQUIRED"), "true", StringComparison.OrdinalIgnoreCase),
     DateTimeOffset.UtcNow)));
@@ -111,7 +112,7 @@ app.MapPost("/api/auth/register", async (AuthRequest request) =>
 
     verificationCodes.TryRemove(email, out _);
     await storage.SaveAsync(players, fleets, users, verificationCodes);
-    return Results.Ok(new AuthResponse(account.UserName, account.Email, account.Callsign, account.GameName, account.AuthToken));
+    return Results.Ok(ToAuthResponse(account));
 });
 
 app.MapPost("/api/auth/send-code", async (HttpContext context, EmailVerificationRequest request) =>
@@ -219,9 +220,8 @@ app.MapPost("/api/fleets/notify", async (HttpRequest request, FleetNotificationR
     }
 
     var authorizedUser = GetAuthorizedUserName(request, users);
-    if (!string.IsNullOrWhiteSpace(fleet.OwnerAccount) &&
-        !string.IsNullOrWhiteSpace(authorizedUser) &&
-        !fleet.OwnerAccount.Equals(authorizedUser, StringComparison.OrdinalIgnoreCase))
+    users.TryGetValue(authorizedUser ?? "", out var authorizedAccount);
+    if (!CanSendFleetNotification(fleet, authorizedAccount))
     {
         return Results.Unauthorized();
     }
@@ -241,6 +241,7 @@ app.MapPost("/api/fleets/notify", async (HttpRequest request, FleetNotificationR
     var recipients = users.Values
         .Where(user =>
             !string.IsNullOrWhiteSpace(user.Email) &&
+            user.AllowEmailNotifications &&
             (!string.IsNullOrWhiteSpace(user.GameName) && memberNames.Contains(user.GameName) ||
              !string.IsNullOrWhiteSpace(user.Callsign) && memberNames.Contains(user.Callsign)))
         .Select(user => user.Email!)
@@ -281,7 +282,7 @@ app.MapPost("/api/auth/login", async (AuthRequest request) =>
         : account.AuthToken;
     users[name] = account with { AuthToken = token, LastLogin = DateTimeOffset.UtcNow };
     await storage.SaveAsync(players, fleets, users, verificationCodes);
-    return Results.Ok(new AuthResponse(name, account.Email, account.Callsign, account.GameName, token));
+    return Results.Ok(ToAuthResponse(users[name]));
 });
 
 app.MapPost("/api/auth/profile", async (HttpRequest request, ProfileUpdateRequest profile) =>
@@ -298,10 +299,14 @@ app.MapPost("/api/auth/profile", async (HttpRequest request, ProfileUpdateReques
         return Results.BadRequest(new { error = "Callsign is too long." });
     }
 
-    var updated = account with { Callsign = callsign };
+    var updated = account with
+    {
+        Callsign = callsign,
+        AllowEmailNotifications = profile.AllowEmailNotifications ?? account.AllowEmailNotifications
+    };
     users[userName] = updated;
     await storage.SaveAsync(players, fleets, users, verificationCodes);
-    return Results.Ok(new AuthResponse(updated.UserName, updated.Email, updated.Callsign, updated.GameName, updated.AuthToken));
+    return Results.Ok(ToAuthResponse(updated));
 });
 
 app.MapGet("/api/players", () => Results.Ok(players.Values
@@ -332,6 +337,7 @@ app.MapGet("/api/fleets", () =>
                 CurrentTaskRally = Normalize(fleet.CurrentTaskRally, ""),
                 CurrentTaskShip = Normalize(fleet.CurrentTaskShip, ""),
                 ActionPlans = fleet.ActionPlans ?? [],
+                MemberPermissions = fleet.MemberPermissions ?? [],
                 LastUpdated = DateTimeOffset.UtcNow
             };
         })
@@ -374,6 +380,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
         CurrentTaskShip = Normalize(snapshot.CurrentTaskShip, ""),
         CurrentTaskTime = snapshot.CurrentTaskTime,
         ActionPlans = snapshot.ActionPlans ?? [],
+        MemberPermissions = snapshot.MemberPermissions ?? [],
         OwnerAccount = Normalize(snapshot.OwnerAccount, GetAuthorizedUserName(request, users) ?? ""),
         Squads = snapshot.Squads ?? [],
         LastUpdated = DateTimeOffset.UtcNow
@@ -406,6 +413,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                 CurrentTaskShip = canOverwriteManagedState ? normalized.CurrentTaskShip : existing.CurrentTaskShip,
                 CurrentTaskTime = canOverwriteManagedState ? normalized.CurrentTaskTime : existing.CurrentTaskTime,
                 ActionPlans = canOverwriteManagedState ? normalized.ActionPlans : existing.ActionPlans,
+                MemberPermissions = canOverwriteManagedState ? normalized.MemberPermissions : existing.MemberPermissions,
                 OwnerAccount = canOverwriteManagedState ? normalized.OwnerAccount : existing.OwnerAccount,
                 Squads = MergeSquads(existing.Squads, normalized.Squads)
             };
@@ -442,6 +450,128 @@ app.MapPost("/api/players", async (HttpRequest request, NetworkPlayerSnapshot sn
     players.AddOrUpdate(normalized.Name, normalized, (_, _) => normalized);
     await storage.SaveAsync(players, fleets, users, verificationCodes);
     return Results.Ok(normalized);
+});
+
+app.MapPost("/api/fleets/members/remove", async (HttpRequest request, FleetMemberMutationRequest mutation) =>
+{
+    if (string.IsNullOrWhiteSpace(mutation.FleetCode) || string.IsNullOrWhiteSpace(mutation.TargetGameName))
+    {
+        return Results.BadRequest(new { error = "Fleet code and target player are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = mutation.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var targetName = mutation.TargetGameName.Trim();
+    if ((!string.IsNullOrWhiteSpace(account.GameName) && targetName.Equals(account.GameName, StringComparison.OrdinalIgnoreCase)) ||
+        targetName.Equals(account.UserName, StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.BadRequest(new { error = "The fleet commander cannot remove themselves." });
+    }
+
+    var removed = false;
+    foreach (var pair in players.ToArray())
+    {
+        if (pair.Key.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
+            pair.Value.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrWhiteSpace(pair.Value.Callsign) && pair.Value.Callsign.Equals(targetName, StringComparison.OrdinalIgnoreCase)))
+        {
+            players[pair.Key] = pair.Value with
+            {
+                Fleet = "No Fleet",
+                Squad = "Unassigned",
+                LastUpdated = DateTimeOffset.UtcNow
+            };
+            removed = true;
+        }
+    }
+
+    fleets[fleetCode] = fleet with
+    {
+        MemberPermissions = (fleet.MemberPermissions ?? [])
+            .Where(permission => !permission.GameName.Equals(targetName, StringComparison.OrdinalIgnoreCase))
+            .ToArray(),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(new { removed, target = targetName });
+});
+
+app.MapPost("/api/fleets/transfer-commander", async (HttpRequest request, FleetCommanderTransferRequest transfer) =>
+{
+    if (string.IsNullOrWhiteSpace(transfer.FleetCode) || string.IsNullOrWhiteSpace(transfer.TargetGameName))
+    {
+        return Results.BadRequest(new { error = "Fleet code and target player are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = transfer.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var targetName = transfer.TargetGameName.Trim();
+    var targetAccount = users.Values.FirstOrDefault(user =>
+        targetName.Equals(user.UserName, StringComparison.OrdinalIgnoreCase) ||
+        (!string.IsNullOrWhiteSpace(user.GameName) && targetName.Equals(user.GameName, StringComparison.OrdinalIgnoreCase)) ||
+        (!string.IsNullOrWhiteSpace(user.Callsign) && targetName.Equals(user.Callsign, StringComparison.OrdinalIgnoreCase)));
+    if (targetAccount is null)
+    {
+        return Results.BadRequest(new { error = "Target player must have a StarBridge account." });
+    }
+
+    var targetDisplayName = string.IsNullOrWhiteSpace(targetAccount.Callsign)
+        ? Normalize(targetAccount.GameName, targetName)
+        : $"{targetAccount.Callsign} ({Normalize(targetAccount.GameName, targetName)})";
+    var updated = fleet with
+    {
+        Commander = targetDisplayName,
+        OwnerAccount = targetAccount.UserName,
+        MemberPermissions = (fleet.MemberPermissions ?? [])
+            .Where(permission => !permission.GameName.Equals(Normalize(targetAccount.GameName, targetName), StringComparison.OrdinalIgnoreCase))
+            .Append(new NetworkFleetMemberPermissionSnapshot(
+                Normalize(targetAccount.GameName, targetName),
+                targetAccount.Callsign,
+                "舰队指挥官",
+                true,
+                true,
+                true,
+                true,
+                true,
+                DateTimeOffset.UtcNow))
+            .ToArray(),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
 });
 
 app.MapPost("/api/fleets/disband", async (HttpRequest request, FleetDisbandRequest disbandRequest) =>
@@ -644,7 +774,62 @@ static UserAccount CreateAccount(string name, string password, string? gameName,
         Convert.ToBase64String(hash),
         DateTimeOffset.UtcNow,
         DateTimeOffset.UtcNow,
-        string.IsNullOrWhiteSpace(email) ? null : email.Trim());
+        string.IsNullOrWhiteSpace(email) ? null : email.Trim(),
+        true);
+}
+
+static AuthResponse ToAuthResponse(UserAccount account)
+{
+    return new AuthResponse(
+        account.UserName,
+        account.Email,
+        account.Callsign,
+        account.GameName,
+        account.AuthToken,
+        account.AllowEmailNotifications);
+}
+
+static bool CanSendFleetNotification(NetworkFleetSnapshot fleet, UserAccount? account)
+{
+    if (account is null)
+    {
+        return false;
+    }
+
+    if (!string.IsNullOrWhiteSpace(fleet.OwnerAccount) &&
+        fleet.OwnerAccount.Equals(account.UserName, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (string.IsNullOrWhiteSpace(fleet.Commander))
+    {
+        return false;
+    }
+
+    return (!string.IsNullOrWhiteSpace(account.GameName) &&
+            fleet.Commander.Equals(account.GameName, StringComparison.OrdinalIgnoreCase)) ||
+           (!string.IsNullOrWhiteSpace(account.Callsign) &&
+            fleet.Commander.Equals(account.Callsign, StringComparison.OrdinalIgnoreCase));
+}
+
+static bool IsFleetOwner(NetworkFleetSnapshot fleet, UserAccount account)
+{
+    if (!string.IsNullOrWhiteSpace(fleet.OwnerAccount) &&
+        fleet.OwnerAccount.Equals(account.UserName, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (string.IsNullOrWhiteSpace(fleet.Commander))
+    {
+        return false;
+    }
+
+    return (!string.IsNullOrWhiteSpace(account.GameName) &&
+            fleet.Commander.Contains(account.GameName, StringComparison.OrdinalIgnoreCase)) ||
+           (!string.IsNullOrWhiteSpace(account.Callsign) &&
+            fleet.Commander.Contains(account.Callsign, StringComparison.OrdinalIgnoreCase));
 }
 
 static bool VerifyPassword(string password, UserAccount account)
@@ -799,7 +984,8 @@ public sealed record EmailVerificationRequest(
     string Email);
 
 public sealed record ProfileUpdateRequest(
-    string? Callsign);
+    string? Callsign,
+    bool? AllowEmailNotifications = null);
 
 public sealed record FeedbackRequest(
     string? Contact,
@@ -810,6 +996,7 @@ public sealed record FeedbackRequest(
 public sealed record UpdateManifest(
     string Version,
     string? DownloadUrl,
+    string? PackageUrl,
     string? Notes,
     bool Required = false,
     DateTimeOffset? PublishedAt = null);
@@ -824,7 +1011,8 @@ public sealed record AuthResponse(
     string? Email,
     string? Callsign,
     string? GameName,
-    string Token);
+    string Token,
+    bool AllowEmailNotifications = true);
 
 public sealed record UserAccount(
     string UserName,
@@ -835,7 +1023,8 @@ public sealed record UserAccount(
     string PasswordHash,
     DateTimeOffset CreatedAt,
     DateTimeOffset LastLogin,
-    string? Email = null);
+    string? Email = null,
+    bool AllowEmailNotifications = true);
 
 public sealed record VerificationCodeRecord(
     string Email,
@@ -881,11 +1070,31 @@ public sealed record NetworkFleetSnapshot(
     DateTime? CurrentTaskTime,
     NetworkActionPlanSnapshot[]? ActionPlans,
     DateTimeOffset LastUpdated,
-    string? OwnerAccount = null);
+    string? OwnerAccount = null,
+    NetworkFleetMemberPermissionSnapshot[]? MemberPermissions = null);
+
+public sealed record NetworkFleetMemberPermissionSnapshot(
+    string GameName,
+    string? Callsign,
+    string RoleTitle,
+    bool PermissionEnabled,
+    bool CanRemoveMembers,
+    bool CanPublishTasks,
+    bool CanPublishPlans,
+    bool CanManageFleetInfo,
+    DateTimeOffset UpdatedAt);
 
 public sealed record FleetDisbandRequest(
     string FleetCode,
     string Password);
+
+public sealed record FleetMemberMutationRequest(
+    string FleetCode,
+    string TargetGameName);
+
+public sealed record FleetCommanderTransferRequest(
+    string FleetCode,
+    string TargetGameName);
 
 public sealed record NetworkSquadSnapshot(
     string Name,

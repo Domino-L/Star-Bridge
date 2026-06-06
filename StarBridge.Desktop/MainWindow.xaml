@@ -60,7 +60,7 @@
                             VerticalAlignment="Center"
                             Margin="18,0,0,0">
                     <TextBlock x:Name="WindowTitleText"
-                               Text="星海舰桥 V0.3.5"
+                               Text="星海舰桥 V0.3.6"
                                VerticalAlignment="Center"
                                FontSize="14"
                                FontWeight="SemiBold"
@@ -1742,6 +1742,204 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
+                                <TabItem Header="成员">
+                                    <Border Style="{StaticResource HudPanel}"
+                                            Padding="18">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="FLEET MEMBERS"
+                                                           Style="{StaticResource HudCaptionText}" />
+                                                <TextBlock Text="成员与权限"
+                                                           Margin="0,8,0,0"
+                                                           Foreground="{StaticResource PrimaryTextBrush}"
+                                                           FontSize="20"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock Text="舰队指挥官拥有最高权限。授权职位低于舰队指挥官，高于普通成员。"
+                                                           Margin="0,8,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+
+                                            <Border Grid.Row="1"
+                                                    Margin="0,18,0,0"
+                                                    Background="{StaticResource FieldBackBrush}"
+                                                    BorderBrush="{StaticResource AccentDimBrush}"
+                                                    BorderThickness="1">
+                                                <Grid>
+                                                    <TextBlock x:Name="FleetMemberManagementEmptyText"
+                                                               Text="暂无可管理成员。"
+                                                               Foreground="{StaticResource MutedTextBrush}"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center" />
+                                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                                        <ItemsControl x:Name="FleetMemberManagementList"
+                                                                      Margin="10">
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <Border Style="{StaticResource SquadBannerPanel}"
+                                                                            MinHeight="126"
+                                                                            Margin="0,0,0,10">
+                                                                        <Grid>
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="56" />
+                                                                                <ColumnDefinition Width="260" />
+                                                                                <ColumnDefinition Width="170" />
+                                                                                <ColumnDefinition Width="*" />
+                                                                                <ColumnDefinition Width="330" />
+                                                                            </Grid.ColumnDefinitions>
+
+                                                                            <Border Width="42"
+                                                                                    Height="42"
+                                                                                    HorizontalAlignment="Left"
+                                                                                    VerticalAlignment="Top"
+                                                                                    Background="{StaticResource PanelBackBrush}"
+                                                                                    BorderBrush="{StaticResource AccentBrush}"
+                                                                                    BorderThickness="1">
+                                                                                <Grid>
+                                                                                    <Image Source="{Binding AvatarPath, Converter={StaticResource ImagePathConverter}}"
+                                                                                           Stretch="UniformToFill" />
+                                                                                    <TextBlock Text="{Binding Initials}"
+                                                                                               Foreground="{StaticResource AccentBrush}"
+                                                                                               FontWeight="SemiBold"
+                                                                                               HorizontalAlignment="Center"
+                                                                                               VerticalAlignment="Center">
+                                                                                        <TextBlock.Style>
+                                                                                            <Style TargetType="TextBlock">
+                                                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                                                                <Style.Triggers>
+                                                                                                    <DataTrigger Binding="{Binding AvatarPath}" Value="{x:Null}">
+                                                                                                        <Setter Property="Visibility" Value="Visible" />
+                                                                                                    </DataTrigger>
+                                                                                                    <DataTrigger Binding="{Binding AvatarPath}" Value="">
+                                                                                                        <Setter Property="Visibility" Value="Visible" />
+                                                                                                    </DataTrigger>
+                                                                                                </Style.Triggers>
+                                                                                            </Style>
+                                                                                        </TextBlock.Style>
+                                                                                    </TextBlock>
+                                                                                </Grid>
+                                                                            </Border>
+
+                                                                            <StackPanel Grid.Column="1"
+                                                                                        VerticalAlignment="Top">
+                                                                                <TextBlock Text="{Binding DisplayName}"
+                                                                                           Foreground="{StaticResource PrimaryTextBrush}"
+                                                                                           FontSize="15"
+                                                                                           FontWeight="SemiBold"
+                                                                                           TextTrimming="CharacterEllipsis" />
+                                                                                <TextBlock Text="{Binding HeaderLine}"
+                                                                                           Margin="0,5,0,0"
+                                                                                           Style="{StaticResource HudCaptionText}"
+                                                                                           TextTrimming="CharacterEllipsis" />
+                                                                            </StackPanel>
+
+                                                                            <StackPanel Grid.Column="2"
+                                                                                        VerticalAlignment="Top">
+                                                                                <TextBlock Text="职位"
+                                                                                           Style="{StaticResource HudCaptionText}" />
+                                                                                <TextBox Text="{Binding RoleTitle, UpdateSourceTrigger=PropertyChanged}"
+                                                                                         Margin="0,6,0,0"
+                                                                                         Height="34"
+                                                                                         IsEnabled="{Binding PermissionEnabled}" />
+                                                                                <TextBlock Text="{Binding RoleTitle}"
+                                                                                           Foreground="{Binding RoleBrush}"
+                                                                                           FontWeight="SemiBold"
+                                                                                           Margin="0,6,0,0"
+                                                                                           TextTrimming="CharacterEllipsis" />
+                                                                            </StackPanel>
+
+                                                                            <StackPanel Grid.Column="3"
+                                                                                        VerticalAlignment="Top">
+                                                                                <CheckBox Content="给予权限"
+                                                                                          IsChecked="{Binding PermissionEnabled}"
+                                                                                          IsEnabled="{Binding CanEditPermissions}"
+                                                                                          Foreground="{StaticResource PrimaryTextBrush}" />
+                                                                                <StackPanel Margin="0,8,0,0">
+                                                                                    <StackPanel.Style>
+                                                                                        <Style TargetType="StackPanel">
+                                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                                            <Style.Triggers>
+                                                                                                <DataTrigger Binding="{Binding PermissionEnabled}" Value="True">
+                                                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                                                </DataTrigger>
+                                                                                            </Style.Triggers>
+                                                                                        </Style>
+                                                                                    </StackPanel.Style>
+                                                                                    <WrapPanel>
+                                                                                        <CheckBox Content="移除成员"
+                                                                                                  IsChecked="{Binding CanRemoveMembers}"
+                                                                                                  IsEnabled="{Binding CanEditPermissions}"
+                                                                                                  Foreground="{StaticResource PrimaryTextBrush}"
+                                                                                                  Margin="0,0,18,8" />
+                                                                                        <CheckBox Content="发布任务"
+                                                                                                  IsChecked="{Binding CanPublishTasks}"
+                                                                                                  IsEnabled="{Binding CanEditPermissions}"
+                                                                                                  Foreground="{StaticResource PrimaryTextBrush}"
+                                                                                                  Margin="0,0,18,8" />
+                                                                                        <CheckBox Content="发布计划"
+                                                                                                  IsChecked="{Binding CanPublishPlans}"
+                                                                                                  IsEnabled="{Binding CanEditPermissions}"
+                                                                                                  Foreground="{StaticResource PrimaryTextBrush}"
+                                                                                                  Margin="0,0,18,8" />
+                                                                                        <CheckBox Content="管理舰队信息"
+                                                                                                  IsChecked="{Binding CanManageFleetInfo}"
+                                                                                                  IsEnabled="{Binding CanEditPermissions}"
+                                                                                                  Foreground="{StaticResource PrimaryTextBrush}"
+                                                                                                  Margin="0,0,18,8" />
+                                                                                    </WrapPanel>
+                                                                                </StackPanel>
+                                                                            </StackPanel>
+
+                                                                            <Grid Grid.Column="4"
+                                                                                  VerticalAlignment="Bottom">
+                                                                                <Grid.ColumnDefinitions>
+                                                                                    <ColumnDefinition Width="*" />
+                                                                                    <ColumnDefinition Width="*" />
+                                                                                    <ColumnDefinition Width="*" />
+                                                                                </Grid.ColumnDefinitions>
+                                                                                <Button Content="保存权限"
+                                                                                        Style="{StaticResource PrimaryButton}"
+                                                                                        Height="38"
+                                                                                        Tag="{Binding}"
+                                                                                        Click="SaveFleetMemberPermission_Click" />
+                                                                                <Button Grid.Column="1"
+                                                                                        Content="移除成员"
+                                                                                        Style="{StaticResource SecondaryButton}"
+                                                                                        Height="38"
+                                                                                        Margin="8,0,0,0"
+                                                                                        IsEnabled="{Binding CanRemoveFromFleet}"
+                                                                                        Tag="{Binding}"
+                                                                                        Click="RemoveFleetMember_Click" />
+                                                                                <Button Grid.Column="2"
+                                                                                        Content="转移指挥官"
+                                                                                        Style="{StaticResource SecondaryButton}"
+                                                                                        Height="38"
+                                                                                        Margin="8,0,0,0"
+                                                                                        IsEnabled="{Binding CanTransferCommander}"
+                                                                                        Tag="{Binding}"
+                                                                                        Click="TransferFleetCommander_Click" />
+                                                                            </Grid>
+                                                                        </Grid>
+                                                                    </Border>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
+                                                    </ScrollViewer>
+                                                </Grid>
+                                            </Border>
+
+                                            <TextBlock Grid.Row="2"
+                                                       x:Name="FleetMemberManagementStatusText"
+                                                       Margin="0,12,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}" />
+                                        </Grid>
+                                    </Border>
+                                </TabItem>
                                 <TabItem Header="日志">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
@@ -3351,6 +3549,7 @@
                                     <RowDefinition Height="42" />
                                     <RowDefinition Height="42" />
                                     <RowDefinition Height="42" />
+                                    <RowDefinition Height="42" />
                                 </Grid.RowDefinitions>
 
                                 <TextBlock x:Name="PlayerNameLabel" Text="Player Name" Foreground="{StaticResource MutedTextBrush}" />
@@ -3366,6 +3565,12 @@
                                 <TextBlock x:Name="LocalFleetText" Grid.Row="3" Grid.Column="1" Text="Local Fleet" />
                                 <TextBlock x:Name="StatusLabel" Grid.Row="4" Text="Status" Foreground="{StaticResource MutedTextBrush}" />
                                 <TextBlock x:Name="ProfileStatusText" Grid.Row="4" Grid.Column="1" Text="Identity Required" />
+                                <CheckBox x:Name="EmailNotificationsCheck"
+                                          Grid.Row="5"
+                                          Grid.Column="1"
+                                          Content="允许接收舰队邮件通知"
+                                          Checked="EmailNotificationsCheck_Changed"
+                                          Unchecked="EmailNotificationsCheck_Changed" />
                             </Grid>
                         </StackPanel>
                     </Border>

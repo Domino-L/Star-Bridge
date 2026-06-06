@@ -7,11 +7,13 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -71,7 +73,19 @@ public sealed record NetworkFleetSnapshot(
     DateTime? CurrentTaskTime,
     NetworkActionPlanSnapshot[]? ActionPlans,
     DateTimeOffset LastUpdated,
-    string? OwnerAccount = null);
+    string? OwnerAccount = null,
+    NetworkFleetMemberPermissionSnapshot[]? MemberPermissions = null);
+
+public sealed record NetworkFleetMemberPermissionSnapshot(
+    string GameName,
+    string? Callsign,
+    string RoleTitle,
+    bool PermissionEnabled,
+    bool CanRemoveMembers,
+    bool CanPublishTasks,
+    bool CanPublishPlans,
+    bool CanManageFleetInfo,
+    DateTimeOffset UpdatedAt);
 
 public sealed record NetworkSquadSnapshot(
     string Name,
@@ -106,13 +120,15 @@ public sealed record AuthResponse(
     string? Email,
     string? Callsign,
     string? GameName,
-    string Token);
+    string Token,
+    bool AllowEmailNotifications = true);
 
 public sealed record EmailVerificationRequest(
     string Email);
 
 public sealed record ProfileUpdateRequest(
-    string? Callsign);
+    string? Callsign,
+    bool? AllowEmailNotifications = null);
 
 public sealed record FeedbackRequest(
     string? Contact,
@@ -123,6 +139,7 @@ public sealed record FeedbackRequest(
 public sealed record UpdateManifest(
     string Version,
     string? DownloadUrl,
+    string? PackageUrl,
     string? Notes,
     bool Required = false,
     DateTimeOffset? PublishedAt = null);
@@ -135,6 +152,14 @@ public sealed record FleetNotificationRequest(
 public sealed record FleetDisbandRequest(
     string FleetCode,
     string Password);
+
+public sealed record FleetMemberMutationRequest(
+    string FleetCode,
+    string TargetGameName);
+
+public sealed record FleetCommanderTransferRequest(
+    string FleetCode,
+    string TargetGameName);
 
 public sealed record LocalFleetState(
     bool HasFleet,
@@ -163,7 +188,19 @@ public sealed record LocalFleetState(
     string? JoinedSquadName,
     LocalFleetActionPlan[]? ActionPlans,
     string[]? JoinedActionPlanIds,
-    LocalFleetEventLog[]? EventLog);
+    LocalFleetEventLog[]? EventLog,
+    LocalFleetMemberPermission[]? MemberPermissions = null);
+
+public sealed record LocalFleetMemberPermission(
+    string GameName,
+    string? Callsign,
+    string RoleTitle,
+    bool PermissionEnabled,
+    bool CanRemoveMembers,
+    bool CanPublishTasks,
+    bool CanPublishPlans,
+    bool CanManageFleetInfo,
+    DateTimeOffset UpdatedAt);
 
 public sealed record LocalFleetTaskHistory(
     string Key,
@@ -299,7 +336,9 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<FleetTaskHistoryRow> _fleetTaskHistory = [];
     private readonly ObservableCollection<FleetActionPlanRow> _fleetActionPlans = [];
     private readonly ObservableCollection<FleetEventLogRow> _fleetEventLogs = [];
+    private readonly ObservableCollection<FleetMemberManagementRow> _fleetMemberRows = [];
     private readonly List<FleetEventLogRow> _allFleetEventLogs = [];
+    private readonly Dictionary<string, LocalFleetMemberPermission> _fleetMemberPermissions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, NetworkPlayerSnapshot> _networkSnapshots = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _joinedActionPlanIds = new(StringComparer.OrdinalIgnoreCase);
     private SquadRow? _selectedSquad;
@@ -347,6 +386,7 @@ public partial class MainWindow : Window
     private string _selectedActionPlanId = "";
     private bool _joinActionNotifyMe;
     private string? _callsign;
+    private bool _allowEmailNotifications = true;
     private OverlayWindow? _overlayWindow;
     private OverlayLayoutItem? _activeOverlayItem;
     private FrameworkElement? _activeOverlayEditorElement;
@@ -361,6 +401,7 @@ public partial class MainWindow : Window
     private bool _isLoginDialogOpen;
     private bool _isClosingAfterOfflineUpload;
     private bool _isNetworkSyncRunning;
+    private bool _isRefreshingAccountPanel;
     private DateTimeOffset _lastProcessDrivenRenderAt = DateTimeOffset.MinValue;
     private HwndSource? _hotkeySource;
     private bool _hotkeyRegistered;
@@ -383,6 +424,7 @@ public partial class MainWindow : Window
         FleetTaskHistoryList.ItemsSource = _fleetTaskHistory;
         FleetActionPlanList.ItemsSource = _fleetActionPlans;
         FleetEventLogList.ItemsSource = _fleetEventLogs;
+        FleetMemberManagementList.ItemsSource = _fleetMemberRows;
 
         _isLoadingSettings = true;
         var config = DesktopAppConfig.Load();
@@ -393,6 +435,7 @@ public partial class MainWindow : Window
         _authToken = config.AuthToken;
         _avatarPath = config.AvatarPath;
         _callsign = config.Callsign;
+        _allowEmailNotifications = config.AllowEmailNotifications;
         if (string.IsNullOrWhiteSpace(_authToken))
         {
             _callsign = null;
@@ -413,7 +456,7 @@ public partial class MainWindow : Window
             ? "Ctrl+Shift+O"
             : config.OverlayHotkey;
         NetworkServerUrlBox.Text = string.IsNullOrWhiteSpace(config.NetworkServerUrl)
-            ? "http://198.13.49.128:5058"
+            ? "https://api.scstarbridge.com"
             : config.NetworkServerUrl;
         NetworkServerKeyBox.Password = config.NetworkServerKey ?? "";
         CallsignBox.Text = _callsign ?? "";
@@ -529,19 +572,24 @@ public partial class MainWindow : Window
 
             var notes = string.IsNullOrWhiteSpace(manifest.Notes) ? "无版本说明。" : manifest.Notes.Trim();
             UpdateStatusText.Text = $"发现新版本 V{manifest.Version}。{notes}";
-            if (string.IsNullOrWhiteSpace(manifest.DownloadUrl))
+            if (string.IsNullOrWhiteSpace(manifest.PackageUrl) && string.IsNullOrWhiteSpace(manifest.DownloadUrl))
             {
                 UpdateStatusText.Text += " 服务器尚未配置下载地址。";
                 return;
             }
 
-            var message = $"发现新版本 V{manifest.Version}。\n\n{notes}\n\n是否打开安装包下载链接？";
+            var updateMode = string.IsNullOrWhiteSpace(manifest.PackageUrl) ? "完整安装包更新" : "软件内覆盖更新";
+            var message = $"发现新版本 V{manifest.Version}。\n\n{notes}\n\n更新方式：{updateMode}\n是否现在更新？";
             if (System.Windows.MessageBox.Show(this, message, "星海舰桥更新", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
             {
-                Process.Start(new ProcessStartInfo(manifest.DownloadUrl)
+                if (!string.IsNullOrWhiteSpace(manifest.PackageUrl))
                 {
-                    UseShellExecute = true
-                });
+                    await DownloadAndApplyPackageUpdateAsync(manifest);
+                }
+                else
+                {
+                    await DownloadAndRunInstallerUpdateAsync(manifest);
+                }
             }
         }
         catch (Exception ex)
@@ -551,6 +599,179 @@ public partial class MainWindow : Window
                 UpdateStatusText.Text = $"检查更新失败：{ex.Message}";
             }
         }
+    }
+
+    private async Task DownloadAndApplyPackageUpdateAsync(UpdateManifest manifest)
+    {
+        if (!Uri.TryCreate(manifest.PackageUrl, UriKind.Absolute, out var packageUri))
+        {
+            UpdateStatusText.Text = "更新失败：服务器返回的覆盖更新包地址无效。";
+            return;
+        }
+
+        CheckUpdateButton.IsEnabled = false;
+        try
+        {
+            var updateRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "StarBridge",
+                "Updates");
+            Directory.CreateDirectory(updateRoot);
+
+            var safeVersion = string.Join("_", manifest.Version.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+            var packagePath = Path.Combine(updateRoot, $"StarBridge-{safeVersion}-win-x64-update.zip");
+            await DownloadUpdateFileAsync(packageUri, packagePath, manifest.Version);
+
+            UpdateStatusText.Text = "下载完成，正在准备覆盖更新...";
+            var appDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var exePath = Environment.ProcessPath ?? Path.Combine(appDir, "Star Bridge.exe");
+            var scriptPath = CreatePortableUpdateScript(updateRoot, packagePath, appDir, exePath);
+
+            Process.Start(new ProcessStartInfo("powershell.exe")
+            {
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -ProcessId {Environment.ProcessId}"
+            });
+
+            System.Windows.Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            UpdateStatusText.Text = $"更新失败：{ex.Message}";
+            CheckUpdateButton.IsEnabled = true;
+        }
+    }
+
+    private async Task DownloadAndRunInstallerUpdateAsync(UpdateManifest manifest)
+    {
+        if (!Uri.TryCreate(manifest.DownloadUrl, UriKind.Absolute, out var downloadUri))
+        {
+            UpdateStatusText.Text = "更新失败：服务器返回的安装包地址无效。";
+            return;
+        }
+
+        CheckUpdateButton.IsEnabled = false;
+        try
+        {
+            var updateRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "StarBridge",
+                "Updates");
+            Directory.CreateDirectory(updateRoot);
+
+            var safeVersion = string.Join("_", manifest.Version.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+            var installerPath = Path.Combine(updateRoot, $"StarBridge-{safeVersion}-win-x64-setup.exe");
+
+            await DownloadUpdateFileAsync(downloadUri, installerPath, manifest.Version);
+
+            UpdateStatusText.Text = "下载完成，正在启动覆盖安装...";
+            Process.Start(new ProcessStartInfo(installerPath)
+            {
+                UseShellExecute = true,
+                Arguments = "/CLOSEAPPLICATIONS /NORESTART /SP-"
+            });
+
+            System.Windows.Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            UpdateStatusText.Text = $"更新失败：{ex.Message}";
+            CheckUpdateButton.IsEnabled = true;
+        }
+    }
+
+    private async Task DownloadUpdateFileAsync(Uri downloadUri, string destinationPath, string version)
+    {
+        UpdateStatusText.Text = $"正在下载 V{version} 更新...";
+        using var updateClient = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
+        using var response = await updateClient.GetAsync(downloadUri, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength;
+        await using var source = await response.Content.ReadAsStreamAsync();
+        await using var destination = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+
+        var buffer = new byte[128 * 1024];
+        long receivedBytes = 0;
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            await destination.WriteAsync(buffer.AsMemory(0, read));
+            receivedBytes += read;
+            if (totalBytes is > 0)
+            {
+                var percent = Math.Clamp(receivedBytes * 100 / totalBytes.Value, 0, 100);
+                UpdateStatusText.Text = $"正在下载 V{version} 更新... {percent}%";
+            }
+        }
+    }
+
+    private static string CreatePortableUpdateScript(string updateRoot, string packagePath, string appDir, string exePath)
+    {
+        var scriptPath = Path.Combine(updateRoot, "apply-starbridge-update.ps1");
+        var extractDir = Path.Combine(updateRoot, "extracted");
+        var escapedPackage = EscapePowerShellSingleQuoted(packagePath);
+        var escapedExtract = EscapePowerShellSingleQuoted(extractDir);
+        var escapedAppDir = EscapePowerShellSingleQuoted(appDir);
+        var escapedExe = EscapePowerShellSingleQuoted(exePath);
+
+        var script = $$"""
+param([int]$ProcessId)
+$ErrorActionPreference = 'Stop'
+$packagePath = '{{escapedPackage}}'
+$extractDir = '{{escapedExtract}}'
+$appDir = '{{escapedAppDir}}'
+$exePath = '{{escapedExe}}'
+
+try {
+    Wait-Process -Id $ProcessId -Timeout 60 -ErrorAction SilentlyContinue
+} catch {}
+
+if (Test-Path -LiteralPath $extractDir) {
+    Remove-Item -LiteralPath $extractDir -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+Expand-Archive -LiteralPath $packagePath -DestinationPath $extractDir -Force
+
+$sourceDir = $extractDir
+if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'Star Bridge.exe'))) {
+    $candidate = Get-ChildItem -LiteralPath $extractDir -Directory -Recurse |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Star Bridge.exe') } |
+        Select-Object -First 1
+    if ($candidate) {
+        $sourceDir = $candidate.FullName
+    }
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'Star Bridge.exe'))) {
+    throw '更新包中没有找到 Star Bridge.exe。'
+}
+
+Get-ChildItem -LiteralPath $sourceDir -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $appDir -Recurse -Force
+}
+
+Start-Process -FilePath $exePath -WorkingDirectory $appDir
+Start-Sleep -Seconds 2
+try {
+    Remove-Item -LiteralPath $extractDir -Recurse -Force
+    Remove-Item -LiteralPath $packagePath -Force
+} catch {}
+""";
+
+        File.WriteAllText(scriptPath, script, Encoding.UTF8);
+        return scriptPath;
+    }
+
+    private static string EscapePowerShellSingleQuoted(string value)
+    {
+        return value.Replace("'", "''");
     }
 
     private async void SendFeedbackButton_Click(object sender, RoutedEventArgs e)
@@ -574,7 +795,7 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 FeedbackStatusText.Text = response.StatusCode == HttpStatusCode.NotFound
-                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.5 服务器后重试。"
+                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.6 服务器后重试。"
                     : $"发送失败：{await ReadResponseErrorAsync(response)}";
                 return;
             }
@@ -618,45 +839,57 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (IsLoggedIn)
+        _isRefreshingAccountPanel = true;
+        try
         {
-            AccountNameText.Text = _accountName ?? "已登录";
-            AccountModeText.Text = "已连接星海舰桥服务器，可同步舰队与玩家状态";
-            LoginButton.Content = "切换账号";
-            LogoutButton.IsEnabled = true;
-            LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
-                ? "已登录"
-                : $"已登录：{_accountName}";
-            CallsignBox.IsReadOnly = false;
-            CallsignBox.IsEnabled = true;
-            CallsignBox.Text = _callsign ?? "";
-            ChooseAvatarButton.IsEnabled = true;
-            OpenHangarReaderButton.IsEnabled = true;
-            ImportHangarButton.IsEnabled = true;
-            ClearShipDatabaseButton.IsEnabled = true;
-            RenderCachedIdentity();
+            if (IsLoggedIn)
+            {
+                AccountNameText.Text = _accountName ?? "已登录";
+                AccountModeText.Text = "已连接星海舰桥服务器，可同步舰队与玩家状态";
+                LoginButton.Content = "切换账号";
+                LogoutButton.IsEnabled = true;
+                LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
+                    ? "已登录"
+                    : $"已登录：{_accountName}";
+                CallsignBox.IsReadOnly = false;
+                CallsignBox.IsEnabled = true;
+                CallsignBox.Text = _callsign ?? "";
+                EmailNotificationsCheck.IsEnabled = true;
+                EmailNotificationsCheck.IsChecked = _allowEmailNotifications;
+                ChooseAvatarButton.IsEnabled = true;
+                OpenHangarReaderButton.IsEnabled = true;
+                ImportHangarButton.IsEnabled = true;
+                ClearShipDatabaseButton.IsEnabled = true;
+                RenderCachedIdentity();
+                LoadAvatarPreview();
+                LoadOwnedShips();
+                return;
+            }
+
+            AccountNameText.Text = "访客模式";
+            AccountModeText.Text = "只能浏览，无法同步或管理舰队";
+            LoginButton.Content = "登录 / 注册";
+            LogoutButton.IsEnabled = false;
+            LoginStatusText.Text = "未登录";
+            CallsignBox.IsReadOnly = true;
+            CallsignBox.IsEnabled = false;
+            CallsignBox.Text = "";
+            EmailNotificationsCheck.IsEnabled = false;
+            EmailNotificationsCheck.IsChecked = false;
+            GameNameText.Text = "请登录后查看";
+            PlayerIdText.Text = "请登录后查看";
+            ProfileStatusText.Text = "浏览模式";
+            ChooseAvatarButton.IsEnabled = false;
+            OpenHangarReaderButton.IsEnabled = false;
+            ImportHangarButton.IsEnabled = false;
+            ClearShipDatabaseButton.IsEnabled = false;
             LoadAvatarPreview();
             LoadOwnedShips();
-            return;
         }
-
-        AccountNameText.Text = "访客模式";
-        AccountModeText.Text = "只能浏览，无法同步或管理舰队";
-        LoginButton.Content = "登录 / 注册";
-        LogoutButton.IsEnabled = false;
-        LoginStatusText.Text = "未登录";
-        CallsignBox.IsReadOnly = true;
-        CallsignBox.IsEnabled = false;
-        CallsignBox.Text = "";
-        GameNameText.Text = "请登录后查看";
-        PlayerIdText.Text = "请登录后查看";
-        ProfileStatusText.Text = "浏览模式";
-        ChooseAvatarButton.IsEnabled = false;
-        OpenHangarReaderButton.IsEnabled = false;
-        ImportHangarButton.IsEnabled = false;
-        ClearShipDatabaseButton.IsEnabled = false;
-        LoadAvatarPreview();
-        LoadOwnedShips();
+        finally
+        {
+            _isRefreshingAccountPanel = false;
+        }
     }
 
     private void NavigateToMyFleet()
@@ -1019,6 +1252,7 @@ public partial class MainWindow : Window
         RefreshFleetHeader();
         RenderSquads();
         RenderMySquad();
+        RefreshFleetMemberManagement();
         RefreshOverlayWindow();
 
         var local = _players.FirstOrDefault(player =>
@@ -1045,14 +1279,68 @@ public partial class MainWindow : Window
 
     private string GetFleetRole(string playerName, string? callsign)
     {
-        return IsFleetCommander(playerName, callsign) ? "舰队指挥官" : "成员";
+        if (IsFleetCommander(playerName, callsign))
+        {
+            return "舰队指挥官";
+        }
+
+        var permission = GetFleetPermission(playerName);
+        return permission is not null && permission.PermissionEnabled
+            ? NormalizeRoleTitle(permission.RoleTitle)
+            : "成员";
     }
 
     private System.Windows.Media.Brush GetFleetNameBrush(string playerName)
     {
-        return IsFleetCommander(playerName, IsLocalPlayer(playerName) ? _callsign : null)
-            ? FindBrush("FleetCommanderNameBrush", Brushes.Gold)
+        if (IsFleetCommander(playerName, IsLocalPlayer(playerName) ? _callsign : null))
+        {
+            return FindBrush("FleetCommanderNameBrush", Brushes.Gold);
+        }
+
+        var permission = GetFleetPermission(playerName);
+        return permission is not null && permission.PermissionEnabled
+            ? Brushes.MediumPurple
             : FindBrush("PrimaryTextBrush", Brushes.White);
+    }
+
+    private System.Windows.Media.Brush GetFleetRoleBrush(string playerName, string? callsign)
+    {
+        if (IsFleetCommander(playerName, callsign))
+        {
+            return FindBrush("FleetCommanderNameBrush", Brushes.Gold);
+        }
+
+        var permission = GetFleetPermission(playerName);
+        return permission is not null && permission.PermissionEnabled
+            ? Brushes.MediumPurple
+            : FindBrush("MutedTextBrush", Brushes.LightGray);
+    }
+
+    private LocalFleetMemberPermission? GetFleetPermission(string playerName)
+    {
+        return _fleetMemberPermissions.TryGetValue(playerName, out var permission)
+            ? permission
+            : null;
+    }
+
+    private static string NormalizeRoleTitle(string? value)
+    {
+        var role = string.IsNullOrWhiteSpace(value) ? "授权成员" : value.Trim();
+        var builder = new StringBuilder();
+        var weight = 0;
+        foreach (var character in role)
+        {
+            var nextWeight = IsCjk(character) ? 2 : 1;
+            if (weight + nextWeight > 14)
+            {
+                break;
+            }
+
+            builder.Append(character);
+            weight += nextWeight;
+        }
+
+        return builder.Length == 0 ? "授权成员" : builder.ToString();
     }
 
     private bool IsFleetCommander(string playerName, string? callsign)
@@ -1195,6 +1483,7 @@ public partial class MainWindow : Window
         _authToken = null;
         _accountName = null;
         _callsign = null;
+        _allowEmailNotifications = true;
         NetworkAutoSyncCheck.IsChecked = false;
         _networkSyncTimer.Stop();
         SaveCurrentConfig();
@@ -1408,7 +1697,9 @@ public partial class MainWindow : Window
             _accountName = auth.Email ?? auth.UserName;
             _authToken = auth.Token;
             _callsign = auth.Callsign;
+            _allowEmailNotifications = auth.AllowEmailNotifications;
             CallsignBox.Text = _callsign ?? "";
+            EmailNotificationsCheck.IsChecked = _allowEmailNotifications;
             LoginStatusText.Text = $"{actionName}成功：{_accountName}";
             NetworkStatusText.Text = "已登录并连接服务器";
             SaveCurrentConfig();
@@ -1434,7 +1725,9 @@ public partial class MainWindow : Window
 
         try
         {
-            var response = await PostNetworkJsonAsync("api/auth/profile", new ProfileUpdateRequest(_callsign));
+            var response = await PostNetworkJsonAsync(
+                "api/auth/profile",
+                new ProfileUpdateRequest(_callsign, _allowEmailNotifications));
             response.EnsureSuccessStatusCode();
         }
         catch
@@ -1773,6 +2066,7 @@ public partial class MainWindow : Window
         _fleetActiveTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? _fleetActiveTime : snapshot.ActiveTime!;
         _fleetJoinPolicy = string.IsNullOrWhiteSpace(snapshot.JoinPolicy) ? _fleetJoinPolicy : snapshot.JoinPolicy!;
         _fleetLogoPath = SaveNetworkFleetLogo(snapshot);
+        MergeFleetMemberPermissions(snapshot.MemberPermissions);
 
         var isCommander = IsCurrentUserFleetCommander();
         var remoteHasNotice = !string.IsNullOrWhiteSpace(snapshot.NoticeTitle) ||
@@ -1829,7 +2123,30 @@ public partial class MainWindow : Window
         RenderState();
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
+        RefreshFleetMemberManagement();
         SelectFeaturedActionPlan();
+    }
+
+    private void MergeFleetMemberPermissions(NetworkFleetMemberPermissionSnapshot[]? permissions)
+    {
+        foreach (var permission in permissions ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(permission.GameName))
+            {
+                continue;
+            }
+
+            _fleetMemberPermissions[permission.GameName.Trim()] = new LocalFleetMemberPermission(
+                permission.GameName.Trim(),
+                permission.Callsign,
+                NormalizeRoleTitle(permission.RoleTitle),
+                permission.PermissionEnabled,
+                permission.CanRemoveMembers,
+                permission.CanPublishTasks,
+                permission.CanPublishPlans,
+                permission.CanManageFleetInfo,
+                permission.UpdatedAt);
+        }
     }
 
     private void ApplyNetworkSnapshot(NetworkPlayerSnapshot snapshot)
@@ -1994,7 +2311,7 @@ public partial class MainWindow : Window
                 if (!silent)
                 {
                     var error = response.StatusCode == HttpStatusCode.NotFound
-                        ? "server notify endpoint is not available; deploy StarBridge 0.3.5 relay"
+                        ? "server notify endpoint is not available; deploy StarBridge 0.3.6 relay"
                         : await ReadResponseErrorAsync(response);
                     AppendOutput($"Fleet email notification failed: {error}");
                 }
@@ -2083,7 +2400,43 @@ public partial class MainWindow : Window
             _fleetCurrentTaskTime,
             actionPlans,
             DateTimeOffset.UtcNow,
-            _accountName);
+            _accountName,
+            BuildFleetMemberPermissionSnapshots());
+    }
+
+    private NetworkFleetMemberPermissionSnapshot[] BuildFleetMemberPermissionSnapshots()
+    {
+        var rows = _fleetMemberPermissions.Values
+            .Where(item => !string.IsNullOrWhiteSpace(item.GameName))
+            .Select(item => new NetworkFleetMemberPermissionSnapshot(
+                item.GameName.Trim(),
+                item.Callsign,
+                NormalizeRoleTitle(item.RoleTitle),
+                item.PermissionEnabled,
+                item.CanRemoveMembers,
+                item.CanPublishTasks,
+                item.CanPublishPlans,
+                item.CanManageFleetInfo,
+                item.UpdatedAt))
+            .ToList();
+
+        var commanderName = GetGameNameFromDisplayName(_fleetChiefCommander);
+        if (!string.IsNullOrWhiteSpace(commanderName) &&
+            rows.All(item => !item.GameName.Equals(commanderName, StringComparison.OrdinalIgnoreCase)))
+        {
+            rows.Add(new NetworkFleetMemberPermissionSnapshot(
+                commanderName,
+                GetCallsignFromDisplayName(_fleetChiefCommander),
+                "舰队指挥官",
+                true,
+                true,
+                true,
+                true,
+                true,
+                DateTimeOffset.UtcNow));
+        }
+
+        return rows.ToArray();
     }
 
     private string? BuildFleetLogoImageData()
@@ -2319,6 +2672,8 @@ public partial class MainWindow : Window
         _joinedActionPlanIds.Clear();
         _allFleetEventLogs.Clear();
         _fleetEventLogs.Clear();
+        _fleetMemberPermissions.Clear();
+        _fleetMemberRows.Clear();
         _joinedSquad = null;
         _selectedSquad = null;
         LocalFleetText.Text = "未加入舰队";
@@ -2443,7 +2798,8 @@ public partial class MainWindow : Window
             NetworkServerKeyBox.Password,
             _accountName,
             _authToken,
-            fleetStateJson));
+            fleetStateJson,
+            _allowEmailNotifications));
         DesktopAppConfig.SaveOverlaySettings(overlaySettings);
         DesktopAppConfig.SaveOverlayLayout(overlayLayout);
         DesktopAppConfig.SaveActiveOverlayPreset(_activeOverlayPreset);
@@ -2507,7 +2863,8 @@ public partial class MainWindow : Window
                 row.Timestamp,
                 row.Type,
                 row.Title,
-                row.Detail)).ToArray());
+                row.Detail)).ToArray(),
+            _fleetMemberPermissions.Values.ToArray());
         return JsonSerializer.Serialize(cache);
     }
 
@@ -2622,6 +2979,15 @@ public partial class MainWindow : Window
                     item.Type,
                     item.Title,
                     item.Detail));
+            }
+
+            _fleetMemberPermissions.Clear();
+            foreach (var item in cache.MemberPermissions ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(item.GameName))
+                {
+                    _fleetMemberPermissions[item.GameName.Trim()] = item;
+                }
             }
 
             ApplyFleetEventLogFilter();
@@ -3220,6 +3586,188 @@ public partial class MainWindow : Window
         _ = PushFleetDirectoryAsync(silent: true);
     }
 
+    private void EmailNotificationsCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_isLoadingSettings || _isRefreshingAccountPanel)
+        {
+            return;
+        }
+
+        _allowEmailNotifications = EmailNotificationsCheck.IsChecked == true;
+        SaveCurrentConfig();
+        if (IsLoggedIn)
+        {
+            _ = UpdateProfileAsync();
+        }
+    }
+
+    private void RefreshFleetMemberManagement()
+    {
+        if (FleetMemberManagementList is null)
+        {
+            return;
+        }
+
+        _fleetMemberRows.Clear();
+        if (!_hasFleet)
+        {
+            if (FleetMemberManagementEmptyText is not null)
+            {
+                FleetMemberManagementEmptyText.Visibility = Visibility.Visible;
+            }
+            return;
+        }
+
+        foreach (var player in _players
+                     .OrderByDescending(player => IsFleetCommander(player.Name, player.Callsign))
+                     .ThenBy(player => player.SquadName)
+                     .ThenBy(player => player.Callsign ?? player.Name))
+        {
+            var isCommander = IsFleetCommander(player.Name, player.Callsign);
+            var permission = GetFleetPermission(player.Name);
+            var permissionEnabled = isCommander || permission?.PermissionEnabled == true;
+            _fleetMemberRows.Add(new FleetMemberManagementRow
+            {
+                GameName = player.Name,
+                Callsign = player.Callsign ?? "",
+                DisplayName = string.IsNullOrWhiteSpace(player.Callsign)
+                    ? player.Name
+                    : $"{player.Callsign} ({player.Name})",
+                Initials = player.Initials,
+                AvatarPath = player.AvatarPath,
+                SquadName = string.IsNullOrWhiteSpace(player.SquadName) ? "Unassigned" : player.SquadName,
+                OnlineStatus = player.Status,
+                RoleTitle = isCommander
+                    ? "舰队指挥官"
+                    : NormalizeRoleTitle(permission?.RoleTitle),
+                PermissionEnabled = permissionEnabled,
+                CanRemoveMembers = isCommander || permission?.CanRemoveMembers == true,
+                CanPublishTasks = isCommander || permission?.CanPublishTasks == true,
+                CanPublishPlans = isCommander || permission?.CanPublishPlans == true,
+                CanManageFleetInfo = isCommander || permission?.CanManageFleetInfo == true,
+                IsSelf = IsLocalPlayer(player.Name),
+                IsCommander = isCommander,
+                RoleBrush = GetFleetRoleBrush(player.Name, player.Callsign)
+            });
+        }
+
+        if (FleetMemberManagementEmptyText is not null)
+        {
+            FleetMemberManagementEmptyText.Visibility = _fleetMemberRows.Count == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+    }
+
+    private async void SaveFleetMemberPermission_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not FleetMemberManagementRow row)
+        {
+            return;
+        }
+
+        if (row.IsCommander)
+        {
+            FleetMemberManagementStatusText.Text = "舰队指挥官默认拥有所有权限。";
+            return;
+        }
+
+        var role = NormalizeRoleTitle(row.RoleTitle);
+        row.RoleTitle = role;
+        _fleetMemberPermissions[row.GameName] = new LocalFleetMemberPermission(
+            row.GameName,
+            row.Callsign,
+            role,
+            row.PermissionEnabled,
+            row.CanRemoveMembers,
+            row.CanPublishTasks,
+            row.CanPublishPlans,
+            row.CanManageFleetInfo,
+            DateTimeOffset.UtcNow);
+
+        AddFleetLog("权限", "成员权限更新", $"{row.DisplayName} -> {role}");
+        SaveCurrentConfig();
+        await PushFleetDirectoryAsync(silent: true);
+        RefreshFleetMemberManagement();
+        FleetMemberManagementStatusText.Text = $"已保存 {row.DisplayName} 的权限。";
+    }
+
+    private async void RemoveFleetMember_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not FleetMemberManagementRow row)
+        {
+            return;
+        }
+
+        if (row.IsSelf)
+        {
+            FleetMemberManagementStatusText.Text = "不能在这里移除自己。";
+            return;
+        }
+
+        if (System.Windows.MessageBox.Show($"确认将 {row.DisplayName} 移出舰队？", "移除成员", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync("api/fleets/members/remove",
+                new FleetMemberMutationRequest(_fleetCode, row.GameName));
+            response.EnsureSuccessStatusCode();
+            _fleetMemberPermissions.Remove(row.GameName);
+            AddFleetLog("成员", "移除成员", $"{row.DisplayName} 被移出舰队");
+            await PullNetworkSnapshotsAsync(silent: true);
+            await PushFleetDirectoryAsync(silent: true);
+            RefreshFleetMemberManagement();
+            FleetMemberManagementStatusText.Text = $"已移除 {row.DisplayName}。";
+        }
+        catch (Exception ex)
+        {
+            FleetMemberManagementStatusText.Text = $"移除失败：{ex.Message}";
+        }
+    }
+
+    private async void TransferFleetCommander_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not FleetMemberManagementRow row)
+        {
+            return;
+        }
+
+        if (row.IsSelf || row.IsCommander)
+        {
+            FleetMemberManagementStatusText.Text = "当前目标已经是舰队指挥官。";
+            return;
+        }
+
+        if (System.Windows.MessageBox.Show($"确认将舰队指挥官转移给 {row.DisplayName}？", "转移舰队指挥官", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync("api/fleets/transfer-commander",
+                new FleetCommanderTransferRequest(_fleetCode, row.GameName));
+            response.EnsureSuccessStatusCode();
+            var snapshot = await response.Content.ReadFromJsonAsync<NetworkFleetSnapshot>();
+            if (snapshot is not null)
+            {
+                MergeNetworkFleetState(snapshot);
+            }
+
+            AddFleetLog("权限", "转移舰队指挥官", $"{row.DisplayName} 成为新的舰队指挥官");
+            SaveCurrentConfig();
+            await PullNetworkFleetsAsync();
+            FleetMemberManagementStatusText.Text = "舰队指挥官已转移。";
+        }
+        catch (Exception ex)
+        {
+            FleetMemberManagementStatusText.Text = $"转移失败：{ex.Message}";
+        }
+    }
+
     private static string LimitCallsign(string value)
     {
         var total = 0;
@@ -3765,7 +4313,7 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.5";
+            : "0.3.6";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -4696,6 +5244,7 @@ public partial class MainWindow : Window
         PlayerNameLabel.Text = zh ? "游戏名" : "Player Name";
         PlayerIdLabel.Text = zh ? "玩家 ID" : "Player ID";
         CallsignLabel.Text = zh ? "呼号" : "Callsign";
+        EmailNotificationsCheck.Content = zh ? "允许接收舰队邮件通知" : "Allow fleet email notifications";
         FleetLabel.Text = zh ? "舰队" : "Fleet";
         LocalFleetText.Text = zh ? "本地舰队" : "Local Fleet";
         StatusLabel.Text = zh ? "状态" : "Status";
@@ -5300,6 +5849,128 @@ public sealed record FleetEventLogRow(
     string Detail)
 {
     public string TimestampText => Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+}
+
+public sealed class FleetMemberManagementRow : INotifyPropertyChanged
+{
+    private string _roleTitle = "成员";
+    private bool _permissionEnabled;
+    private bool _canRemoveMembers;
+    private bool _canPublishTasks;
+    private bool _canPublishPlans;
+    private bool _canManageFleetInfo;
+
+    public string GameName { get; init; } = "";
+    public string Callsign { get; init; } = "";
+    public string DisplayName { get; init; } = "";
+    public string Initials { get; init; } = "?";
+    public string? AvatarPath { get; init; }
+    public string SquadName { get; init; } = "Unassigned";
+    public string OnlineStatus { get; init; } = "Offline";
+    public bool IsSelf { get; init; }
+    public bool IsCommander { get; init; }
+    public System.Windows.Media.Brush? RoleBrush { get; init; }
+    public string HeaderLine => $"{SquadName} / {OnlineStatus}";
+    public bool CanEditPermissions => !IsCommander;
+    public bool CanTransferCommander => !IsSelf && !IsCommander;
+    public bool CanRemoveFromFleet => !IsSelf && !IsCommander;
+
+    public string RoleTitle
+    {
+        get => _roleTitle;
+        set
+        {
+            if (_roleTitle == value)
+            {
+                return;
+            }
+
+            _roleTitle = value;
+            OnChanged(nameof(RoleTitle));
+        }
+    }
+
+    public bool PermissionEnabled
+    {
+        get => _permissionEnabled;
+        set
+        {
+            if (_permissionEnabled == value)
+            {
+                return;
+            }
+
+            _permissionEnabled = value;
+            OnChanged(nameof(PermissionEnabled));
+        }
+    }
+
+    public bool CanRemoveMembers
+    {
+        get => _canRemoveMembers;
+        set
+        {
+            if (_canRemoveMembers == value)
+            {
+                return;
+            }
+
+            _canRemoveMembers = value;
+            OnChanged(nameof(CanRemoveMembers));
+        }
+    }
+
+    public bool CanPublishTasks
+    {
+        get => _canPublishTasks;
+        set
+        {
+            if (_canPublishTasks == value)
+            {
+                return;
+            }
+
+            _canPublishTasks = value;
+            OnChanged(nameof(CanPublishTasks));
+        }
+    }
+
+    public bool CanPublishPlans
+    {
+        get => _canPublishPlans;
+        set
+        {
+            if (_canPublishPlans == value)
+            {
+                return;
+            }
+
+            _canPublishPlans = value;
+            OnChanged(nameof(CanPublishPlans));
+        }
+    }
+
+    public bool CanManageFleetInfo
+    {
+        get => _canManageFleetInfo;
+        set
+        {
+            if (_canManageFleetInfo == value)
+            {
+                return;
+            }
+
+            _canManageFleetInfo = value;
+            OnChanged(nameof(CanManageFleetInfo));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void OnChanged(string propertyName)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
 }
 
 public sealed class FleetActionPlanRow : INotifyPropertyChanged
