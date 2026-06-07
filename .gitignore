@@ -34,3 +34,4 @@ desktop-crash.log
 *.tmp
 *.cache
 publish/
+recovery/

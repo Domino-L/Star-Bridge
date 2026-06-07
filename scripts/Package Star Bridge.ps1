@@ -15,6 +15,9 @@ $env:APPDATA = Join-Path $root ".appdata"
 $env:NUGET_PACKAGES = Join-Path $root ".nuget-packages"
 
 Write-Host "Publishing Star Bridge..."
+if (Test-Path -LiteralPath $publishDir) {
+    Remove-Item -LiteralPath $publishDir -Recurse -Force
+}
 dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false | Write-Host
 
 if (Test-Path -LiteralPath $packageDir) {

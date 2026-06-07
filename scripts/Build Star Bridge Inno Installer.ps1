@@ -43,6 +43,9 @@ $env:APPDATA = Join-Path $root ".appdata"
 $env:NUGET_PACKAGES = Join-Path $root ".nuget-packages"
 
 Write-Host "Publishing full self-contained Star Bridge..."
+if (Test-Path -LiteralPath $publishDir) {
+    Remove-Item -LiteralPath $publishDir -Recurse -Force
+}
 dotnet publish $project -c Release -r win-x64 --self-contained true --configfile $nugetConfig -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -61,6 +64,9 @@ if (Test-Path -LiteralPath $publishConfigDir) {
 }
 
 Write-Host "Publishing full self-contained Star Bridge Relay Server..."
+if (Test-Path -LiteralPath $serverPublishDir) {
+    Remove-Item -LiteralPath $serverPublishDir -Recurse -Force
+}
 dotnet publish $serverProject -c Release -r win-x64 --self-contained true --configfile $nugetConfig -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) {
     throw "Relay server publish failed."

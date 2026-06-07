@@ -298,10 +298,8 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="138" />
-                <ColumnDefinition Width="0" />
-                <ColumnDefinition Width="112" />
-                <ColumnDefinition Width="0" />
                 <ColumnDefinition Width="126" />
+                <ColumnDefinition Width="0" />
             </Grid.ColumnDefinitions>
 
             <TextBlock Grid.Column="0"
@@ -325,7 +323,7 @@
                     Content="Select Log"
                     Click="SelectLog_Click" />
 
-            <ComboBox Grid.Column="2"
+            <ComboBox Grid.Column="3"
                       x:Name="LanguageBox"
                       Margin="12,0,0,0"
                       VerticalContentAlignment="Center"
@@ -341,9 +339,10 @@
                     Style="{StaticResource SecondaryButton}"
                     Content="联网测试 / 监控"
                     ToolTip="打开联网测试与同步监控页面"
+                    Visibility="Collapsed"
                     Click="NetworkTestNav_Click" />
 
-            <Button Grid.Column="5"
+            <Button Grid.Column="2"
                     x:Name="ToggleOverlayButton"
                     Margin="12,0,0,0"
                     Style="{StaticResource SecondaryButton}"
@@ -1845,12 +1844,34 @@
                                                                                 <TextBox Text="{Binding RoleTitle, UpdateSourceTrigger=PropertyChanged}"
                                                                                          Margin="0,6,0,0"
                                                                                          Height="34"
-                                                                                         IsEnabled="{Binding PermissionEnabled}" />
+                                                                                         IsEnabled="{Binding PermissionEnabled}">
+                                                                                    <TextBox.Style>
+                                                                                        <Style TargetType="TextBox">
+                                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                                            <Style.Triggers>
+                                                                                                <DataTrigger Binding="{Binding ShowRoleEditor}" Value="True">
+                                                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                                                </DataTrigger>
+                                                                                            </Style.Triggers>
+                                                                                        </Style>
+                                                                                    </TextBox.Style>
+                                                                                </TextBox>
                                                                                 <TextBlock Text="{Binding RoleTitle}"
                                                                                            Foreground="{Binding RoleBrush}"
                                                                                            FontWeight="SemiBold"
                                                                                            Margin="0,6,0,0"
-                                                                                           TextTrimming="CharacterEllipsis" />
+                                                                                           TextTrimming="CharacterEllipsis">
+                                                                                    <TextBlock.Style>
+                                                                                        <Style TargetType="TextBlock">
+                                                                                            <Setter Property="Visibility" Value="Visible" />
+                                                                                            <Style.Triggers>
+                                                                                                <DataTrigger Binding="{Binding ShowRoleEditor}" Value="True">
+                                                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                                                </DataTrigger>
+                                                                                            </Style.Triggers>
+                                                                                        </Style>
+                                                                                    </TextBlock.Style>
+                                                                                </TextBlock>
                                                                             </StackPanel>
 
                                                                             <StackPanel Grid.Column="3"
@@ -1864,7 +1885,7 @@
                                                                                         <Style TargetType="StackPanel">
                                                                                             <Setter Property="Visibility" Value="Collapsed" />
                                                                                             <Style.Triggers>
-                                                                                                <DataTrigger Binding="{Binding PermissionEnabled}" Value="True">
+                                                                                                <DataTrigger Binding="{Binding ShowPermissionControls}" Value="True">
                                                                                                     <Setter Property="Visibility" Value="Visible" />
                                                                                                 </DataTrigger>
                                                                                             </Style.Triggers>
@@ -1903,10 +1924,20 @@
                                                                                     <ColumnDefinition Width="*" />
                                                                                 </Grid.ColumnDefinitions>
                                                                                 <Button Content="保存权限"
-                                                                                        Style="{StaticResource PrimaryButton}"
                                                                                         Height="38"
                                                                                         Tag="{Binding}"
-                                                                                        Click="SaveFleetMemberPermission_Click" />
+                                                                                        Click="SaveFleetMemberPermission_Click">
+                                                                                    <Button.Style>
+                                                                                        <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                                            <Style.Triggers>
+                                                                                                <DataTrigger Binding="{Binding ShowSavePermissions}" Value="True">
+                                                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                                                </DataTrigger>
+                                                                                            </Style.Triggers>
+                                                                                        </Style>
+                                                                                    </Button.Style>
+                                                                                </Button>
                                                                                 <Button Grid.Column="1"
                                                                                         Content="移除成员"
                                                                                         Style="{StaticResource SecondaryButton}"

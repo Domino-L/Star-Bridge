@@ -23,6 +23,9 @@ $env:NUGET_PACKAGES = Join-Path $root ".nuget-packages"
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 
 Write-Host "Publishing full self-contained Star Bridge..."
+if (Test-Path -LiteralPath $publishDir) {
+    Remove-Item -LiteralPath $publishDir -Recurse -Force
+}
 dotnet publish $project -c Release -r win-x64 --self-contained true --configfile $nugetConfig -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""

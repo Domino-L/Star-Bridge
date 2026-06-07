@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 SERVICE_DIR="/opt/starbridge/server"
@@ -24,7 +24,7 @@ fi
 mkdir -p "$DATA_DIR" "$CONFIG_DIR"
 
 cat > "$ENV_FILE" <<EOF
-ASPNETCORE_URLS=http://0.0.0.0:5058
+ASPNETCORE_URLS=http://127.0.0.1:5058
 STARBRIDGE_RELAY_DATA=$DATA_DIR/relay-state.json
 STARBRIDGE_RELAY_KEY=$RELAY_KEY
 STARBRIDGE_SMTP_HOST=${STARBRIDGE_SMTP_HOST:-}

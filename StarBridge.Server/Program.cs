@@ -6,7 +6,7 @@ using System.Text;
 using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls(args.Length == 0 ? ["http://0.0.0.0:5058"] : args);
+builder.WebHost.UseUrls(args.Length == 0 ? ["http://127.0.0.1:5058"] : args);
 
 var app = builder.Build();
 var storage = new RelayStorage(
@@ -37,6 +37,7 @@ var smtpOptions = new SmtpOptions(
     Environment.GetEnvironmentVariable("STARBRIDGE_SMTP_PASS"),
     Environment.GetEnvironmentVariable("STARBRIDGE_SMTP_FROM"),
     !string.Equals(Environment.GetEnvironmentVariable("STARBRIDGE_SMTP_SSL"), "false", StringComparison.OrdinalIgnoreCase));
+var playerOnlineTimeout = TimeSpan.FromSeconds(120);
 
 app.MapGet("/", () => Results.Ok(new
 {
@@ -150,7 +151,8 @@ app.MapPost("/api/auth/send-code", async (HttpContext context, EmailVerification
     }
     catch (Exception ex)
     {
-        return Results.BadRequest(new { error = $"Failed to send verification code: {ex.Message}" });
+        Console.Error.WriteLine($"Verification email failed for {email}: {ex}");
+        return Results.BadRequest(new { error = "Verification email could not be sent. Please try again later." });
     }
 });
 
@@ -191,7 +193,8 @@ Message:
     }
     catch (Exception ex)
     {
-        return Results.BadRequest(new { error = $"Failed to send feedback: {ex.Message}" });
+        Console.Error.WriteLine($"Feedback email failed from {sender}: {ex}");
+        return Results.BadRequest(new { error = "Feedback could not be sent. Please try again later." });
     }
 });
 
@@ -226,24 +229,34 @@ app.MapPost("/api/fleets/notify", async (HttpRequest request, FleetNotificationR
         return Results.Unauthorized();
     }
 
-    var memberNames = players.Values
-        .Where(player =>
-            string.Equals(player.Fleet, fleet.Name, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(player.Fleet, fleet.Code, StringComparison.OrdinalIgnoreCase))
-        .Select(player => player.Name)
-        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-    if (!string.IsNullOrWhiteSpace(fleet.Commander))
+    var memberNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var player in players.Values.Where(player =>
+                 string.Equals(player.Fleet, fleet.Name, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(player.Fleet, fleet.Code, StringComparison.OrdinalIgnoreCase)))
     {
-        memberNames.Add(fleet.Commander);
+        AddIdentityAliases(memberNames, player.Name);
+        AddIdentityAliases(memberNames, player.Callsign);
     }
+
+    foreach (var member in fleet.MemberPermissions ?? [])
+    {
+        AddIdentityAliases(memberNames, member.GameName);
+        AddIdentityAliases(memberNames, member.Callsign);
+    }
+
+    foreach (var member in fleet.Members ?? [])
+    {
+        AddIdentityAliases(memberNames, member.GameName);
+        AddIdentityAliases(memberNames, member.Callsign);
+    }
+
+    AddIdentityAliases(memberNames, fleet.Commander);
 
     var recipients = users.Values
         .Where(user =>
             !string.IsNullOrWhiteSpace(user.Email) &&
             user.AllowEmailNotifications &&
-            (!string.IsNullOrWhiteSpace(user.GameName) && memberNames.Contains(user.GameName) ||
-             !string.IsNullOrWhiteSpace(user.Callsign) && memberNames.Contains(user.Callsign)))
+            MatchesIdentitySet(user, memberNames))
         .Select(user => user.Email!)
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToArray();
@@ -310,13 +323,17 @@ app.MapPost("/api/auth/profile", async (HttpRequest request, ProfileUpdateReques
 });
 
 app.MapGet("/api/players", () => Results.Ok(players.Values
+    .Select(player => ApplyPlayerOnlineTimeout(player, DateTimeOffset.UtcNow, playerOnlineTimeout))
     .OrderByDescending(player => player.Online)
     .ThenBy(player => player.Name)
     .ToArray()));
 
 app.MapGet("/api/fleets", () =>
 {
-    var playerArray = players.Values.ToArray();
+    var now = DateTimeOffset.UtcNow;
+    var playerArray = players.Values
+        .Select(player => ApplyPlayerOnlineTimeout(player, now, playerOnlineTimeout))
+        .ToArray();
     var fleetArray = fleets.Values
         .Select(fleet =>
         {
@@ -324,10 +341,15 @@ app.MapGet("/api/fleets", () =>
                 .Where(player => player.Fleet?.Equals(fleet.Name, StringComparison.OrdinalIgnoreCase) == true ||
                                  player.Fleet?.Equals(fleet.Code, StringComparison.OrdinalIgnoreCase) == true)
                 .ToArray();
+            var fleetMembers = BuildFleetMembers(fleet, members);
+            var fleetShips = NormalizeFleetShips((fleet.Ships ?? [])
+                .Concat(members.SelectMany(BuildFleetShipsFromPlayer))
+                .ToArray());
+
             return fleet with
             {
-                OnlineMembers = members.Count(member => member.Online),
-                TotalMembers = members.Length,
+                OnlineMembers = fleetMembers.Count(member => member.Online),
+                TotalMembers = fleetMembers.Length,
                 LogoImageData = Normalize(fleet.LogoImageData, ""),
                 NoticeTitle = Normalize(fleet.NoticeTitle, ""),
                 NoticeContent = Normalize(fleet.NoticeContent, ""),
@@ -338,6 +360,11 @@ app.MapGet("/api/fleets", () =>
                 CurrentTaskShip = Normalize(fleet.CurrentTaskShip, ""),
                 ActionPlans = fleet.ActionPlans ?? [],
                 MemberPermissions = fleet.MemberPermissions ?? [],
+                Members = fleetMembers,
+                EventLog = NormalizeFleetEventLogs(fleet.EventLog),
+                Ships = fleetShips,
+                TaskHistory = NormalizeFleetTaskHistory(fleet.TaskHistory),
+                Squads = MergeSquads([], fleet.Squads),
                 LastUpdated = DateTimeOffset.UtcNow
             };
         })
@@ -379,42 +406,77 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
         CurrentTaskRally = Normalize(snapshot.CurrentTaskRally, ""),
         CurrentTaskShip = Normalize(snapshot.CurrentTaskShip, ""),
         CurrentTaskTime = snapshot.CurrentTaskTime,
+        CurrentTaskNoticeRevision = Math.Max(0, snapshot.CurrentTaskNoticeRevision),
         ActionPlans = snapshot.ActionPlans ?? [],
         MemberPermissions = snapshot.MemberPermissions ?? [],
+        Members = NormalizeFleetMembers(snapshot.Members, snapshot.MemberPermissions),
+        EventLog = NormalizeFleetEventLogs(snapshot.EventLog),
+        Ships = NormalizeFleetShips(snapshot.Ships),
+        TaskHistory = NormalizeFleetTaskHistory(snapshot.TaskHistory),
         OwnerAccount = Normalize(snapshot.OwnerAccount, GetAuthorizedUserName(request, users) ?? ""),
-        Squads = snapshot.Squads ?? [],
+        Squads = MergeSquads([], snapshot.Squads),
         LastUpdated = DateTimeOffset.UtcNow
     };
 
     var authorizedUser = GetAuthorizedUserName(request, users) ?? "";
+    users.TryGetValue(authorizedUser, out var authorizedAccount);
     var merged = fleets.AddOrUpdate(
         normalized.Code,
         normalized,
         (_, existing) =>
         {
-            var canOverwriteManagedState =
+            var canOwnFleet =
                 string.IsNullOrWhiteSpace(existing.OwnerAccount) ||
                 existing.OwnerAccount.Equals(authorizedUser, StringComparison.OrdinalIgnoreCase);
+            var canManageFleetInfo = canOwnFleet ||
+                                     HasFleetPermission(existing, authorizedAccount, permission => permission.CanManageFleetInfo);
+            var canPublishTasks = canOwnFleet ||
+                                  HasFleetPermission(existing, authorizedAccount, permission => permission.CanPublishTasks);
+            var canPublishPlans = canOwnFleet ||
+                                  HasFleetPermission(existing, authorizedAccount, permission => permission.CanPublishPlans);
+            var canAppendFleetLogs = canOwnFleet || canManageFleetInfo || canPublishTasks || canPublishPlans;
+            var canJoinActionPlans = IsFleetMember(existing, authorizedAccount);
 
             return normalized with
             {
-                Description = canOverwriteManagedState ? normalized.Description : existing.Description,
-                Type = canOverwriteManagedState ? normalized.Type : existing.Type,
-                ActiveTime = canOverwriteManagedState ? normalized.ActiveTime : existing.ActiveTime,
-                JoinPolicy = canOverwriteManagedState ? normalized.JoinPolicy : existing.JoinPolicy,
-                LogoText = canOverwriteManagedState ? normalized.LogoText : existing.LogoText,
-                LogoImageData = canOverwriteManagedState ? normalized.LogoImageData : existing.LogoImageData,
-                NoticeTitle = canOverwriteManagedState ? normalized.NoticeTitle : existing.NoticeTitle,
-                NoticeContent = canOverwriteManagedState ? normalized.NoticeContent : existing.NoticeContent,
-                CurrentTaskTitle = canOverwriteManagedState ? normalized.CurrentTaskTitle : existing.CurrentTaskTitle,
-                CurrentTaskBrief = canOverwriteManagedState ? normalized.CurrentTaskBrief : existing.CurrentTaskBrief,
-                CurrentTaskParticipants = canOverwriteManagedState ? normalized.CurrentTaskParticipants : existing.CurrentTaskParticipants,
-                CurrentTaskRally = canOverwriteManagedState ? normalized.CurrentTaskRally : existing.CurrentTaskRally,
-                CurrentTaskShip = canOverwriteManagedState ? normalized.CurrentTaskShip : existing.CurrentTaskShip,
-                CurrentTaskTime = canOverwriteManagedState ? normalized.CurrentTaskTime : existing.CurrentTaskTime,
-                ActionPlans = canOverwriteManagedState ? normalized.ActionPlans : existing.ActionPlans,
-                MemberPermissions = canOverwriteManagedState ? normalized.MemberPermissions : existing.MemberPermissions,
-                OwnerAccount = canOverwriteManagedState ? normalized.OwnerAccount : existing.OwnerAccount,
+                Description = canManageFleetInfo ? normalized.Description : existing.Description,
+                Type = canManageFleetInfo ? normalized.Type : existing.Type,
+                ActiveTime = canManageFleetInfo ? normalized.ActiveTime : existing.ActiveTime,
+                JoinPolicy = canManageFleetInfo ? normalized.JoinPolicy : existing.JoinPolicy,
+                LogoText = canManageFleetInfo ? normalized.LogoText : existing.LogoText,
+                LogoImageData = canManageFleetInfo ? normalized.LogoImageData : existing.LogoImageData,
+                NoticeTitle = canManageFleetInfo ? normalized.NoticeTitle : existing.NoticeTitle,
+                NoticeContent = canManageFleetInfo ? normalized.NoticeContent : existing.NoticeContent,
+                CurrentTaskTitle = canPublishTasks ? normalized.CurrentTaskTitle : existing.CurrentTaskTitle,
+                CurrentTaskBrief = canPublishTasks ? normalized.CurrentTaskBrief : existing.CurrentTaskBrief,
+                CurrentTaskParticipants = canPublishTasks ? normalized.CurrentTaskParticipants : existing.CurrentTaskParticipants,
+                CurrentTaskRally = canPublishTasks ? normalized.CurrentTaskRally : existing.CurrentTaskRally,
+                CurrentTaskShip = canPublishTasks ? normalized.CurrentTaskShip : existing.CurrentTaskShip,
+                CurrentTaskTime = canPublishTasks ? normalized.CurrentTaskTime : existing.CurrentTaskTime,
+                CurrentTaskNoticeRevision = canPublishTasks
+                    ? Math.Max(existing.CurrentTaskNoticeRevision, normalized.CurrentTaskNoticeRevision)
+                    : existing.CurrentTaskNoticeRevision,
+                ActionPlans = canPublishPlans
+                    ? normalized.ActionPlans
+                    : canJoinActionPlans
+                        ? MergeActionPlanParticipants(existing.ActionPlans, normalized.ActionPlans)
+                        : existing.ActionPlans,
+                MemberPermissions = canOwnFleet ? normalized.MemberPermissions : existing.MemberPermissions,
+                Members = MergeFleetMembers(
+                    existing.Members,
+                    FilterFleetMemberUpdatesForAccount(
+                        normalized.Members,
+                        existing.Members,
+                        authorizedAccount,
+                        canUpdateAllMembers: false)),
+                Ships = MergeFleetShips(existing.Ships, normalized.Ships, authorizedAccount),
+                TaskHistory = canPublishTasks
+                    ? MergeFleetTaskHistory(existing.TaskHistory, normalized.TaskHistory)
+                    : existing.TaskHistory,
+                EventLog = canAppendFleetLogs
+                    ? MergeFleetEventLogs(existing.EventLog, normalized.EventLog)
+                    : existing.EventLog,
+                OwnerAccount = canOwnFleet ? normalized.OwnerAccount : existing.OwnerAccount,
                 Squads = MergeSquads(existing.Squads, normalized.Squads)
             };
         });
@@ -444,10 +506,33 @@ app.MapPost("/api/players", async (HttpRequest request, NetworkPlayerSnapshot sn
         Callsign = Normalize(snapshot.Callsign, ""),
         Squad = Normalize(snapshot.Squad, "Unassigned"),
         Fleet = Normalize(snapshot.Fleet, "No Fleet"),
+        AvatarImageData = NormalizeImageData(snapshot.AvatarImageData, 512 * 1024),
+        OwnedShips = NormalizeOwnedShips(snapshot.OwnedShips),
         LastUpdated = DateTimeOffset.UtcNow
     };
 
+    var authorizedUser = GetAuthorizedUserName(request, users);
+    if (!string.IsNullOrWhiteSpace(authorizedUser) &&
+        users.TryGetValue(authorizedUser, out var account))
+    {
+        if (IsUnboundGameName(account.GameName, account))
+        {
+            users[authorizedUser] = account with
+            {
+                GameName = normalized.Name,
+                LastLogin = DateTimeOffset.UtcNow
+            };
+        }
+        else if (!string.IsNullOrWhiteSpace(account.GameName) &&
+                 !account.GameName.Equals(normalized.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            return Results.Unauthorized();
+        }
+    }
+
     players.AddOrUpdate(normalized.Name, normalized, (_, _) => normalized);
+    RemovePlayerFromStaleFleets(fleets, normalized);
+    UpsertFleetMemberFromPlayer(fleets, normalized);
     await storage.SaveAsync(players, fleets, users, verificationCodes);
     return Results.Ok(normalized);
 });
@@ -471,24 +556,31 @@ app.MapPost("/api/fleets/members/remove", async (HttpRequest request, FleetMembe
         return Results.NotFound(new { error = "Fleet not found." });
     }
 
-    if (!IsFleetOwner(fleet, account))
+    var isFleetOwner = IsFleetOwner(fleet, account);
+    var canRemoveMembers = isFleetOwner ||
+                           HasFleetPermission(fleet, account, permission => permission.CanRemoveMembers);
+    if (!canRemoveMembers)
     {
         return Results.Unauthorized();
     }
 
     var targetName = mutation.TargetGameName.Trim();
-    if ((!string.IsNullOrWhiteSpace(account.GameName) && targetName.Equals(account.GameName, StringComparison.OrdinalIgnoreCase)) ||
-        targetName.Equals(account.UserName, StringComparison.OrdinalIgnoreCase))
+    var targetAliases = ExpandIdentityAliases(targetName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (MatchesAccountIdentity(targetName, account))
     {
         return Results.BadRequest(new { error = "The fleet commander cannot remove themselves." });
+    }
+
+    if (!isFleetOwner && IsPrivilegedFleetMember(fleet, targetName))
+    {
+        return Results.Unauthorized();
     }
 
     var removed = false;
     foreach (var pair in players.ToArray())
     {
-        if (pair.Key.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
-            pair.Value.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
-            (!string.IsNullOrWhiteSpace(pair.Value.Callsign) && pair.Value.Callsign.Equals(targetName, StringComparison.OrdinalIgnoreCase)))
+        if (MatchesPlayerIdentity(targetName, pair.Value) ||
+            IdentityContainsAny(pair.Key, targetAliases))
         {
             players[pair.Key] = pair.Value with
             {
@@ -503,8 +595,18 @@ app.MapPost("/api/fleets/members/remove", async (HttpRequest request, FleetMembe
     fleets[fleetCode] = fleet with
     {
         MemberPermissions = (fleet.MemberPermissions ?? [])
-            .Where(permission => !permission.GameName.Equals(targetName, StringComparison.OrdinalIgnoreCase))
+            .Where(permission => !IdentityContainsAny(permission.GameName, targetAliases) &&
+                                 !IdentityContainsAny(permission.Callsign, targetAliases))
             .ToArray(),
+        Members = (fleet.Members ?? [])
+            .Where(member => !IdentityContainsAny(member.GameName, targetAliases) &&
+                             !IdentityContainsAny(member.Callsign, targetAliases))
+            .ToArray(),
+        Ships = (fleet.Ships ?? [])
+            .Where(ship => !IdentityContainsAny(ship.OwnerGameName, targetAliases) &&
+                           !IdentityContainsAny(ship.OwnerCallsign, targetAliases))
+            .ToArray(),
+        EventLog = AddFleetLog(fleet.EventLog, "成员", "移除成员", $"{targetName} 被移出舰队"),
         LastUpdated = DateTimeOffset.UtcNow
     };
 
@@ -537,10 +639,7 @@ app.MapPost("/api/fleets/transfer-commander", async (HttpRequest request, FleetC
     }
 
     var targetName = transfer.TargetGameName.Trim();
-    var targetAccount = users.Values.FirstOrDefault(user =>
-        targetName.Equals(user.UserName, StringComparison.OrdinalIgnoreCase) ||
-        (!string.IsNullOrWhiteSpace(user.GameName) && targetName.Equals(user.GameName, StringComparison.OrdinalIgnoreCase)) ||
-        (!string.IsNullOrWhiteSpace(user.Callsign) && targetName.Equals(user.Callsign, StringComparison.OrdinalIgnoreCase)));
+    var targetAccount = users.Values.FirstOrDefault(user => MatchesAccountIdentity(targetName, user));
     if (targetAccount is null)
     {
         return Results.BadRequest(new { error = "Target player must have a StarBridge account." });
@@ -554,7 +653,8 @@ app.MapPost("/api/fleets/transfer-commander", async (HttpRequest request, FleetC
         Commander = targetDisplayName,
         OwnerAccount = targetAccount.UserName,
         MemberPermissions = (fleet.MemberPermissions ?? [])
-            .Where(permission => !permission.GameName.Equals(Normalize(targetAccount.GameName, targetName), StringComparison.OrdinalIgnoreCase))
+            .Where(permission => !MatchesAccountIdentity(permission.GameName, targetAccount) &&
+                                 !MatchesAccountIdentity(permission.Callsign, targetAccount))
             .Append(new NetworkFleetMemberPermissionSnapshot(
                 Normalize(targetAccount.GameName, targetName),
                 targetAccount.Callsign,
@@ -566,6 +666,18 @@ app.MapPost("/api/fleets/transfer-commander", async (HttpRequest request, FleetC
                 true,
                 DateTimeOffset.UtcNow))
             .ToArray(),
+        Members = UpsertFleetMember(
+            fleet.Members,
+            new NetworkFleetMemberSnapshot(
+                Normalize(targetAccount.GameName, targetName),
+                targetAccount.Callsign,
+                "舰队指挥官",
+                "Unassigned",
+                false,
+                null,
+                null,
+                DateTimeOffset.UtcNow)),
+        EventLog = AddFleetLog(fleet.EventLog, "权限", "转移舰队指挥官", $"{targetDisplayName} 成为新的舰队指挥官"),
         LastUpdated = DateTimeOffset.UtcNow
     };
 
@@ -626,7 +738,7 @@ app.MapPost("/api/fleets/disband", async (HttpRequest request, FleetDisbandReque
 
 app.MapPost("/api/clear", async (HttpRequest request) =>
 {
-    if (!IsWriteAllowed(request, serverKey, users))
+    if (!IsRelayKeyAllowed(request, serverKey))
     {
         return Results.Unauthorized();
     }
@@ -667,6 +779,13 @@ static bool IsWriteAllowed(
     }
 
     return false;
+}
+
+static bool IsRelayKeyAllowed(HttpRequest request, string? serverKey)
+{
+    return !string.IsNullOrWhiteSpace(serverKey) &&
+           request.Headers.TryGetValue("X-StarBridge-Key", out var provided) &&
+           provided.ToString().Equals(serverKey, StringComparison.Ordinal);
 }
 
 static string? ValidateVerificationRateLimit(
@@ -719,6 +838,54 @@ static string Normalize(string? value, string fallback)
     return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
 }
 
+static string? NormalizeImageData(string? value, int maxBytes)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return null;
+    }
+
+    var trimmed = value.Trim();
+    var payload = trimmed;
+    var commaIndex = payload.IndexOf(',');
+    if (payload.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase) && commaIndex >= 0)
+    {
+        payload = payload[(commaIndex + 1)..];
+    }
+
+    try
+    {
+        var bytes = Convert.FromBase64String(payload);
+        if (bytes.Length == 0 || bytes.Length > maxBytes)
+        {
+            return null;
+        }
+
+        return trimmed;
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static NetworkOwnedShipSnapshot[] NormalizeOwnedShips(NetworkOwnedShipSnapshot[]? ships)
+{
+    return (ships ?? [])
+        .Where(ship => !string.IsNullOrWhiteSpace(ship.Code))
+        .Select(ship => ship with
+        {
+            Code = ship.Code.Trim(),
+            DisplayName = Normalize(ship.DisplayName, ship.Code.Trim()),
+            Source = Normalize(ship.Source, "Unknown"),
+            ImportedAt = ship.ImportedAt == default ? DateTimeOffset.UtcNow : ship.ImportedAt
+        })
+        .GroupBy(ship => ship.Code, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.OrderByDescending(ship => ship.ImportedAt).First())
+        .OrderBy(ship => ship.ImportedAt)
+        .ToArray();
+}
+
 static int GetCallsignWeight(string value)
 {
     var total = 0;
@@ -746,7 +913,7 @@ static NetworkSquadSnapshot[] MergeSquads(
     {
         if (!string.IsNullOrWhiteSpace(squad.Name))
         {
-            squads[squad.Name.Trim()] = squad;
+            squads[squad.Name.Trim()] = NormalizeSquad(squad);
         }
     }
 
@@ -754,11 +921,63 @@ static NetworkSquadSnapshot[] MergeSquads(
     {
         if (!string.IsNullOrWhiteSpace(squad.Name))
         {
-            squads[squad.Name.Trim()] = squad;
+            var normalized = NormalizeSquad(squad);
+            if (squads.TryGetValue(normalized.Name, out var current) &&
+                string.IsNullOrWhiteSpace(normalized.EmblemImageData) &&
+                !string.IsNullOrWhiteSpace(current.EmblemImageData))
+            {
+                normalized = normalized with { EmblemImageData = current.EmblemImageData };
+            }
+
+            squads[normalized.Name] = normalized;
         }
     }
 
     return squads.Values.OrderBy(squad => squad.Name).ToArray();
+}
+
+static NetworkSquadSnapshot NormalizeSquad(NetworkSquadSnapshot squad)
+{
+    var name = Normalize(squad.Name, "Unnamed");
+    return squad with
+    {
+        Name = name,
+        Commander = Normalize(squad.Commander, "Unassigned"),
+        Type = Normalize(squad.Type, "Assault"),
+        Description = Normalize(squad.Description, "No squad briefing yet."),
+        Mission = Normalize(squad.Mission, "Standby"),
+        RallyPoint = Normalize(squad.RallyPoint, "Use Global"),
+        EmblemImageData = NormalizeImageData(squad.EmblemImageData, 512 * 1024)
+    };
+}
+
+static NetworkFleetTaskHistorySnapshot[] NormalizeFleetTaskHistory(NetworkFleetTaskHistorySnapshot[]? history)
+{
+    return (history ?? [])
+        .Where(task => !string.IsNullOrWhiteSpace(task.Key) ||
+                       !string.IsNullOrWhiteSpace(task.Title))
+        .Select(task => task with
+        {
+            Key = string.IsNullOrWhiteSpace(task.Key) ? Guid.NewGuid().ToString("N") : task.Key.Trim(),
+            Title = Normalize(task.Title, "未命名任务"),
+            Brief = Normalize(task.Brief, "未指定"),
+            Status = Normalize(task.Status, "进行中"),
+            Participants = Normalize(task.Participants, "参与范围 / 未指定"),
+            Rally = Normalize(task.Rally, "集结点 / 未发布"),
+            RequiredShip = Normalize(task.RequiredShip, "指定舰船 / 无"),
+            PublishedAtText = Normalize(task.PublishedAtText, DateTimeOffset.UtcNow.ToLocalTime().ToString("yyyy-MM-dd HH:mm"))
+        })
+        .GroupBy(task => task.Key, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.Last())
+        .Take(200)
+        .ToArray();
+}
+
+static NetworkFleetTaskHistorySnapshot[] MergeFleetTaskHistory(
+    NetworkFleetTaskHistorySnapshot[]? existing,
+    NetworkFleetTaskHistorySnapshot[]? incoming)
+{
+    return NormalizeFleetTaskHistory((existing ?? []).Concat(incoming ?? []).ToArray());
 }
 
 static UserAccount CreateAccount(string name, string password, string? gameName, string? email = null, string? callsign = null)
@@ -789,6 +1008,719 @@ static AuthResponse ToAuthResponse(UserAccount account)
         account.AllowEmailNotifications);
 }
 
+static NetworkFleetMemberSnapshot[] BuildFleetMembers(
+    NetworkFleetSnapshot fleet,
+    IEnumerable<NetworkPlayerSnapshot> fleetPlayers)
+{
+    var now = DateTimeOffset.UtcNow;
+    var timeout = TimeSpan.FromSeconds(120);
+    var members = new Dictionary<string, NetworkFleetMemberSnapshot>(StringComparer.OrdinalIgnoreCase);
+
+    foreach (var member in NormalizeFleetMembers(fleet.Members, fleet.MemberPermissions))
+    {
+        members[member.GameName] = member;
+    }
+
+    foreach (var permission in fleet.MemberPermissions ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(permission.GameName))
+        {
+            continue;
+        }
+
+        var gameName = permission.GameName.Trim();
+        if (members.TryGetValue(gameName, out var existing))
+        {
+            members[gameName] = existing with
+            {
+                Callsign = Normalize(permission.Callsign, existing.Callsign ?? ""),
+                RoleTitle = Normalize(permission.RoleTitle, existing.RoleTitle),
+                LastUpdated = Max(existing.LastUpdated, permission.UpdatedAt)
+            };
+        }
+        else
+        {
+            members[gameName] = new NetworkFleetMemberSnapshot(
+                gameName,
+                Normalize(permission.Callsign, ""),
+                Normalize(permission.RoleTitle, "成员"),
+                "Unassigned",
+                false,
+                null,
+                null,
+                permission.UpdatedAt,
+                null);
+        }
+    }
+
+    foreach (var player in fleetPlayers)
+    {
+        if (string.IsNullOrWhiteSpace(player.Name))
+        {
+            continue;
+        }
+
+        var gameName = player.Name.Trim();
+        var roleTitle = members.TryGetValue(gameName, out var existing)
+            ? existing.RoleTitle
+            : "成员";
+        members[gameName] = new NetworkFleetMemberSnapshot(
+            gameName,
+            Normalize(player.Callsign, members.TryGetValue(gameName, out existing) ? existing.Callsign ?? "" : ""),
+            roleTitle,
+            Normalize(player.Squad, "Unassigned"),
+            player.Online,
+            Normalize(player.Ship, "Unknown"),
+            Normalize(player.Location, "Unknown"),
+            player.LastUpdated,
+            player.AvatarImageData);
+    }
+
+    return members.Values
+        .Select(member => ApplyMemberOnlineTimeout(member, now, timeout))
+        .OrderByDescending(member => member.Online)
+        .ThenBy(member => member.SquadName)
+        .ThenBy(member => member.Callsign ?? member.GameName)
+        .ToArray();
+}
+
+static NetworkFleetMemberSnapshot[] NormalizeFleetMembers(
+    NetworkFleetMemberSnapshot[]? members,
+    NetworkFleetMemberPermissionSnapshot[]? permissions = null)
+{
+    var rows = new Dictionary<string, NetworkFleetMemberSnapshot>(StringComparer.OrdinalIgnoreCase);
+    foreach (var member in members ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(member.GameName))
+        {
+            continue;
+        }
+
+        var gameName = member.GameName.Trim();
+        rows[gameName] = member with
+        {
+            GameName = gameName,
+            Callsign = Normalize(member.Callsign, ""),
+            RoleTitle = Normalize(member.RoleTitle, "成员"),
+            SquadName = Normalize(member.SquadName, "Unassigned"),
+            Ship = Normalize(member.Ship, "Unknown"),
+            Location = Normalize(member.Location, "Unknown"),
+            AvatarImageData = NormalizeImageData(member.AvatarImageData, 512 * 1024),
+            LastUpdated = member.LastUpdated == default ? DateTimeOffset.UtcNow : member.LastUpdated
+        };
+    }
+
+    foreach (var permission in permissions ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(permission.GameName) ||
+            rows.ContainsKey(permission.GameName.Trim()))
+        {
+            continue;
+        }
+
+        rows[permission.GameName.Trim()] = new NetworkFleetMemberSnapshot(
+            permission.GameName.Trim(),
+            Normalize(permission.Callsign, ""),
+            Normalize(permission.RoleTitle, "成员"),
+            "Unassigned",
+            false,
+            null,
+            null,
+            permission.UpdatedAt == default ? DateTimeOffset.UtcNow : permission.UpdatedAt,
+            null);
+    }
+
+    return rows.Values.ToArray();
+}
+
+static NetworkFleetMemberSnapshot[] MergeFleetMembers(
+    NetworkFleetMemberSnapshot[]? existingMembers,
+    NetworkFleetMemberSnapshot[]? incomingMembers)
+{
+    var rows = NormalizeFleetMembers(existingMembers)
+        .ToDictionary(member => member.GameName, StringComparer.OrdinalIgnoreCase);
+
+    foreach (var member in NormalizeFleetMembers(incomingMembers))
+    {
+        var memberAliases = BuildFleetMemberAliases(member);
+        var existingPair = rows.FirstOrDefault(pair =>
+            IdentityContainsAny(pair.Value.GameName, memberAliases) ||
+            IdentityContainsAny(pair.Value.Callsign, memberAliases));
+
+        if (existingPair.Value is not null)
+        {
+            rows.Remove(existingPair.Key);
+            var existing = existingPair.Value;
+            rows[member.GameName] = existing.LastUpdated > member.LastUpdated
+                ? existing with
+                {
+                    Callsign = string.IsNullOrWhiteSpace(existing.Callsign)
+                        ? Normalize(member.Callsign, "")
+                        : existing.Callsign,
+                    AvatarImageData = string.IsNullOrWhiteSpace(existing.AvatarImageData)
+                        ? NormalizeImageData(member.AvatarImageData, 512 * 1024)
+                        : existing.AvatarImageData
+                }
+                : member;
+        }
+        else
+        {
+            rows[member.GameName] = member;
+        }
+    }
+
+    return rows.Values.ToArray();
+}
+
+static NetworkFleetMemberSnapshot[] FilterFleetMemberUpdatesForAccount(
+    NetworkFleetMemberSnapshot[]? members,
+    NetworkFleetMemberSnapshot[]? existingMembers,
+    UserAccount? account,
+    bool canUpdateAllMembers)
+{
+    var normalized = NormalizeFleetMembers(members);
+    if (canUpdateAllMembers)
+    {
+        return normalized;
+    }
+
+    if (account is null)
+    {
+        return [];
+    }
+
+    var existing = NormalizeFleetMembers(existingMembers);
+    return normalized
+        .Where(member =>
+            MatchesAccountIdentity(member.GameName, account) ||
+            MatchesAccountIdentity(member.Callsign, account))
+        .Select(member =>
+        {
+            var aliases = BuildFleetMemberAliases(member);
+            var existingMember = existing.FirstOrDefault(item =>
+                IdentityContainsAny(item.GameName, aliases) ||
+                IdentityContainsAny(item.Callsign, aliases));
+
+            return member with
+            {
+                RoleTitle = existingMember is null ? "成员" : Normalize(existingMember.RoleTitle, "成员")
+            };
+        })
+        .ToArray();
+}
+
+static HashSet<string> BuildFleetMemberAliases(NetworkFleetMemberSnapshot member)
+{
+    return ExpandIdentityAliases(member.GameName)
+        .Concat(ExpandIdentityAliases(member.Callsign))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+}
+
+static NetworkFleetShipSnapshot[] NormalizeFleetShips(NetworkFleetShipSnapshot[]? ships)
+{
+    return (ships ?? [])
+        .Where(ship => !string.IsNullOrWhiteSpace(ship.Code) &&
+                       !string.IsNullOrWhiteSpace(ship.OwnerGameName))
+        .Select(ship => ship with
+        {
+            Code = ship.Code.Trim(),
+            DisplayName = Normalize(ship.DisplayName, ship.Code.Trim()),
+            OwnerGameName = ship.OwnerGameName.Trim(),
+            OwnerCallsign = Normalize(ship.OwnerCallsign, ""),
+            OwnerSquad = Normalize(ship.OwnerSquad, "未加入小队"),
+            OwnerAvatarImageData = NormalizeImageData(ship.OwnerAvatarImageData, 512 * 1024),
+            ImportedAt = ship.ImportedAt == default ? DateTimeOffset.UtcNow : ship.ImportedAt
+        })
+        .GroupBy(ship => BuildFleetShipKey(ship.OwnerGameName, ship.Code), StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.OrderByDescending(ship => ship.ImportedAt).First())
+        .OrderBy(ship => ship.ImportedAt)
+        .ToArray();
+}
+
+static NetworkFleetShipSnapshot[] MergeFleetShips(
+    NetworkFleetShipSnapshot[]? existingShips,
+    NetworkFleetShipSnapshot[]? incomingShips,
+    UserAccount? account)
+{
+    var existing = NormalizeFleetShips(existingShips);
+    var incoming = NormalizeFleetShips(incomingShips);
+    var rows = existing.ToDictionary(ship => BuildFleetShipKey(ship.OwnerGameName, ship.Code), StringComparer.OrdinalIgnoreCase);
+
+    if (account is not null)
+    {
+        foreach (var key in rows
+                     .Where(pair => OwnerMatchesAccount(pair.Value, account))
+                     .Select(pair => pair.Key)
+                     .ToArray())
+        {
+            rows.Remove(key);
+        }
+
+        incoming = incoming
+            .Where(ship => OwnerMatchesAccount(ship, account))
+            .ToArray();
+    }
+
+    foreach (var ship in incoming)
+    {
+        rows[BuildFleetShipKey(ship.OwnerGameName, ship.Code)] = ship;
+    }
+
+    return rows.Values
+        .OrderBy(ship => ship.ImportedAt)
+        .ThenBy(ship => ship.DisplayName)
+        .ToArray();
+}
+
+static bool OwnerMatchesAccount(NetworkFleetShipSnapshot ship, UserAccount account)
+{
+    return MatchesAccountIdentity(ship.OwnerGameName, account) ||
+           MatchesAccountIdentity(ship.OwnerCallsign, account);
+}
+
+static NetworkFleetShipSnapshot[] BuildFleetShipsFromPlayer(NetworkPlayerSnapshot player)
+{
+    return (player.OwnedShips ?? [])
+        .Where(ship => !string.IsNullOrWhiteSpace(ship.Code))
+        .Select(ship => new NetworkFleetShipSnapshot(
+            ship.Code,
+            ship.DisplayName,
+            player.Name,
+            player.Callsign,
+            player.Squad,
+            player.AvatarImageData,
+            ship.ImportedAt))
+        .ToArray();
+}
+
+static string BuildFleetShipKey(string? ownerGameName, string? shipCode)
+{
+    return $"{Normalize(ownerGameName, "unknown")}::{Normalize(shipCode, "unknown")}";
+}
+
+static NetworkFleetMemberSnapshot[] UpsertFleetMember(
+    NetworkFleetMemberSnapshot[]? members,
+    NetworkFleetMemberSnapshot member)
+{
+    var memberAliases = ExpandIdentityAliases(member.GameName)
+        .Concat(ExpandIdentityAliases(member.Callsign))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var rows = NormalizeFleetMembers(members)
+        .Where(item => !IdentityContainsAny(item.GameName, memberAliases) &&
+                       !IdentityContainsAny(item.Callsign, memberAliases))
+        .Append(member)
+        .ToArray();
+    return rows;
+}
+
+static void UpsertFleetMemberFromPlayer(
+    ConcurrentDictionary<string, NetworkFleetSnapshot> fleets,
+    NetworkPlayerSnapshot player)
+{
+    if (string.IsNullOrWhiteSpace(player.Fleet) ||
+        player.Fleet.Equals("No Fleet", StringComparison.OrdinalIgnoreCase))
+    {
+        return;
+    }
+
+    foreach (var pair in fleets.ToArray())
+    {
+        var fleet = pair.Value;
+        if (!player.Fleet.Equals(fleet.Name, StringComparison.OrdinalIgnoreCase) &&
+            !player.Fleet.Equals(fleet.Code, StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        var existed = (fleet.Members ?? []).Any(member =>
+            MatchesPlayerIdentity(member.GameName, player) ||
+            MatchesPlayerIdentity(member.Callsign, player)) ||
+            (fleet.MemberPermissions ?? []).Any(permission =>
+                MatchesPlayerIdentity(permission.GameName, player) ||
+                MatchesPlayerIdentity(permission.Callsign, player));
+
+        var permission = (fleet.MemberPermissions ?? []).FirstOrDefault(item =>
+            MatchesPlayerIdentity(item.GameName, player) ||
+            MatchesPlayerIdentity(item.Callsign, player));
+        var member = new NetworkFleetMemberSnapshot(
+            player.Name,
+            Normalize(player.Callsign, permission?.Callsign ?? ""),
+            Normalize(permission?.RoleTitle, "成员"),
+            Normalize(player.Squad, "Unassigned"),
+            player.Online,
+            Normalize(player.Ship, "Unknown"),
+            Normalize(player.Location, "Unknown"),
+            player.LastUpdated,
+            player.AvatarImageData);
+
+        var updated = fleet with
+        {
+            Members = UpsertFleetMember(fleet.Members, member),
+            MemberPermissions = EnsureFleetPermission(fleet.MemberPermissions, member),
+            Ships = MergeFleetShips(fleet.Ships, BuildFleetShipsFromPlayer(player), null),
+            EventLog = existed
+                ? fleet.EventLog
+                : AddFleetLog(fleet.EventLog, "成员", "玩家加入", $"{DisplayMember(member)} 加入舰队"),
+            LastUpdated = DateTimeOffset.UtcNow
+        };
+        fleets[pair.Key] = updated;
+        return;
+    }
+}
+
+static void RemovePlayerFromStaleFleets(
+    ConcurrentDictionary<string, NetworkFleetSnapshot> fleets,
+    NetworkPlayerSnapshot player)
+{
+    if (string.IsNullOrWhiteSpace(player.Name))
+    {
+        return;
+    }
+
+    foreach (var pair in fleets.ToArray())
+    {
+        var fleet = pair.Value;
+        if (PlayerBelongsToFleet(player, fleet) ||
+            !FleetContainsPlayerIdentity(fleet, player) ||
+            IsFleetCommanderIdentity(fleet, player))
+        {
+            continue;
+        }
+
+        var nextMembers = (fleet.Members ?? [])
+            .Where(member => !MatchesPlayerIdentity(member.GameName, player) &&
+                             !MatchesPlayerIdentity(member.Callsign, player))
+            .ToArray();
+        var nextPermissions = (fleet.MemberPermissions ?? [])
+            .Where(permission => !MatchesPlayerIdentity(permission.GameName, player) &&
+                                 !MatchesPlayerIdentity(permission.Callsign, player))
+            .ToArray();
+        var nextShips = (fleet.Ships ?? [])
+            .Where(ship => !MatchesPlayerIdentity(ship.OwnerGameName, player) &&
+                           !MatchesPlayerIdentity(ship.OwnerCallsign, player))
+            .ToArray();
+
+        fleets[pair.Key] = fleet with
+        {
+            Members = nextMembers,
+            MemberPermissions = nextPermissions,
+            Ships = nextShips,
+            EventLog = AddFleetLog(
+                fleet.EventLog,
+                "成员",
+                "玩家离开",
+                $"{FormatPlayerIdentity(player)} 离开舰队"),
+            LastUpdated = DateTimeOffset.UtcNow
+        };
+    }
+}
+
+static bool PlayerBelongsToFleet(NetworkPlayerSnapshot player, NetworkFleetSnapshot fleet)
+{
+    return !string.IsNullOrWhiteSpace(player.Fleet) &&
+           !player.Fleet.Equals("No Fleet", StringComparison.OrdinalIgnoreCase) &&
+           (player.Fleet.Equals(fleet.Name, StringComparison.OrdinalIgnoreCase) ||
+            player.Fleet.Equals(fleet.Code, StringComparison.OrdinalIgnoreCase));
+}
+
+static bool FleetContainsPlayerIdentity(NetworkFleetSnapshot fleet, NetworkPlayerSnapshot player)
+{
+    return (fleet.Members ?? []).Any(member =>
+               MatchesPlayerIdentity(member.GameName, player) ||
+               MatchesPlayerIdentity(member.Callsign, player)) ||
+           (fleet.MemberPermissions ?? []).Any(permission =>
+               MatchesPlayerIdentity(permission.GameName, player) ||
+               MatchesPlayerIdentity(permission.Callsign, player)) ||
+           (fleet.Ships ?? []).Any(ship =>
+               MatchesPlayerIdentity(ship.OwnerGameName, player) ||
+               MatchesPlayerIdentity(ship.OwnerCallsign, player));
+}
+
+static bool IsFleetCommanderIdentity(NetworkFleetSnapshot fleet, NetworkPlayerSnapshot player)
+{
+    if (MatchesPlayerIdentity(fleet.Commander, player))
+    {
+        return true;
+    }
+
+    return (fleet.MemberPermissions ?? []).Any(permission =>
+        Normalize(permission.RoleTitle, "").Equals("舰队指挥官", StringComparison.OrdinalIgnoreCase) &&
+        (MatchesPlayerIdentity(permission.GameName, player) ||
+         MatchesPlayerIdentity(permission.Callsign, player)));
+}
+
+static bool MatchesPlayerIdentity(string? value, NetworkPlayerSnapshot player)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return false;
+    }
+
+    var aliases = ExpandIdentityAliases(value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    return aliases.Contains(player.Name) ||
+           (!string.IsNullOrWhiteSpace(player.Callsign) && aliases.Contains(player.Callsign));
+}
+
+static string FormatPlayerIdentity(NetworkPlayerSnapshot player)
+{
+    return string.IsNullOrWhiteSpace(player.Callsign)
+        ? player.Name
+        : $"{player.Callsign} ({player.Name})";
+}
+
+static NetworkFleetMemberPermissionSnapshot[] EnsureFleetPermission(
+    NetworkFleetMemberPermissionSnapshot[]? permissions,
+    NetworkFleetMemberSnapshot member)
+{
+    var memberAliases = ExpandIdentityAliases(member.GameName)
+        .Concat(ExpandIdentityAliases(member.Callsign))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if ((permissions ?? []).Any(permission =>
+        IdentityContainsAny(permission.GameName, memberAliases) ||
+        IdentityContainsAny(permission.Callsign, memberAliases)))
+    {
+        return permissions ?? [];
+    }
+
+    return (permissions ?? [])
+        .Append(new NetworkFleetMemberPermissionSnapshot(
+            member.GameName,
+            member.Callsign,
+            member.RoleTitle,
+            false,
+            false,
+            false,
+            false,
+            false,
+            DateTimeOffset.UtcNow))
+        .ToArray();
+}
+
+static NetworkFleetEventLogSnapshot[] NormalizeFleetEventLogs(NetworkFleetEventLogSnapshot[]? logs)
+{
+    return (logs ?? [])
+        .Where(log => !string.IsNullOrWhiteSpace(log.Id) ||
+                      !string.IsNullOrWhiteSpace(log.Title) ||
+                      !string.IsNullOrWhiteSpace(log.Detail))
+        .Select(log => log with
+        {
+            Id = string.IsNullOrWhiteSpace(log.Id) ? Guid.NewGuid().ToString("N") : log.Id.Trim(),
+            Timestamp = log.Timestamp == default ? DateTimeOffset.UtcNow : log.Timestamp,
+            Type = Normalize(log.Type, "舰队"),
+            Title = Normalize(log.Title, ""),
+            Detail = Normalize(log.Detail, "")
+        })
+        .GroupBy(log => log.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.OrderByDescending(log => log.Timestamp).First())
+        .OrderByDescending(log => log.Timestamp)
+        .Take(500)
+        .ToArray();
+}
+
+static NetworkFleetEventLogSnapshot[] MergeFleetEventLogs(
+    NetworkFleetEventLogSnapshot[]? existingLogs,
+    NetworkFleetEventLogSnapshot[]? incomingLogs)
+{
+    return NormalizeFleetEventLogs((existingLogs ?? []).Concat(incomingLogs ?? []).ToArray());
+}
+
+static NetworkFleetEventLogSnapshot[] AddFleetLog(
+    NetworkFleetEventLogSnapshot[]? existingLogs,
+    string type,
+    string title,
+    string detail)
+{
+    var row = new NetworkFleetEventLogSnapshot(
+        Guid.NewGuid().ToString("N"),
+        DateTimeOffset.UtcNow,
+        type,
+        title,
+        detail);
+    return NormalizeFleetEventLogs((existingLogs ?? []).Prepend(row).ToArray());
+}
+
+static NetworkActionPlanSnapshot[] MergeActionPlanParticipants(
+    NetworkActionPlanSnapshot[]? existingPlans,
+    NetworkActionPlanSnapshot[]? incomingPlans)
+{
+    var rows = (existingPlans ?? [])
+        .Where(plan => !string.IsNullOrWhiteSpace(plan.Id))
+        .ToDictionary(plan => plan.Id, StringComparer.OrdinalIgnoreCase);
+
+    foreach (var incoming in incomingPlans ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(incoming.Id) ||
+            !rows.TryGetValue(incoming.Id, out var existing))
+        {
+            continue;
+        }
+
+        rows[incoming.Id] = existing with
+        {
+            Participants = MergeActionPlanParticipantRows(existing.Participants, incoming.Participants)
+        };
+    }
+
+    return rows.Values
+        .OrderBy(plan => plan.StartTime)
+        .ToArray();
+}
+
+static NetworkActionPlanParticipantSnapshot[] MergeActionPlanParticipantRows(
+    NetworkActionPlanParticipantSnapshot[]? existingParticipants,
+    NetworkActionPlanParticipantSnapshot[]? incomingParticipants)
+{
+    var rows = new Dictionary<string, NetworkActionPlanParticipantSnapshot>(StringComparer.OrdinalIgnoreCase);
+    foreach (var participant in existingParticipants ?? [])
+    {
+        var key = NormalizeParticipantKey(participant);
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            rows[key] = participant;
+        }
+    }
+
+    foreach (var participant in incomingParticipants ?? [])
+    {
+        var key = NormalizeParticipantKey(participant);
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            rows[key] = participant;
+        }
+    }
+
+    return rows.Values
+        .OrderBy(participant => Normalize(participant.Callsign, participant.GameName))
+        .ToArray();
+}
+
+static string NormalizeParticipantKey(NetworkActionPlanParticipantSnapshot participant)
+{
+    return Normalize(participant.GameName, participant.Callsign).Trim();
+}
+
+static string DisplayMember(NetworkFleetMemberSnapshot member)
+{
+    return string.IsNullOrWhiteSpace(member.Callsign)
+        ? member.GameName
+        : $"{member.Callsign} ({member.GameName})";
+}
+
+static DateTimeOffset Max(DateTimeOffset a, DateTimeOffset b)
+{
+    return a >= b ? a : b;
+}
+
+static NetworkPlayerSnapshot ApplyPlayerOnlineTimeout(
+    NetworkPlayerSnapshot player,
+    DateTimeOffset now,
+    TimeSpan timeout)
+{
+    if (!player.Online || player.LastUpdated == default || now - player.LastUpdated <= timeout)
+    {
+        return player;
+    }
+
+    return player with
+    {
+        Online = false,
+        Ship = "Unknown",
+        ShipConfidence = "None",
+        Location = "Unknown",
+        LocationConfidence = "None"
+    };
+}
+
+static NetworkFleetMemberSnapshot ApplyMemberOnlineTimeout(
+    NetworkFleetMemberSnapshot member,
+    DateTimeOffset now,
+    TimeSpan timeout)
+{
+    if (!member.Online || member.LastUpdated == default || now - member.LastUpdated <= timeout)
+    {
+        return member;
+    }
+
+    return member with
+    {
+        Online = false,
+        Ship = "Unknown",
+        Location = "Unknown"
+    };
+}
+
+static bool HasFleetPermission(
+    NetworkFleetSnapshot fleet,
+    UserAccount? account,
+    Func<NetworkFleetMemberPermissionSnapshot, bool> predicate)
+{
+    if (account is null)
+    {
+        return false;
+    }
+
+    var permission = FindFleetPermission(fleet, account);
+    return permission is not null &&
+           permission.PermissionEnabled &&
+           predicate(permission);
+}
+
+static NetworkFleetMemberPermissionSnapshot? FindFleetPermission(NetworkFleetSnapshot fleet, UserAccount account)
+{
+    return (fleet.MemberPermissions ?? []).FirstOrDefault(permission =>
+        MatchesAccountIdentity(permission.GameName, account) ||
+        MatchesAccountIdentity(permission.Callsign, account));
+}
+
+static bool IsFleetMember(NetworkFleetSnapshot fleet, UserAccount? account)
+{
+    if (account is null)
+    {
+        return false;
+    }
+
+    if (!string.IsNullOrWhiteSpace(fleet.OwnerAccount) &&
+        fleet.OwnerAccount.Equals(account.UserName, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    if (FindFleetPermission(fleet, account) is not null)
+    {
+        return true;
+    }
+
+    return (fleet.Members ?? []).Any(member =>
+        MatchesAccountIdentity(member.GameName, account) ||
+        (!string.IsNullOrWhiteSpace(member.Callsign) &&
+         MatchesAccountIdentity(member.Callsign, account)));
+}
+
+static bool MatchesAccountIdentity(string? value, UserAccount account)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return false;
+    }
+
+    var aliases = ExpandIdentityAliases(value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    return MatchesIdentitySet(account, aliases);
+}
+
+static bool IsPrivilegedFleetMember(NetworkFleetSnapshot fleet, string targetName)
+{
+    var targetAliases = ExpandIdentityAliases(targetName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (IdentityContainsAny(fleet.Commander, targetAliases))
+    {
+        return true;
+    }
+
+    return (fleet.MemberPermissions ?? []).Any(permission =>
+        permission.PermissionEnabled &&
+        (IdentityContainsAny(permission.GameName, targetAliases) ||
+         IdentityContainsAny(permission.Callsign, targetAliases)));
+}
+
 static bool CanSendFleetNotification(NetworkFleetSnapshot fleet, UserAccount? account)
 {
     if (account is null)
@@ -802,15 +1734,11 @@ static bool CanSendFleetNotification(NetworkFleetSnapshot fleet, UserAccount? ac
         return true;
     }
 
-    if (string.IsNullOrWhiteSpace(fleet.Commander))
-    {
-        return false;
-    }
-
-    return (!string.IsNullOrWhiteSpace(account.GameName) &&
-            fleet.Commander.Equals(account.GameName, StringComparison.OrdinalIgnoreCase)) ||
-           (!string.IsNullOrWhiteSpace(account.Callsign) &&
-            fleet.Commander.Equals(account.Callsign, StringComparison.OrdinalIgnoreCase));
+    return MatchesAccountIdentity(fleet.Commander, account) ||
+           HasFleetPermission(fleet, account, permission =>
+               permission.CanPublishTasks ||
+               permission.CanPublishPlans ||
+               permission.CanManageFleetInfo);
 }
 
 static bool IsFleetOwner(NetworkFleetSnapshot fleet, UserAccount account)
@@ -826,10 +1754,64 @@ static bool IsFleetOwner(NetworkFleetSnapshot fleet, UserAccount account)
         return false;
     }
 
-    return (!string.IsNullOrWhiteSpace(account.GameName) &&
-            fleet.Commander.Contains(account.GameName, StringComparison.OrdinalIgnoreCase)) ||
-           (!string.IsNullOrWhiteSpace(account.Callsign) &&
-            fleet.Commander.Contains(account.Callsign, StringComparison.OrdinalIgnoreCase));
+    return MatchesAccountIdentity(fleet.Commander, account);
+}
+
+static void AddIdentityAliases(HashSet<string> identities, string? value)
+{
+    foreach (var alias in ExpandIdentityAliases(value))
+    {
+        identities.Add(alias);
+    }
+}
+
+static IEnumerable<string> ExpandIdentityAliases(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        yield break;
+    }
+
+    var trimmed = value.Trim();
+    yield return trimmed;
+
+    var open = trimmed.LastIndexOf('(');
+    var close = trimmed.LastIndexOf(')');
+    if (open >= 0 && close > open)
+    {
+        var inside = trimmed[(open + 1)..close].Trim();
+        if (!string.IsNullOrWhiteSpace(inside))
+        {
+            yield return inside;
+        }
+
+        var before = trimmed[..open].Trim();
+        if (!string.IsNullOrWhiteSpace(before))
+        {
+            yield return before;
+        }
+    }
+}
+
+static bool MatchesIdentitySet(UserAccount account, HashSet<string> identities)
+{
+    return ExpandIdentityAliases(account.UserName).Any(identities.Contains) ||
+           ExpandIdentityAliases(account.Email).Any(identities.Contains) ||
+           ExpandIdentityAliases(account.GameName).Any(identities.Contains) ||
+           ExpandIdentityAliases(account.Callsign).Any(identities.Contains);
+}
+
+static bool IdentityContainsAny(string? value, HashSet<string> identities)
+{
+    return ExpandIdentityAliases(value).Any(identities.Contains);
+}
+
+static bool IsUnboundGameName(string? gameName, UserAccount account)
+{
+    return string.IsNullOrWhiteSpace(gameName) ||
+           gameName.Equals(account.UserName, StringComparison.OrdinalIgnoreCase) ||
+           (!string.IsNullOrWhiteSpace(account.Email) &&
+            gameName.Equals(account.Email, StringComparison.OrdinalIgnoreCase));
 }
 
 static bool VerifyPassword(string password, UserAccount account)
@@ -1045,7 +2027,15 @@ public sealed record NetworkPlayerSnapshot(
     string? ShipConfidence,
     string? Location,
     string? LocationConfidence,
-    DateTimeOffset LastUpdated);
+    DateTimeOffset LastUpdated,
+    string? AvatarImageData = null,
+    NetworkOwnedShipSnapshot[]? OwnedShips = null);
+
+public sealed record NetworkOwnedShipSnapshot(
+    string Code,
+    string DisplayName,
+    string Source,
+    DateTimeOffset ImportedAt);
 
 public sealed record NetworkFleetSnapshot(
     string Name,
@@ -1071,7 +2061,12 @@ public sealed record NetworkFleetSnapshot(
     NetworkActionPlanSnapshot[]? ActionPlans,
     DateTimeOffset LastUpdated,
     string? OwnerAccount = null,
-    NetworkFleetMemberPermissionSnapshot[]? MemberPermissions = null);
+    NetworkFleetMemberPermissionSnapshot[]? MemberPermissions = null,
+    NetworkFleetMemberSnapshot[]? Members = null,
+    NetworkFleetEventLogSnapshot[]? EventLog = null,
+    int CurrentTaskNoticeRevision = 0,
+    NetworkFleetShipSnapshot[]? Ships = null,
+    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null);
 
 public sealed record NetworkFleetMemberPermissionSnapshot(
     string GameName,
@@ -1083,6 +2078,43 @@ public sealed record NetworkFleetMemberPermissionSnapshot(
     bool CanPublishPlans,
     bool CanManageFleetInfo,
     DateTimeOffset UpdatedAt);
+
+public sealed record NetworkFleetMemberSnapshot(
+    string GameName,
+    string? Callsign,
+    string RoleTitle,
+    string SquadName,
+    bool Online,
+    string? Ship,
+    string? Location,
+    DateTimeOffset LastUpdated,
+    string? AvatarImageData = null);
+
+public sealed record NetworkFleetShipSnapshot(
+    string Code,
+    string DisplayName,
+    string OwnerGameName,
+    string? OwnerCallsign,
+    string? OwnerSquad,
+    string? OwnerAvatarImageData,
+    DateTimeOffset ImportedAt);
+
+public sealed record NetworkFleetEventLogSnapshot(
+    string Id,
+    DateTimeOffset Timestamp,
+    string Type,
+    string Title,
+    string Detail);
+
+public sealed record NetworkFleetTaskHistorySnapshot(
+    string Key,
+    string Title,
+    string Brief,
+    string Status,
+    string Participants,
+    string Rally,
+    string RequiredShip,
+    string PublishedAtText);
 
 public sealed record FleetDisbandRequest(
     string FleetCode,
@@ -1100,7 +2132,10 @@ public sealed record NetworkSquadSnapshot(
     string Name,
     string? Commander,
     string? Type,
-    string? Description);
+    string? Description,
+    string? Mission = null,
+    string? RallyPoint = null,
+    string? EmblemImageData = null);
 
 public sealed record NetworkActionPlanSnapshot(
     string Id,
@@ -1114,7 +2149,8 @@ public sealed record NetworkActionPlanParticipantSnapshot(
     string Callsign,
     string GameName,
     string? AvatarPath,
-    string Initials);
+    string Initials,
+    string? AvatarImageData = null);
 
 public sealed record SmtpOptions(
     string? Host,
