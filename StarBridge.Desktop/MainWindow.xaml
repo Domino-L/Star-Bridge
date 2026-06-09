@@ -60,7 +60,7 @@
                             VerticalAlignment="Center"
                             Margin="18,0,0,0">
                     <TextBlock x:Name="WindowTitleText"
-                               Text="星海舰桥 V0.3.6"
+                               Text="星海舰桥 V0.3.7"
                                VerticalAlignment="Center"
                                FontSize="14"
                                FontWeight="SemiBold"
@@ -83,12 +83,12 @@
             </Grid>
         </Border>
 
-    <Grid Grid.Row="1" Margin="18">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="88" />
-            <RowDefinition Height="68" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+        <Grid Grid.Row="1" Margin="18">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="88" />
+                <RowDefinition Height="42" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
 
         <Grid Grid.Row="0">
             <Grid.ColumnDefinitions>
@@ -294,7 +294,11 @@
             </Button>
         </Grid>
 
-        <Grid Grid.Row="1">
+            <Grid Grid.Row="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="42" />
+                    <RowDefinition Height="0" />
+                </Grid.RowDefinitions>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="138" />
@@ -310,20 +314,23 @@
                        VerticalAlignment="Center"
                        Visibility="Collapsed" />
 
-            <TextBox Grid.Column="0"
+            <TextBox Grid.Row="0"
+                     Grid.Column="0"
                      x:Name="LogPathBox"
                      IsReadOnly="True"
                      VerticalContentAlignment="Center"
                      Text="No Game.log selected" />
 
-            <Button Grid.Column="1"
+            <Button Grid.Row="0"
+                    Grid.Column="1"
                     x:Name="SelectLogButton"
                     Margin="12,0,0,0"
                     Style="{StaticResource PrimaryButton}"
                     Content="Select Log"
                     Click="SelectLog_Click" />
 
-            <ComboBox Grid.Column="3"
+            <ComboBox Grid.Row="0"
+                      Grid.Column="3"
                       x:Name="LanguageBox"
                       Margin="12,0,0,0"
                       VerticalContentAlignment="Center"
@@ -333,7 +340,8 @@
                 <ComboBoxItem Content="中文" Tag="zh" />
             </ComboBox>
 
-            <Button Grid.Column="3"
+            <Button Grid.Row="0"
+                    Grid.Column="3"
                     x:Name="NetworkTestNavButton"
                     Margin="12,0,0,0"
                     Style="{StaticResource SecondaryButton}"
@@ -342,12 +350,96 @@
                     Visibility="Collapsed"
                     Click="NetworkTestNav_Click" />
 
-            <Button Grid.Column="2"
+            <Button Grid.Row="0"
+                    Grid.Column="2"
                     x:Name="ToggleOverlayButton"
                     Margin="12,0,0,0"
                     Style="{StaticResource SecondaryButton}"
                     Content="Toggle Overlay"
                     Click="OpenOverlay_Click" />
+
+            <Border Grid.Row="1"
+                    Grid.ColumnSpan="4"
+                    Margin="0,9,0,0"
+                    Padding="12,7"
+                    BorderBrush="{StaticResource AccentDimBrush}"
+                    BorderThickness="1"
+                    Background="#7007101B"
+                    Visibility="Collapsed">
+                <DockPanel LastChildFill="False">
+                    <StackPanel DockPanel.Dock="Left"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center">
+                        <TextBlock Text="运行状态"
+                                   Style="{StaticResource HudCaptionText}"
+                                   Margin="0,0,14,0" />
+
+                        <Border BorderBrush="{StaticResource AccentDimBrush}"
+                                BorderThickness="1"
+                                Background="#660A1624"
+                                Padding="9,3"
+                                Margin="0,0,8,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="账号"
+                                           Style="{StaticResource HudCaptionText}"
+                                           Margin="0,0,8,0" />
+                                <TextBlock x:Name="HeaderAccountStatusText"
+                                           Text="未登录"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border BorderBrush="{StaticResource AccentDimBrush}"
+                                BorderThickness="1"
+                                Background="#660A1624"
+                                Padding="9,3"
+                                Margin="0,0,8,0">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="连接"
+                                           Style="{StaticResource HudCaptionText}"
+                                           Margin="0,0,8,0" />
+                                <TextBlock x:Name="HeaderSyncStatusText"
+                                           Text="未连接"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border BorderBrush="{StaticResource AccentDimBrush}"
+                                BorderThickness="1"
+                                Background="#660A1624"
+                                Padding="9,3">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="游戏"
+                                           Style="{StaticResource HudCaptionText}"
+                                           Margin="0,0,8,0" />
+                                <TextBlock x:Name="HeaderGameProcessStatusText"
+                                           Text="未运行"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <StackPanel DockPanel.Dock="Right"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center">
+                        <TextBlock Text="服务器"
+                                   Style="{StaticResource HudCaptionText}"
+                                   Margin="0,0,10,0" />
+                        <TextBlock x:Name="HeaderGameServerRegionText"
+                                   Text="未知"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Foreground="{StaticResource PrimaryTextBrush}"
+                                   TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </DockPanel>
+            </Border>
         </Grid>
 
         <TabControl x:Name="MainTabs"
@@ -706,29 +798,42 @@
                             </Grid>
 
                             <Grid Grid.Column="2">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Border Grid.Column="0" Style="{StaticResource HudPanel}" Margin="0,0,8,0">
-                                    <StackPanel>
-                                        <TextBlock x:Name="TotalMembersLabel" Text="人数" Style="{StaticResource HudCaptionText}" />
-                                        <TextBlock x:Name="TotalMembersText" Text="0" Style="{StaticResource HudValueText}" />
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Column="1" Style="{StaticResource HudPanel}" Margin="4,0">
-                                    <StackPanel>
-                                        <TextBlock x:Name="FleetShipsLabel" Text="舰船" Style="{StaticResource HudCaptionText}" />
-                                        <TextBlock x:Name="FleetShipCountText" Text="0" Style="{StaticResource HudValueText}" />
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Column="2" Style="{StaticResource HudPanel}" Margin="8,0,0,0">
-                                    <StackPanel>
-                                        <TextBlock x:Name="OnlineLabel" Text="在线" Style="{StaticResource HudCaptionText}" />
-                                        <TextBlock x:Name="OnlineMembersText" Text="0" Style="{StaticResource HudValueText}" />
-                                    </StackPanel>
-                                </Border>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="36" />
+                                </Grid.RowDefinitions>
+                                <Grid Grid.Row="0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Style="{StaticResource HudPanel}" Margin="0,0,8,0">
+                                        <StackPanel>
+                                            <TextBlock x:Name="TotalMembersLabel" Text="人数" Style="{StaticResource HudCaptionText}" />
+                                            <TextBlock x:Name="TotalMembersText" Text="0" Style="{StaticResource HudValueText}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1" Style="{StaticResource HudPanel}" Margin="4,0">
+                                        <StackPanel>
+                                            <TextBlock x:Name="FleetShipsLabel" Text="舰船" Style="{StaticResource HudCaptionText}" />
+                                            <TextBlock x:Name="FleetShipCountText" Text="0" Style="{StaticResource HudValueText}" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="2" Style="{StaticResource HudPanel}" Margin="8,0,0,0">
+                                        <StackPanel>
+                                            <TextBlock x:Name="OnlineLabel" Text="在线" Style="{StaticResource HudCaptionText}" />
+                                            <TextBlock x:Name="OnlineMembersText" Text="0" Style="{StaticResource HudValueText}" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                                <Button Grid.Row="1"
+                                        x:Name="LeaveFleetButton"
+                                        Content="离开舰队"
+                                        Style="{StaticResource SecondaryButton}"
+                                        Margin="0,8,0,0"
+                                        Visibility="Collapsed"
+                                        Click="LeaveFleetButton_Click" />
                             </Grid>
                         </Grid>
                     </Border>
@@ -1738,6 +1843,120 @@
                                                     </ScrollViewer>
                                                 </Grid>
                                             </Border>
+                                        </Grid>
+                                    </Border>
+                                </TabItem>
+                                <TabItem x:Name="FleetApplicationsTab" Header="申请 0">
+                                    <Border Style="{StaticResource HudPanel}"
+                                            Padding="18">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="FLEET APPLICATIONS"
+                                                           Style="{StaticResource HudCaptionText}" />
+                                                <TextBlock Text="加入申请"
+                                                           Margin="0,8,0,0"
+                                                           Foreground="{StaticResource PrimaryTextBrush}"
+                                                           FontSize="20"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock Text="需要申请加入的舰队会在这里显示待审核玩家。"
+                                                           Margin="0,8,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+
+                                            <Border Grid.Row="1"
+                                                    Margin="0,18,0,0"
+                                                    Background="{StaticResource FieldBackBrush}"
+                                                    BorderBrush="{StaticResource AccentDimBrush}"
+                                                    BorderThickness="1">
+                                                <Grid>
+                                                    <TextBlock x:Name="FleetApplicationEmptyText"
+                                                               Text="暂无加入申请。"
+                                                               Foreground="{StaticResource MutedTextBrush}"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center" />
+                                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                                        <ItemsControl x:Name="FleetApplicationList"
+                                                                      Margin="10">
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <Border Style="{StaticResource SquadBannerPanel}"
+                                                                            MinHeight="96"
+                                                                            Margin="0,0,0,10">
+                                                                        <Grid>
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="58" />
+                                                                                <ColumnDefinition Width="*" />
+                                                                                <ColumnDefinition Width="180" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <Border Width="42"
+                                                                                    Height="42"
+                                                                                    BorderBrush="{StaticResource AccentBrush}"
+                                                                                    BorderThickness="1"
+                                                                                    Background="{StaticResource PanelBackBrush}">
+                                                                                <Grid>
+                                                                                    <Image Source="{Binding AvatarPath, Converter={StaticResource ImagePathConverter}}"
+                                                                                           Stretch="UniformToFill" />
+                                                                                    <TextBlock Text="{Binding Initials}"
+                                                                                               Foreground="{StaticResource AccentBrush}"
+                                                                                               FontWeight="SemiBold"
+                                                                                               HorizontalAlignment="Center"
+                                                                                               VerticalAlignment="Center" />
+                                                                                </Grid>
+                                                                            </Border>
+                                                                            <StackPanel Grid.Column="1">
+                                                                                <TextBlock Text="{Binding DisplayName}"
+                                                                                           Foreground="{StaticResource PrimaryTextBrush}"
+                                                                                           FontSize="15"
+                                                                                           FontWeight="SemiBold" />
+                                                                                <TextBlock Text="{Binding GameName}"
+                                                                                           Style="{StaticResource HudCaptionText}"
+                                                                                           Margin="0,5,0,0" />
+                                                                                <TextBlock Text="{Binding Message}"
+                                                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                                                           Margin="0,8,0,0"
+                                                                                           TextWrapping="Wrap" />
+                                                                            </StackPanel>
+                                                                            <StackPanel Grid.Column="2"
+                                                                                        VerticalAlignment="Center">
+                                                                                <TextBlock Text="{Binding CreatedAtText}"
+                                                                                           Style="{StaticResource HudCaptionText}" />
+                                                                                <Grid Margin="0,10,0,0">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="*" />
+                                                                                        <ColumnDefinition Width="*" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <Button Content="批准"
+                                                                                            Style="{StaticResource PrimaryButton}"
+                                                                                            Height="34"
+                                                                                            Tag="{Binding}"
+                                                                                            Click="ApproveFleetApplication_Click" />
+                                                                                    <Button Grid.Column="1"
+                                                                                            Content="拒绝"
+                                                                                            Style="{StaticResource SecondaryButton}"
+                                                                                            Height="34"
+                                                                                            Margin="8,0,0,0"
+                                                                                            Tag="{Binding}"
+                                                                                            Click="RejectFleetApplication_Click" />
+                                                                                </Grid>
+                                                                            </StackPanel>
+                                                                        </Grid>
+                                                                    </Border>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
+                                                    </ScrollViewer>
+                                                </Grid>
+                                            </Border>
+                                            <TextBlock Grid.Row="2"
+                                                       x:Name="FleetApplicationStatusText"
+                                                       Margin="0,12,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}" />
                                         </Grid>
                                     </Border>
                                 </TabItem>
@@ -2899,6 +3118,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="44" />
                                 <RowDefinition Height="44" />
+                                <RowDefinition Height="44" />
                                 <RowDefinition Height="28" />
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
@@ -2914,13 +3134,20 @@
                                     Margin="0,10,0,0"
                                     IsEnabled="False"
                                     Click="JoinSquad_Click" />
-                            <TextBlock Grid.Row="2"
+                            <Button Grid.Row="2"
+                                    x:Name="LeaveSquadButton"
+                                    Content="离开小队"
+                                    Style="{StaticResource SecondaryButton}"
+                                    Margin="0,10,0,0"
+                                    Visibility="Collapsed"
+                                    Click="LeaveSquad_Click" />
+                            <TextBlock Grid.Row="3"
                                        x:Name="JoinSquadHintText"
                                        Text="请选择一个小队"
                                        Foreground="{StaticResource MutedTextBrush}"
                                        FontSize="11"
                                        VerticalAlignment="Center" />
-                            <Grid Grid.Row="3"
+                            <Grid Grid.Row="4"
                                   Margin="0,8,0,0">
                                 <ListBox x:Name="SquadSelectionList"
                                          Background="{StaticResource FieldBackBrush}"
@@ -3162,6 +3389,18 @@
                                 <GridViewColumn x:Name="MySquadOnlineColumn" Header="Online" DisplayMemberBinding="{Binding OnlineStatus}" Width="130" />
                                 <GridViewColumn x:Name="MySquadShipColumn" Header="Ship Status" DisplayMemberBinding="{Binding ShipStatus}" Width="260" />
                                 <GridViewColumn x:Name="MySquadLocationColumn" Header="Location" DisplayMemberBinding="{Binding Location}" Width="260" />
+                                <GridViewColumn x:Name="MySquadActionColumn" Header="Action" Width="110">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Button Content="移除"
+                                                    Style="{StaticResource SecondaryButton}"
+                                                    Height="28"
+                                                    Padding="10,0"
+                                                    Visibility="{Binding RemoveButtonVisibility}"
+                                                    Click="RemoveSquadMember_Click" />
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
                             </GridView>
                         </ListView.View>
                     </ListView>
@@ -3848,6 +4087,48 @@
             </TabItem>
         </TabControl>
     </Grid>
+
+        <Border x:Name="SyncStatusOverlay"
+                Grid.Row="1"
+                Width="560"
+                Margin="0,168,0,0"
+                Padding="18,14"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Top"
+                Panel.ZIndex="90"
+                Visibility="Collapsed"
+                Background="#EE06101A"
+                BorderBrush="{StaticResource AccentBrush}"
+                BorderThickness="1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="120" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock x:Name="SyncOverlayTitleText"
+                               Text="正在同步"
+                               Foreground="{StaticResource AccentBrush}"
+                               FontSize="16"
+                               FontWeight="SemiBold" />
+                    <TextBlock x:Name="SyncOverlayDetailText"
+                               Margin="0,6,0,0"
+                               Text="正在同步服务器数据..."
+                               Foreground="{StaticResource MutedTextBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+                <Button x:Name="SyncOverlayRetryButton"
+                        Grid.Column="1"
+                        Content="重试"
+                        Width="100"
+                        Height="36"
+                        Margin="16,0,0,0"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed"
+                        Style="{StaticResource PrimaryButton}"
+                        Click="SyncOverlayRetryButton_Click" />
+            </Grid>
+        </Border>
         </Grid>
     </Border>
 </Window>

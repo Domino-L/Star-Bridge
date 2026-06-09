@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
 using MediaBrush = System.Windows.Media.Brush;
@@ -29,7 +29,11 @@ public sealed record SquadMemberStatusRow(
     string OnlineStatus,
     string ShipStatus,
     string Location,
-    MediaBrush? NameBrush = null);
+    MediaBrush? NameBrush = null,
+    bool CanRemoveFromSquad = false)
+{
+    public Visibility RemoveButtonVisibility => CanRemoveFromSquad ? Visibility.Visible : Visibility.Collapsed;
+}
 
 public sealed record FleetShipInventoryRow(
     int Number,
@@ -81,15 +85,18 @@ public sealed class FleetMemberManagementRow : INotifyPropertyChanged
     public string OnlineStatus { get; init; } = "Offline";
     public bool IsSelf { get; init; }
     public bool IsCommander { get; init; }
+    public bool CanCurrentUserEditPermissions { get; init; }
+    public bool CanCurrentUserRemove { get; init; }
+    public bool CanCurrentUserTransferCommand { get; init; }
     public MediaBrush? RoleBrush { get; init; }
     public string HeaderLine => $"{SquadName} / {OnlineStatus}";
-    public bool CanEditPermissions => !IsCommander;
+    public bool CanEditPermissions => CanCurrentUserEditPermissions && !IsCommander;
     public bool ShowPermissionControls => IsCommander || PermissionEnabled;
     public bool ShowRoleEditor => PermissionEnabled && CanEditPermissions;
     public bool ShowRoleSummary => IsCommander || PermissionEnabled;
     public bool ShowSavePermissions => PermissionEnabled && CanEditPermissions;
-    public bool CanTransferCommander => !IsSelf && !IsCommander;
-    public bool CanRemoveFromFleet => !IsSelf && !IsCommander;
+    public bool CanTransferCommander => CanCurrentUserTransferCommand && !IsSelf && !IsCommander;
+    public bool CanRemoveFromFleet => CanCurrentUserRemove && !IsSelf && !IsCommander;
 
     public string RoleTitle
     {
@@ -122,6 +129,9 @@ public sealed class FleetMemberManagementRow : INotifyPropertyChanged
             OnChanged(nameof(ShowRoleEditor));
             OnChanged(nameof(ShowRoleSummary));
             OnChanged(nameof(ShowSavePermissions));
+            OnChanged(nameof(CanEditPermissions));
+            OnChanged(nameof(CanTransferCommander));
+            OnChanged(nameof(CanRemoveFromFleet));
         }
     }
 
@@ -228,6 +238,18 @@ public sealed record ActionPlanParticipantRow(
     string? AvatarPath,
     string Initials);
 
+public sealed record FleetApplicationRow(
+    string Id,
+    string DisplayName,
+    string GameName,
+    string Callsign,
+    string? Account,
+    string Message,
+    string Status,
+    string CreatedAtText,
+    string Initials,
+    string? AvatarPath);
+
 public sealed record NetworkFleetCard(
     NetworkFleetSnapshot Snapshot,
     string Name,
@@ -241,6 +263,7 @@ public sealed record NetworkFleetCard(
     string TypeLine,
     string ActiveTimeLine,
     string MembersLine,
+    bool RequiresApplication,
     bool CanJoin,
     string JoinButtonText,
     int SearchScore = 1)
@@ -261,7 +284,12 @@ public sealed record NetworkFleetCard(
                              (snapshot.Name.Equals(currentFleetName, StringComparison.OrdinalIgnoreCase) ||
                               code.Equals(currentFleetCode, StringComparison.OrdinalIgnoreCase));
         var hasLogoImage = !string.IsNullOrWhiteSpace(snapshot.LogoImageData);
-
+        var requiresApplication =
+            joinPolicy.Contains("申请", StringComparison.OrdinalIgnoreCase) ||
+            joinPolicy.Contains("审核", StringComparison.OrdinalIgnoreCase) ||
+            joinPolicy.Contains("Application", StringComparison.OrdinalIgnoreCase) ||
+            joinPolicy.Contains("Apply", StringComparison.OrdinalIgnoreCase) ||
+            joinPolicy.Contains("Request", StringComparison.OrdinalIgnoreCase);
         return new NetworkFleetCard(
             snapshot,
             snapshot.Name,
@@ -270,15 +298,15 @@ public sealed record NetworkFleetCard(
             hasLogoImage ? Visibility.Collapsed : Visibility.Visible,
             $"识别码 / {code}",
             $"指挥官 / {commander}",
-            joinPolicy.Equals("需要申请", StringComparison.OrdinalIgnoreCase) ||
-            joinPolicy.Equals("Application", StringComparison.OrdinalIgnoreCase)
+            requiresApplication
                 ? "加入 / 需要申请"
                 : "加入 / 无门槛",
             description!,
             $"类型 / {type}",
             $"活动时间 / {activeTime}",
             $"{snapshot.OnlineMembers} 在线 / {snapshot.TotalMembers} 成员",
+            requiresApplication,
             !isCurrentFleet,
-            isCurrentFleet ? "已加入" : "加入");
+            isCurrentFleet ? "已加入" : requiresApplication ? "申请加入" : hasFleet ? "切换舰队" : "加入");
     }
 }

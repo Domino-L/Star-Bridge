@@ -373,6 +373,16 @@
         <Setter Property="SelectionBrush" Value="{StaticResource AccentDimBrush}" />
     </Style>
 
+    <Style TargetType="PasswordBox">
+        <Setter Property="Background" Value="{StaticResource FieldBackBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource AccentDimBrush}" />
+        <Setter Property="CaretBrush" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Padding" Value="8,5" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="SelectionBrush" Value="{StaticResource AccentDimBrush}" />
+    </Style>
+
     <Style TargetType="ComboBox">
         <Setter Property="Height" Value="36" />
         <Setter Property="Padding" Value="8,4" />

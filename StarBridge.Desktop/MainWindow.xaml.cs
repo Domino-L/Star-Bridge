@@ -14,6 +14,8 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -44,6 +46,9 @@ public partial class MainWindow : Window
     private const string OverlayPresetCommand = "command";
     private const string OverlayPresetCustom = "custom";
     private const string DefaultRelayUrl = "https://api.scstarbridge.com";
+    private static readonly Regex JoinPuShardRegex = new(
+        @"<Join PU>.*?\bshard\[(?<shard>[^\]]+)\]",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     private readonly RegexLogEventParser _parser = new();
     private readonly FleetState _fleetState = new();
@@ -58,7 +63,9 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<FleetActionPlanRow> _fleetActionPlans = [];
     private readonly ObservableCollection<FleetEventLogRow> _fleetEventLogs = [];
     private readonly ObservableCollection<FleetMemberManagementRow> _fleetMemberRows = [];
+    private readonly ObservableCollection<FleetApplicationRow> _fleetApplications = [];
     private readonly List<FleetEventLogRow> _allFleetEventLogs = [];
+    private NetworkFleetApplicationSnapshot[] _fleetApplicationSnapshots = [];
     private readonly Dictionary<string, LocalFleetMemberPermission> _fleetMemberPermissions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, NetworkPlayerSnapshot> _networkSnapshots = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _joinedActionPlanIds = new(StringComparer.OrdinalIgnoreCase);
@@ -115,6 +122,8 @@ public partial class MainWindow : Window
     private bool _joinActionNotifyMe;
     private string? _callsign;
     private bool _allowEmailNotifications = true;
+    private string _gameServerRegion = "未知";
+    private string _gameServerShard = "";
     private OverlayWindow? _overlayWindow;
     private OverlayLayoutItem? _activeOverlayItem;
     private FrameworkElement? _activeOverlayEditorElement;
@@ -133,6 +142,7 @@ public partial class MainWindow : Window
     private int _networkSyncFailureCount;
     private DateTimeOffset _nextNetworkSyncAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastProcessDrivenRenderAt = DateTimeOffset.MinValue;
+    private CancellationTokenSource? _syncStatusOverlayCts;
     private HwndSource? _hotkeySource;
     private bool _hotkeyRegistered;
     private bool _hasFleet;
@@ -166,6 +176,7 @@ public partial class MainWindow : Window
         FleetActionPlanList.ItemsSource = _fleetActionPlans;
         FleetEventLogList.ItemsSource = _fleetEventLogs;
         FleetMemberManagementList.ItemsSource = _fleetMemberRows;
+        FleetApplicationList.ItemsSource = _fleetApplications;
 
         _isLoadingSettings = true;
         var config = DesktopAppConfig.Load();
@@ -230,6 +241,7 @@ public partial class MainWindow : Window
             await FlushProfileSyncDebouncedAsync();
         };
         AppendOutput("Designer WPF shell ready. Select Game.log to start.");
+        RefreshHeaderStatusBar();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -308,7 +320,7 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 FeedbackStatusText.Text = response.StatusCode == HttpStatusCode.NotFound
-                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.6 服务器后重试。"
+                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.7 服务器后重试。"
                     : $"发送失败：{await ReadResponseErrorAsync(response)}";
                 return;
             }
@@ -339,6 +351,7 @@ public partial class MainWindow : Window
 
         LoginStatusText.Text = message;
         NetworkStatusText.Text = "浏览模式：请先登录";
+        RefreshHeaderStatusBar();
         MainTabs.SelectedItem = PersonalTab;
         SetActiveNav(PersonalNavButton);
         _ = ShowLoginDialogAsync();
@@ -402,6 +415,7 @@ public partial class MainWindow : Window
         finally
         {
             _isRefreshingAccountPanel = false;
+            RefreshHeaderStatusBar();
         }
     }
 
@@ -669,9 +683,19 @@ public partial class MainWindow : Window
 
     private void ApplyLine(string line, bool output)
     {
+        var gameServerChanged = TryUpdateGameServerFromLine(line);
         var fleetEvent = _parser.TryParse(line);
         if (fleetEvent is null)
         {
+            if (gameServerChanged)
+            {
+                RefreshHeaderStatusBar();
+                if (output)
+                {
+                    AppendOutput($"GAME SERVER | {_gameServerRegion} | {_gameServerShard}");
+                }
+            }
+
             return;
         }
 
@@ -705,6 +729,10 @@ public partial class MainWindow : Window
         if (output)
         {
             AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""} | {fleetEvent.Location ?? fleetEvent.NavigationTarget ?? ""}");
+            if (gameServerChanged)
+            {
+                AppendOutput($"GAME SERVER | {_gameServerRegion} | {_gameServerShard}");
+            }
         }
     }
 
@@ -774,6 +802,8 @@ public partial class MainWindow : Window
         RenderSquads();
         RenderMySquad();
         RefreshFleetMemberManagement();
+        RefreshFleetApplications();
+        RefreshSquadActionButtons();
         RefreshOverlayWindow();
 
         var local = _players.FirstOrDefault(player =>
@@ -785,6 +815,8 @@ public partial class MainWindow : Window
                 $"Location: {local.Location}{Environment.NewLine}" +
                 $"Status: {local.Status}";
         }
+
+        RefreshHeaderStatusBar();
     }
 
     private static string FormatShipInference(string ship, string confidence)
@@ -805,7 +837,7 @@ public partial class MainWindow : Window
             return "舰队指挥官";
         }
 
-        var permission = GetFleetPermission(playerName);
+        var permission = GetFleetPermission(playerName, callsign);
         return permission is not null && permission.PermissionEnabled
             ? NormalizeRoleTitle(permission.RoleTitle)
             : "成员";
@@ -831,17 +863,122 @@ public partial class MainWindow : Window
             return FindBrush("FleetCommanderNameBrush", Brushes.Gold);
         }
 
-        var permission = GetFleetPermission(playerName);
+        var permission = GetFleetPermission(playerName, callsign);
         return permission is not null && permission.PermissionEnabled
             ? Brushes.MediumPurple
             : FindBrush("MutedTextBrush", Brushes.LightGray);
     }
 
-    private LocalFleetMemberPermission? GetFleetPermission(string playerName)
+    private LocalFleetMemberPermission? GetFleetPermission(string? playerName, string? callsign = null)
     {
-        return _fleetMemberPermissions.TryGetValue(playerName, out var permission)
-            ? permission
-            : null;
+        var aliases = EnumerateIdentityAliases(playerName, callsign).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var alias in aliases)
+        {
+            if (_fleetMemberPermissions.TryGetValue(alias, out var direct))
+            {
+                return direct;
+            }
+        }
+
+        return _fleetMemberPermissions.Values.FirstOrDefault(permission =>
+            aliases.Contains(permission.GameName) ||
+            (!string.IsNullOrWhiteSpace(permission.Callsign) && aliases.Contains(permission.Callsign)) ||
+            aliases.Contains(FormatCommanderName(permission.Callsign, permission.GameName)));
+    }
+
+    private LocalFleetMemberPermission? GetCurrentUserFleetPermission()
+    {
+        foreach (var alias in EnumerateLocalIdentities())
+        {
+            var permission = GetFleetPermission(alias);
+            if (permission is not null)
+            {
+                return permission;
+            }
+        }
+
+        return null;
+    }
+
+    private bool HasCurrentUserFleetPermission(Func<LocalFleetMemberPermission, bool> predicate)
+    {
+        if (IsCurrentUserFleetCommander())
+        {
+            return true;
+        }
+
+        var permission = GetCurrentUserFleetPermission();
+        return permission is not null &&
+               permission.PermissionEnabled &&
+               predicate(permission);
+    }
+
+    private bool CanCurrentUserOpenFleetManagement()
+    {
+        return _hasFleet &&
+               (IsCurrentUserFleetCommander() ||
+                HasCurrentUserFleetPermission(permission =>
+                    permission.CanManageFleetInfo ||
+                    permission.CanPublishTasks ||
+                    permission.CanPublishPlans ||
+                    permission.CanRemoveMembers));
+    }
+
+    private bool CanCurrentUserManageFleetInfo()
+    {
+        return HasCurrentUserFleetPermission(permission => permission.CanManageFleetInfo);
+    }
+
+    private bool CanCurrentUserPublishTasks()
+    {
+        return HasCurrentUserFleetPermission(permission => permission.CanPublishTasks);
+    }
+
+    private bool CanCurrentUserPublishPlans()
+    {
+        return HasCurrentUserFleetPermission(permission => permission.CanPublishPlans);
+    }
+
+    private bool CanCurrentUserRemoveMembers()
+    {
+        return HasCurrentUserFleetPermission(permission => permission.CanRemoveMembers);
+    }
+
+    private IEnumerable<string> EnumerateLocalIdentities()
+    {
+        return EnumerateIdentityAliases(_localPlayer, _callsign)
+            .Concat(EnumerateIdentityAliases(_accountName, null));
+    }
+
+    private static IEnumerable<string> EnumerateIdentityAliases(string? playerName, string? callsign)
+    {
+        foreach (var value in new[] { playerName, callsign })
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            var trimmed = value.Trim();
+            yield return trimmed;
+
+            var gameName = GetGameNameFromDisplayName(trimmed);
+            if (!string.IsNullOrWhiteSpace(gameName))
+            {
+                yield return gameName;
+            }
+
+            var displayCallsign = GetCallsignFromDisplayName(trimmed);
+            if (!string.IsNullOrWhiteSpace(displayCallsign))
+            {
+                yield return displayCallsign;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(playerName) && !string.IsNullOrWhiteSpace(callsign))
+        {
+            yield return FormatCommanderName(callsign, playerName);
+        }
     }
 
     private static string NormalizeRoleTitle(string? value)
@@ -896,6 +1033,153 @@ public partial class MainWindow : Window
             : location.Trim();
     }
 
+    private bool TryUpdateGameServerFromLine(string line)
+    {
+        var match = JoinPuShardRegex.Match(line);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        var shard = match.Groups["shard"].Value.Trim();
+        if (string.IsNullOrWhiteSpace(shard))
+        {
+            return false;
+        }
+
+        var region = MapGameServerRegion(shard);
+        if (string.Equals(_gameServerShard, shard, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(_gameServerRegion, region, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        _gameServerShard = shard;
+        _gameServerRegion = region;
+        return true;
+    }
+
+    private static string MapGameServerRegion(string shard)
+    {
+        var normalized = shard.ToLowerInvariant();
+
+        if (normalized.Contains("use") ||
+            normalized.Contains("usw") ||
+            normalized.Contains("_us") ||
+            normalized.Contains("pub_us"))
+        {
+            return "美服";
+        }
+
+        if (normalized.Contains("eu"))
+        {
+            return "欧服";
+        }
+
+        if (normalized.Contains("aus") ||
+            normalized.Contains("_au") ||
+            normalized.Contains("oce"))
+        {
+            return "澳服";
+        }
+
+        if (normalized.Contains("asia") ||
+            normalized.Contains("apse") ||
+            normalized.Contains("_ap") ||
+            normalized.Contains("sg") ||
+            normalized.Contains("jp") ||
+            normalized.Contains("hk"))
+        {
+            return "亚服";
+        }
+
+        return "未知";
+    }
+
+    private void RefreshHeaderStatusBar()
+    {
+        if (HeaderAccountStatusText is null)
+        {
+            return;
+        }
+
+        HeaderAccountStatusText.Text = IsLoggedIn
+            ? CompactHeaderText(
+                !string.IsNullOrWhiteSpace(_callsign) ? _callsign! :
+                string.IsNullOrWhiteSpace(_accountName) ? "已登录" : _accountName!,
+                18)
+            : "未登录";
+        HeaderAccountStatusText.Foreground = IsLoggedIn
+            ? FindBrush("AccentBrush", Brushes.DeepSkyBlue)
+            : FindBrush("MutedTextBrush", Brushes.LightSlateGray);
+
+        var connectionStatus = GetHeaderConnectionStatus();
+        HeaderSyncStatusText.Text = connectionStatus;
+        HeaderSyncStatusText.Foreground = connectionStatus is "连接正常" or "同步中"
+            ? FindBrush("SquadCommanderNameBrush", Brushes.SpringGreen)
+            : connectionStatus == "连接异常"
+                ? FindBrush("DangerBrush", Brushes.IndianRed)
+                : FindBrush("MutedTextBrush", Brushes.LightSlateGray);
+
+        HeaderGameProcessStatusText.Text = _isGameProcessRunning ? "运行中" : "未运行";
+        HeaderGameProcessStatusText.Foreground = _isGameProcessRunning
+            ? FindBrush("SquadCommanderNameBrush", Brushes.SpringGreen)
+            : FindBrush("MutedTextBrush", Brushes.LightSlateGray);
+
+        HeaderGameServerRegionText.Text = string.IsNullOrWhiteSpace(_gameServerShard)
+            ? "未知"
+            : _gameServerRegion;
+        HeaderGameServerRegionText.ToolTip = string.IsNullOrWhiteSpace(_gameServerShard)
+            ? "从 Game.log 的 Join PU 信息识别游戏服务器区域"
+            : $"服务器区域：{_gameServerRegion}";
+    }
+
+    private string GetHeaderConnectionStatus()
+    {
+        if (!IsLoggedIn)
+        {
+            return "浏览模式";
+        }
+
+        if (_isNetworkSyncRunning)
+        {
+            return "同步中";
+        }
+
+        var status = NetworkStatusText?.Text ?? "";
+        if (status.Contains("失败", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("超时", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("异常", StringComparison.OrdinalIgnoreCase))
+        {
+            return "连接异常";
+        }
+
+        if (status.Contains("成功", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("已登录", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("已完成", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("已上传", StringComparison.OrdinalIgnoreCase) ||
+            status.Contains("已拉取", StringComparison.OrdinalIgnoreCase) ||
+            NetworkAutoSyncCheck.IsChecked == true)
+        {
+            return "连接正常";
+        }
+
+        return "待同步";
+    }
+
+    private static string CompactHeaderText(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var trimmed = value.Trim().Replace(Environment.NewLine, " / ");
+        return trimmed.Length <= maxLength
+            ? trimmed
+            : $"{trimmed[..Math.Max(0, maxLength - 1)]}…";
+    }
+
     private void UpdateLocalOnlineStateFromGameProcess()
     {
         var wasRunning = _isGameProcessRunning;
@@ -937,6 +1221,7 @@ public partial class MainWindow : Window
         }
 
         ProfileStatusText.Text = "Offline - game process not detected";
+        RefreshHeaderStatusBar();
     }
 
     private static bool IsStarCitizenRunning()
@@ -1010,6 +1295,8 @@ public partial class MainWindow : Window
         SaveCurrentConfig();
         RefreshAccountPanel();
         LoginStatusText.Text = "已退出登录，当前为浏览模式";
+        NetworkStatusText.Text = "浏览模式：同步已关闭";
+        RefreshHeaderStatusBar();
     }
 
     private async void NetworkPushButton_Click(object sender, RoutedEventArgs e)
@@ -1020,7 +1307,6 @@ public partial class MainWindow : Window
         }
 
         await PushLocalSnapshotAsync(pushFleetDirectory: false);
-        await PushFleetDirectoryAsync();
     }
 
     private async void NetworkPullButton_Click(object sender, RoutedEventArgs e)
@@ -1052,6 +1338,7 @@ public partial class MainWindow : Window
     {
         if (NetworkAutoSyncCheck.IsChecked != true || !IsLoggedIn)
         {
+            RefreshHeaderStatusBar();
             return;
         }
 
@@ -1069,22 +1356,24 @@ public partial class MainWindow : Window
         try
         {
             var pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-            var pushedFleet = await PushFleetDirectoryAsync(silent: true);
             var pulledFleets = await PullNetworkFleetsAsync(silent: true);
             var pulledPlayers = await PullNetworkSnapshotsAsync(silent: true);
-            if (pushedFleet || pushedLocal || pulledFleets || pulledPlayers)
+            if (pushedLocal || pulledFleets || pulledPlayers)
             {
                 _networkSyncFailureCount = 0;
                 _nextNetworkSyncAt = DateTimeOffset.MinValue;
+                RefreshHeaderStatusBar();
             }
             else
             {
                 DeferNetworkSync();
+                RefreshHeaderStatusBar();
             }
         }
         catch
         {
             DeferNetworkSync();
+            RefreshHeaderStatusBar();
         }
         finally
         {
@@ -1097,6 +1386,70 @@ public partial class MainWindow : Window
         _networkSyncFailureCount = Math.Min(_networkSyncFailureCount + 1, 5);
         var delaySeconds = Math.Min(15 * _networkSyncFailureCount, 90);
         _nextNetworkSyncAt = DateTimeOffset.UtcNow.AddSeconds(delaySeconds);
+    }
+
+    private CancellationTokenSource BeginSyncStatusSlowNotice()
+    {
+        var previous = _syncStatusOverlayCts;
+        _syncStatusOverlayCts = null;
+        previous?.Cancel();
+        previous?.Dispose();
+        var cts = new CancellationTokenSource();
+        _syncStatusOverlayCts = cts;
+        _ = ShowSlowSyncNoticeAsync(cts.Token);
+        return cts;
+    }
+
+    private async Task ShowSlowSyncNoticeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(4), cancellationToken);
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (cancellationToken.IsCancellationRequested || SyncStatusOverlay.Visibility != Visibility.Visible)
+                {
+                    return;
+                }
+
+                SyncOverlayTitleText.Text = "同步仍在进行";
+                SyncOverlayDetailText.Text = "服务器响应较慢，你可以先浏览本地缓存。同步完成后界面会自动刷新。";
+            });
+        }
+        catch (TaskCanceledException)
+        {
+            // Expected when the sync finishes quickly.
+        }
+    }
+
+    private void ShowSyncStatusOverlay(string title, string detail, bool showRetry)
+    {
+        SyncOverlayTitleText.Text = title;
+        SyncOverlayDetailText.Text = detail;
+        SyncOverlayRetryButton.Visibility = showRetry ? Visibility.Visible : Visibility.Collapsed;
+        SyncStatusOverlay.Visibility = Visibility.Visible;
+    }
+
+    private void HideSyncStatusOverlay()
+    {
+        var slowNotice = _syncStatusOverlayCts;
+        _syncStatusOverlayCts = null;
+        slowNotice?.Cancel();
+        slowNotice?.Dispose();
+        SyncStatusOverlay.Visibility = Visibility.Collapsed;
+    }
+
+    private async void SyncOverlayRetryButton_Click(object sender, RoutedEventArgs e)
+    {
+        SyncOverlayRetryButton.IsEnabled = false;
+        try
+        {
+            await AutoConnectNetworkAsync();
+        }
+        finally
+        {
+            SyncOverlayRetryButton.IsEnabled = true;
+        }
     }
 
     private async Task InitializeLoginAndNetworkAsync()
@@ -1122,59 +1475,102 @@ public partial class MainWindow : Window
         {
             LoginStatusText.Text = "未登录";
             RefreshAccountPanel();
+            RefreshHeaderStatusBar();
             return;
         }
 
-        await TestNetworkAsync(silent: true);
-        NetworkAutoSyncCheck.IsChecked = true;
-        _networkSyncTimer.Start();
-        LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
-            ? "已连接服务器"
-            : $"已登录：{_accountName}";
-        RefreshAccountPanel();
+        ShowSyncStatusOverlay(
+            "正在同步服务器数据",
+            "正在同步账号、舰队、小队、任务和玩家状态...",
+            showRetry: false);
+        var slowNotice = BeginSyncStatusSlowNotice();
+
+        var connected = await TestNetworkAsync(silent: true);
+        var pulledFleets = false;
+        var pulledPlayers = false;
+        var pushedLocal = false;
+        if (connected)
+        {
+            pulledFleets = await PullNetworkFleetsAsync(silent: true);
+            pulledPlayers = await PullNetworkSnapshotsAsync(silent: true);
+            pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
+        }
+
+        if (connected || pulledFleets || pulledPlayers || pushedLocal)
+        {
+            NetworkAutoSyncCheck.IsChecked = true;
+            _networkSyncTimer.Start();
+            LoginStatusText.Text = string.IsNullOrWhiteSpace(_accountName)
+                ? "已连接服务器"
+                : $"已登录：{_accountName}";
+            NetworkStatusText.Text = "已完成启动同步";
+            RefreshAccountPanel();
+            RefreshHeaderStatusBar();
+            HideSyncStatusOverlay();
+            return;
+        }
+
+        slowNotice.Cancel();
+        slowNotice.Dispose();
+        if (ReferenceEquals(_syncStatusOverlayCts, slowNotice))
+        {
+            _syncStatusOverlayCts = null;
+        }
+
+        NetworkStatusText.Text = "启动同步失败，当前显示本地缓存";
+        RefreshHeaderStatusBar();
+        ShowSyncStatusOverlay(
+            "同步失败",
+            "无法连接服务器，当前显示本地缓存。请检查网络后重试。",
+            showRetry: true);
     }
 
-    private async Task ShowLoginDialogAsync()
+    private Task ShowLoginDialogAsync()
     {
         if (_isLoginDialogOpen)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         _isLoginDialogOpen = true;
         var dialog = new LoginWindow(_accountName) { Owner = this };
         dialog.SendVerificationCodeAsync = RequestVerificationCodeAsync;
+        dialog.AuthenticateAsync = async request =>
+        {
+            var path = request.IsRegister ? "api/auth/register" : "api/auth/login";
+            var actionName = request.IsRegister ? "注册" : "登录";
+            var error = await AuthenticateAsync(
+                path,
+                actionName,
+                request.Email,
+                request.Password,
+                request.Email,
+                request.VerificationCode,
+                request.Callsign);
+            return new LoginWindowAuthResult(error is null, error ?? $"{actionName}成功");
+        };
         try
         {
             var result = dialog.ShowDialog();
             if (result != true)
             {
                 RefreshAccountPanel();
-                return;
+                return Task.CompletedTask;
             }
 
             if (dialog.IsSkipped)
             {
                 LoginStatusText.Text = "已进入浏览模式";
                 RefreshAccountPanel();
-                return;
+                return Task.CompletedTask;
             }
-
-            var path = dialog.IsRegisterMode ? "api/auth/register" : "api/auth/login";
-            var actionName = dialog.IsRegisterMode ? "注册" : "登录";
-            await AuthenticateAsync(
-                path,
-                actionName,
-                dialog.IsRegisterMode ? dialog.RegisterEmail : dialog.LoginEmail,
-                dialog.IsRegisterMode ? dialog.RegisterPassword : dialog.LoginPassword,
-                dialog.IsRegisterMode ? dialog.RegisterEmail : dialog.LoginEmail,
-                dialog.IsRegisterMode ? dialog.RegisterVerificationCode : null,
-                dialog.IsRegisterMode ? dialog.RegisterCallsign : null);
         }
         finally
         {
             _isLoginDialogOpen = false;
         }
+
+        return Task.CompletedTask;
     }
 
     private async Task<string> RequestVerificationCodeAsync(string email)
@@ -1190,19 +1586,23 @@ public partial class MainWindow : Window
             var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri("api/auth/send-code"), request);
             if (!response.IsSuccessStatusCode)
             {
-                var error = await response.Content.ReadAsStringAsync();
-                return $"发送失败：{error}";
+                var error = await ReadResponseErrorAsync(response);
+                return $"发送失败：{MapVerificationError(error)}";
             }
 
             return "验证码已发送，10 分钟内有效。";
         }
+        catch (TaskCanceledException)
+        {
+            return "发送失败：连接服务器超时，请稍后再试。";
+        }
         catch (Exception ex)
         {
-            return $"发送失败：{ex.Message}";
+            return $"发送失败：{MapNetworkException(ex)}";
         }
     }
 
-    private async Task AuthenticateAsync(
+    private async Task<string?> AuthenticateAsync(
         string path,
         string actionName,
         string email,
@@ -1213,9 +1613,7 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
         {
-            LoginStatusText.Text = "请输入登录邮箱和密码";
-            await ShowLoginDialogAsync();
-            return;
+            return "请输入登录邮箱和密码。";
         }
 
         if (path.EndsWith("register", StringComparison.OrdinalIgnoreCase) &&
@@ -1223,21 +1621,23 @@ public partial class MainWindow : Window
              string.IsNullOrWhiteSpace(verificationCode) ||
              string.IsNullOrWhiteSpace(callsign)))
         {
-            LoginStatusText.Text = "注册需要登录邮箱、呼号和验证码";
-            await ShowLoginDialogAsync();
-            return;
+            return "注册需要登录邮箱、呼号和验证码。";
         }
 
         try
         {
             var request = new AuthRequest(email.Trim(), password, _localPlayer, authEmail?.Trim(), verificationCode?.Trim(), callsign?.Trim());
             var response = await _networkClient.PostAsJsonAsync(BuildNetworkUri(path), request);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                var serverError = await ReadResponseErrorAsync(response);
+                return MapAuthenticationError(response.StatusCode, serverError, path.EndsWith("register", StringComparison.OrdinalIgnoreCase));
+            }
+
             var auth = await response.Content.ReadFromJsonAsync<AuthResponse>();
             if (auth is null || string.IsNullOrWhiteSpace(auth.Token))
             {
-                LoginStatusText.Text = $"{actionName}失败：服务器响应无效";
-                return;
+                return $"{actionName}失败：服务器响应无效。";
             }
 
             _accountName = auth.Email ?? auth.UserName;
@@ -1253,13 +1653,98 @@ public partial class MainWindow : Window
             NetworkAutoSyncCheck.IsChecked = true;
             _networkSyncTimer.Start();
             await PullNetworkFleetsAsync(silent: true);
-            await PushLocalSnapshotAsync(silent: true);
+            await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
+            return null;
+        }
+        catch (TaskCanceledException)
+        {
+            return "连接服务器超时，请检查网络或稍后再试。";
         }
         catch (Exception ex)
         {
-            LoginStatusText.Text = $"{actionName}失败：{ex.Message}";
+            var message = MapNetworkException(ex);
+            LoginStatusText.Text = $"{actionName}失败：{message}";
             NetworkStatusText.Text = $"{actionName}失败";
+            return $"{actionName}失败：{message}";
         }
+    }
+
+    private static string MapVerificationError(string serverError)
+    {
+        var normalized = serverError.ToLowerInvariant();
+        if (normalized.Contains("rate") || normalized.Contains("60"))
+        {
+            return "验证码发送过于频繁，请稍后再试。";
+        }
+
+        if (normalized.Contains("email service") || normalized.Contains("smtp") || normalized.Contains("not configured"))
+        {
+            return "服务器邮件服务未配置或暂时不可用。";
+        }
+
+        if (normalized.Contains("email is required"))
+        {
+            return "请输入邮箱地址。";
+        }
+
+        return string.IsNullOrWhiteSpace(serverError)
+            ? "服务器没有返回详细原因。"
+            : serverError;
+    }
+
+    private static string MapAuthenticationError(HttpStatusCode statusCode, string serverError, bool isRegister)
+    {
+        var normalized = serverError.ToLowerInvariant();
+        if (statusCode == HttpStatusCode.Unauthorized)
+        {
+            return isRegister
+                ? "注册信息未通过验证，请检查验证码后再试。"
+                : "邮箱未注册或密码错误。";
+        }
+
+        if (statusCode == HttpStatusCode.NotFound)
+        {
+            return "当前服务器版本缺少登录接口，请联系管理员更新服务器。";
+        }
+
+        if (statusCode == HttpStatusCode.Conflict || normalized.Contains("already registered"))
+        {
+            return "该邮箱已注册，请直接登录。";
+        }
+
+        if (normalized.Contains("verification code"))
+        {
+            return "验证码无效或已过期。";
+        }
+
+        if (normalized.Contains("password must"))
+        {
+            return "密码至少需要 6 位。";
+        }
+
+        if (normalized.Contains("callsign"))
+        {
+            return "呼号过长，请缩短后再试。";
+        }
+
+        if (normalized.Contains("email") && normalized.Contains("required"))
+        {
+            return "请输入登录邮箱和密码。";
+        }
+
+        return string.IsNullOrWhiteSpace(serverError)
+            ? $"{(isRegister ? "注册" : "登录")}失败：服务器没有返回详细原因。"
+            : $"{(isRegister ? "注册" : "登录")}失败：{serverError}";
+    }
+
+    private static string MapNetworkException(Exception exception)
+    {
+        return exception switch
+        {
+            TaskCanceledException => "连接服务器超时，请检查网络或稍后再试。",
+            HttpRequestException => "无法连接服务器，请检查网络、服务器地址或 HTTPS 配置。",
+            _ => exception.Message
+        };
     }
 
     private async Task UpdateProfileAsync()
@@ -1282,30 +1767,46 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task TestNetworkAsync(bool silent = false)
+    private async Task<bool> TestNetworkAsync(bool silent = false)
     {
         try
         {
             var response = await _networkClient.GetAsync(BuildNetworkUri("health"));
             response.EnsureSuccessStatusCode();
             NetworkStatusText.Text = "连接成功";
+            RefreshHeaderStatusBar();
             if (!silent)
             {
                 AppendOutput($"NETWORK | connected={NetworkServerUrlBox.Text.Trim()}");
             }
             await PullNetworkFleetsAsync(silent: true);
+            return true;
+        }
+        catch (TaskCanceledException)
+        {
+            NetworkStatusText.Text = "连接失败：服务器响应超时";
+            RefreshHeaderStatusBar();
+            if (!silent)
+            {
+                AppendOutput("NETWORK | connect failed=timeout");
+            }
+
+            return false;
         }
         catch (Exception ex)
         {
-            NetworkStatusText.Text = $"连接失败：{ex.Message}";
+            NetworkStatusText.Text = $"连接失败：{MapNetworkException(ex)}";
+            RefreshHeaderStatusBar();
             if (!silent)
             {
                 AppendOutput($"NETWORK | connect failed={ex.Message}");
             }
+
+            return false;
         }
     }
 
-    private async Task<bool> PushLocalSnapshotAsync(bool silent = false, bool pushFleetDirectory = true)
+    private async Task<bool> PushLocalSnapshotAsync(bool silent = false, bool pushFleetDirectory = false)
     {
         if (!IsLoggedIn)
         {
@@ -1351,6 +1852,7 @@ public partial class MainWindow : Window
                 await PushFleetDirectoryAsync(silent: true);
             }
             NetworkStatusText.Text = $"已上传：{snapshot.Name}";
+            RefreshHeaderStatusBar();
             if (!silent)
             {
                 AppendOutput($"NETWORK | pushed={snapshot.Name}");
@@ -1361,6 +1863,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             NetworkStatusText.Text = $"上传失败：{ex.Message}";
+            RefreshHeaderStatusBar();
             if (!silent)
             {
                 AppendOutput($"NETWORK | push failed={ex.Message}");
@@ -1427,11 +1930,18 @@ public partial class MainWindow : Window
             var snapshots = await _relayClient.GetFromJsonAsync<NetworkPlayerSnapshot[]>("api/players") ?? [];
             foreach (var snapshot in snapshots)
             {
+                if (IsLocalNetworkSnapshot(snapshot))
+                {
+                    ApplyLocalNetworkSnapshot(snapshot);
+                    continue;
+                }
+
                 ApplyNetworkSnapshot(snapshot);
             }
 
             RenderState();
             NetworkStatusText.Text = $"已拉取：{snapshots.Length} 名玩家";
+            RefreshHeaderStatusBar();
             if (!silent)
             {
                 AppendOutput($"NETWORK | pulled players={snapshots.Length}");
@@ -1442,6 +1952,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             NetworkStatusText.Text = $"拉取失败：{ex.Message}";
+            RefreshHeaderStatusBar();
             if (!silent)
             {
                 AppendOutput($"NETWORK | pull failed={ex.Message}");
@@ -1491,6 +2002,191 @@ public partial class MainWindow : Window
 
             return false;
         }
+    }
+
+    private async Task<bool> PushFleetMutationAsync<T>(
+        string path,
+        T payload,
+        string successMessage,
+        string failurePrefix,
+        bool silent = true)
+    {
+        if (!IsLoggedIn || !_hasFleet || string.IsNullOrWhiteSpace(_fleetCode))
+        {
+            return false;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync(path, payload);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadResponseErrorAsync(response);
+                if (!silent)
+                {
+                    NetworkStatusText.Text = $"{failurePrefix}：{error}";
+                    AppendOutput($"NETWORK | {failurePrefix}={error}");
+                }
+
+                return false;
+            }
+
+            var snapshot = await response.Content.ReadFromJsonAsync<NetworkFleetSnapshot>();
+            if (snapshot is not null)
+            {
+                MergeNetworkFleetState(snapshot);
+            }
+
+            if (!silent)
+            {
+                NetworkStatusText.Text = successMessage;
+                AppendOutput($"NETWORK | {successMessage}");
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+            {
+                NetworkStatusText.Text = $"{failurePrefix}：{ex.Message}";
+                AppendOutput($"NETWORK | {failurePrefix}={ex.Message}");
+            }
+
+            return false;
+        }
+    }
+
+    private Task<bool> PushFleetNoticeAsync(bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/notice",
+            new FleetNoticeUpdateRequest(
+                _fleetCode,
+                _fleetNoticeTitle,
+                _fleetNoticeContent,
+                BuildFleetEventLogSnapshots()),
+            "舰队公告已同步",
+            "公告同步失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetTaskAsync(bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/task",
+            new FleetTaskUpdateRequest(
+                _fleetCode,
+                _fleetCurrentTaskTitle,
+                _fleetCurrentTaskBrief,
+                _fleetCurrentTaskParticipants,
+                _fleetCurrentTaskRally,
+                _fleetCurrentTaskShip,
+                _fleetCurrentTaskTime,
+                _fleetCurrentTaskNoticeRevision,
+                BuildFleetTaskHistorySnapshots(),
+                BuildFleetEventLogSnapshots()),
+            "舰队任务已同步",
+            "任务同步失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetActionPlansAsync(bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/action-plans",
+            new FleetActionPlansUpdateRequest(
+                _fleetCode,
+                BuildActionPlanSnapshots(),
+                BuildFleetEventLogSnapshots()),
+            "行动计划已同步",
+            "行动计划同步失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetActionPlanJoinAsync(
+        FleetActionPlanRow plan,
+        ActionPlanParticipantRow participant,
+        bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/action-plans/join",
+            new FleetActionPlanJoinRequest(
+                _fleetCode,
+                plan.Id,
+                BuildActionPlanParticipantSnapshot(participant)),
+            "行动预约已同步",
+            "行动预约同步失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetActionPlanLeaveAsync(
+        string planId,
+        bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/action-plans/leave",
+            new FleetActionPlanLeaveRequest(_fleetCode, planId),
+            "行动预约已取消",
+            "取消行动预约失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetMemberPermissionAsync(
+        FleetMemberManagementRow row,
+        bool silent = true)
+    {
+        var permission = new NetworkFleetMemberPermissionSnapshot(
+            row.GameName,
+            row.Callsign,
+            NormalizeRoleTitle(row.RoleTitle),
+            row.PermissionEnabled,
+            row.CanRemoveMembers,
+            row.CanPublishTasks,
+            row.CanPublishPlans,
+            row.CanManageFleetInfo,
+            DateTimeOffset.UtcNow);
+
+        return PushFleetMutationAsync(
+            "api/fleets/permissions",
+            new FleetMemberPermissionUpdateRequest(
+                _fleetCode,
+                permission,
+                BuildFleetEventLogSnapshots()),
+            "成员权限已同步",
+            "成员权限同步失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetInfoAsync(bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/info",
+            new FleetInfoUpdateRequest(
+                _fleetCode,
+                _fleetDescription,
+                _fleetType,
+                _fleetActiveTime,
+                _fleetJoinPolicy,
+                string.IsNullOrWhiteSpace(_fleetCode) ? "LOGO" : _fleetCode,
+                BuildFleetLogoImageData(),
+                BuildFleetEventLogSnapshots()),
+            "舰队资料已同步",
+            "舰队资料同步失败",
+            silent);
+    }
+
+    private Task<bool> PushFleetSquadsAsync(bool silent = true)
+    {
+        return PushFleetMutationAsync(
+            "api/fleets/squads",
+            new FleetSquadsUpdateRequest(
+                _fleetCode,
+                BuildSquadSnapshots(),
+                BuildFleetEventLogSnapshots()),
+            "小队信息已同步",
+            "小队信息同步失败",
+            silent);
     }
 
     private async Task<bool> PullNetworkFleetsAsync(bool silent = false)
@@ -1624,6 +2320,7 @@ public partial class MainWindow : Window
         MergeFleetMembers(snapshot.Members);
         MergeFleetEventLogs(snapshot.EventLog);
         MergeFleetTaskHistory(snapshot.TaskHistory);
+        _fleetApplicationSnapshots = snapshot.Applications ?? [];
 
         var isCommander = IsCurrentUserFleetCommander();
         var remoteHasNotice = !string.IsNullOrWhiteSpace(snapshot.NoticeTitle) ||
@@ -1686,6 +2383,8 @@ public partial class MainWindow : Window
         RefreshFleetInfoPanel();
         RefreshTaskManagementPanel();
         RefreshFleetMemberManagement();
+        RefreshFleetApplications();
+        RefreshSquadActionButtons();
         SelectFeaturedActionPlan();
     }
 
@@ -1980,6 +2679,68 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool IsLocalNetworkSnapshot(NetworkPlayerSnapshot snapshot)
+    {
+        return !string.IsNullOrWhiteSpace(_localPlayer) &&
+               snapshot.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ApplyLocalNetworkSnapshot(NetworkPlayerSnapshot snapshot)
+    {
+        if (!IsLocalNetworkSnapshot(snapshot))
+        {
+            return;
+        }
+
+        var changed = false;
+        if (string.IsNullOrWhiteSpace(_callsign) && !string.IsNullOrWhiteSpace(snapshot.Callsign))
+        {
+            _callsign = snapshot.Callsign!;
+            CallsignBox.Text = _callsign;
+            changed = true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.Fleet) &&
+            !snapshot.Fleet.Equals("No Fleet", StringComparison.OrdinalIgnoreCase) &&
+            !IsSameFleet(snapshot.Fleet))
+        {
+            var fleetCard = _allNetworkFleets.FirstOrDefault(card =>
+                snapshot.Fleet.Equals(card.Snapshot.Name, StringComparison.OrdinalIgnoreCase) ||
+                snapshot.Fleet.Equals(card.Snapshot.Code, StringComparison.OrdinalIgnoreCase));
+            if (fleetCard is not null)
+            {
+                JoinNetworkFleet(fleetCard.Snapshot);
+                changed = true;
+            }
+        }
+
+        if (_hasFleet &&
+            !string.IsNullOrWhiteSpace(snapshot.Squad) &&
+            !snapshot.Squad.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+        {
+            var squad = _squads.FirstOrDefault(item =>
+                item.Name.Equals(snapshot.Squad, StringComparison.OrdinalIgnoreCase));
+            if (squad is not null && !ReferenceEquals(_joinedSquad, squad))
+            {
+                _joinedSquad = squad;
+                _selectedSquad ??= squad;
+                SquadSelectionList.SelectedItem = _selectedSquad;
+                changed = true;
+            }
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        SaveCurrentConfig();
+        RenderState();
+        RefreshFleetInfoPanel();
+        RefreshFleetMemberManagement();
+        RefreshOverlayWindow();
+    }
+
     private bool IsSameFleet(string? fleet)
     {
         if (!_hasFleet || string.IsNullOrWhiteSpace(fleet))
@@ -2095,7 +2856,7 @@ public partial class MainWindow : Window
                 if (!silent)
                 {
                     var error = response.StatusCode == HttpStatusCode.NotFound
-                        ? "server notify endpoint is not available; deploy StarBridge 0.3.6 relay"
+                        ? "server notify endpoint is not available; deploy StarBridge 0.3.7 relay"
                         : await ReadResponseErrorAsync(response);
                     AppendOutput($"Fleet email notification failed: {error}");
                 }
@@ -2124,7 +2885,22 @@ public partial class MainWindow : Window
             var body = await response.Content.ReadAsStringAsync();
             if (!string.IsNullOrWhiteSpace(body))
             {
-                return $"{(int)response.StatusCode} {body}";
+                try
+                {
+                    using var document = JsonDocument.Parse(body);
+                    if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                        document.RootElement.TryGetProperty("error", out var errorElement) &&
+                        errorElement.ValueKind == JsonValueKind.String)
+                    {
+                        return errorElement.GetString() ?? $"{(int)response.StatusCode} {response.ReasonPhrase}";
+                    }
+                }
+                catch (JsonException)
+                {
+                    // The relay may return plain text for proxy or platform errors.
+                }
+
+                return body.Trim();
             }
         }
         catch
@@ -2137,33 +2913,8 @@ public partial class MainWindow : Window
 
     private NetworkFleetSnapshot BuildLocalFleetSnapshot()
     {
-        var squads = _squads
-            .Select(squad => new NetworkSquadSnapshot(
-                squad.Name,
-                squad.Commander,
-                squad.Type,
-                squad.Description,
-                squad.Mission,
-                squad.RallyPoint,
-                BuildImageDataFromPath(squad.EmblemPath, 512 * 1024)))
-            .ToArray();
-
-        var actionPlans = _fleetActionPlans
-            .Select(plan => new NetworkActionPlanSnapshot(
-                plan.Id,
-                plan.Title,
-                plan.Content,
-                plan.StartTime,
-                plan.NotifyMembers,
-                plan.Participants
-                    .Select(participant => new NetworkActionPlanParticipantSnapshot(
-                        participant.Callsign,
-                        participant.GameName,
-                        participant.AvatarPath,
-                        participant.Initials,
-                        ResolveParticipantAvatarImageData(participant)))
-                    .ToArray()))
-            .ToArray();
+        var squads = BuildSquadSnapshots();
+        var actionPlans = BuildActionPlanSnapshots();
 
         return new NetworkFleetSnapshot(
             _fleetName,
@@ -2194,7 +2945,52 @@ public partial class MainWindow : Window
             BuildFleetEventLogSnapshots(),
             _fleetCurrentTaskNoticeRevision,
             BuildFleetShipSnapshots(),
-            BuildFleetTaskHistorySnapshots());
+            BuildFleetTaskHistorySnapshots(),
+            _fleetApplicationSnapshots);
+    }
+
+    private NetworkSquadSnapshot[] BuildSquadSnapshots()
+    {
+        return _squads
+            .Select(squad => new NetworkSquadSnapshot(
+                squad.Name,
+                squad.Commander,
+                squad.Type,
+                squad.Description,
+                squad.Mission,
+                squad.RallyPoint,
+                BuildImageDataFromPath(squad.EmblemPath, 512 * 1024)))
+            .ToArray();
+    }
+
+    private NetworkActionPlanSnapshot[] BuildActionPlanSnapshots()
+    {
+        return _fleetActionPlans
+            .Select(BuildActionPlanSnapshot)
+            .ToArray();
+    }
+
+    private NetworkActionPlanSnapshot BuildActionPlanSnapshot(FleetActionPlanRow plan)
+    {
+        return new NetworkActionPlanSnapshot(
+            plan.Id,
+            plan.Title,
+            plan.Content,
+            plan.StartTime,
+            plan.NotifyMembers,
+            plan.Participants
+                .Select(BuildActionPlanParticipantSnapshot)
+                .ToArray());
+    }
+
+    private NetworkActionPlanParticipantSnapshot BuildActionPlanParticipantSnapshot(ActionPlanParticipantRow participant)
+    {
+        return new NetworkActionPlanParticipantSnapshot(
+            participant.Callsign,
+            participant.GameName,
+            participant.AvatarPath,
+            participant.Initials,
+            ResolveParticipantAvatarImageData(participant));
     }
 
     private NetworkFleetMemberPermissionSnapshot[] BuildFleetMemberPermissionSnapshots()
@@ -2585,7 +3381,6 @@ public partial class MainWindow : Window
     private async void RefreshFleetDirectory_Click(object sender, RoutedEventArgs e)
     {
         await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        await PushFleetDirectoryAsync(silent: true);
         await PullNetworkFleetsAsync();
     }
 
@@ -2607,6 +3402,55 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (card.RequiresApplication)
+        {
+            var applyResult = System.Windows.MessageBox.Show(
+                this,
+                $"该舰队需要审核。是否向 {card.Name} 提交加入申请？",
+                "提交加入申请",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (applyResult != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                var response = await PostNetworkJsonAsync(
+                    "api/fleets/apply",
+                    new FleetJoinApplicationRequest(card.Snapshot.Code, ""));
+                if (!response.IsSuccessStatusCode)
+                {
+                    NetworkStatusText.Text = $"申请失败：{await ReadResponseErrorAsync(response)}";
+                    return;
+                }
+
+                var snapshot = await response.Content.ReadFromJsonAsync<NetworkFleetSnapshot>();
+                if (snapshot is not null)
+                {
+                    var existingIndex = _allNetworkFleets.IndexOf(card);
+                    if (existingIndex >= 0)
+                    {
+                        _allNetworkFleets[existingIndex] = NetworkFleetCard.FromSnapshot(
+                            snapshot,
+                            _fleetName,
+                            _fleetCode,
+                            _hasFleet);
+                    }
+                }
+
+                await PullNetworkFleetsAsync(silent: true);
+                NetworkStatusText.Text = $"已提交加入申请：{card.Name}";
+            }
+            catch (Exception ex)
+            {
+                NetworkStatusText.Text = $"申请失败：{ex.Message}";
+            }
+
+            return;
+        }
+
         var confirmText = _hasFleet
             ? $"当前已经加入 {_fleetName}。是否退出当前舰队并加入 {card.Name}？"
             : $"是否加入舰队 {card.Name}？";
@@ -2621,19 +3465,30 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_hasFleet)
+        try
         {
-            AddFleetLog("成员", "离开舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 离开 {_fleetName}");
-        }
+            var response = await PostNetworkJsonAsync(
+                "api/fleets/apply",
+                new FleetJoinApplicationRequest(card.Snapshot.Code, ""));
+            if (!response.IsSuccessStatusCode)
+            {
+                NetworkStatusText.Text = $"加入失败：{await ReadResponseErrorAsync(response)}";
+                return;
+            }
 
-        JoinNetworkFleet(card.Snapshot);
-        AddFleetLog("成员", "加入舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 加入 {card.Name}");
-        await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        await PushFleetDirectoryAsync(silent: true);
-        await PullNetworkFleetsAsync(silent: true);
-        await PullNetworkSnapshotsAsync(silent: true);
-        NetworkStatusText.Text = $"已加入舰队：{card.Name}";
-        NavigateToMyFleet();
+            var snapshot = await response.Content.ReadFromJsonAsync<NetworkFleetSnapshot>() ?? card.Snapshot;
+            JoinNetworkFleet(snapshot);
+            AddFleetLog("成员", "加入舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 加入 {card.Name}");
+            await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
+            await PullNetworkFleetsAsync(silent: true);
+            await PullNetworkSnapshotsAsync(silent: true);
+            NetworkStatusText.Text = $"已加入舰队：{card.Name}";
+            NavigateToMyFleet();
+        }
+        catch (Exception ex)
+        {
+            NetworkStatusText.Text = $"加入失败：{ex.Message}";
+        }
     }
 
     private void JoinNetworkFleet(NetworkFleetSnapshot snapshot)
@@ -2681,7 +3536,66 @@ public partial class MainWindow : Window
         RenderSquads();
         RenderMySquad();
         SaveCurrentConfig();
+        RefreshSquadActionButtons();
         RefreshOverlayWindow();
+    }
+
+    private async void LeaveFleetButton_Click(object sender, RoutedEventArgs e)
+    {
+        await LeaveCurrentFleetAsync();
+    }
+
+    private async Task LeaveCurrentFleetAsync()
+    {
+        if (!EnsureLoggedIn("离开舰队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (!_hasFleet || string.IsNullOrWhiteSpace(_fleetCode))
+        {
+            NetworkStatusText.Text = "当前没有可离开的舰队。";
+            return;
+        }
+
+        if (IsCurrentUserFleetCommander())
+        {
+            NetworkStatusText.Text = "舰队指挥官需要先转移指挥权或解散舰队。";
+            return;
+        }
+
+        if (System.Windows.MessageBox.Show(
+                this,
+                $"确认离开舰队 {_fleetName}？",
+                "离开舰队",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync(
+                "api/fleets/leave",
+                new FleetLeaveRequest(_fleetCode));
+            if (!response.IsSuccessStatusCode)
+            {
+                NetworkStatusText.Text = $"离开舰队失败：{await ReadResponseErrorAsync(response)}";
+                return;
+            }
+
+            ClearFleetState();
+            SaveCurrentConfig();
+            await PullNetworkFleetsAsync(silent: true);
+            await PullNetworkSnapshotsAsync(silent: true);
+            NetworkStatusText.Text = "已离开舰队。";
+            NavigateToMyFleet();
+        }
+        catch (Exception ex)
+        {
+            NetworkStatusText.Text = $"离开舰队失败：{ex.Message}";
+        }
     }
 
     private async void DisbandFleetButton_Click(object sender, RoutedEventArgs e)
@@ -2759,15 +3673,20 @@ public partial class MainWindow : Window
         _joinedActionPlanIds.Clear();
         _allFleetEventLogs.Clear();
         _fleetEventLogs.Clear();
+        _fleetApplicationSnapshots = [];
+        _fleetApplications.Clear();
         _fleetMemberPermissions.Clear();
         _fleetMemberRows.Clear();
         _joinedSquad = null;
         _selectedSquad = null;
         LocalFleetText.Text = "未加入舰队";
+        LeaveFleetButton.Visibility = Visibility.Collapsed;
         RefreshFleetHeader();
         UpdateFleetEntryPanels();
         RenderSquads();
         RenderMySquad();
+        RefreshFleetApplications();
+        RefreshSquadActionButtons();
         RefreshOverlayWindow();
     }
 
@@ -3756,7 +4675,6 @@ public partial class MainWindow : Window
 
         await UpdateProfileAsync();
         await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        await PushFleetDirectoryAsync(silent: true);
     }
 
     private void EmailNotificationsCheck_Changed(object sender, RoutedEventArgs e)
@@ -3791,6 +4709,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        var canEditPermissions = IsCurrentUserFleetCommander();
+        var canTransferCommand = IsCurrentUserFleetCommander();
+
         foreach (var player in _players
                      .OrderByDescending(player => IsFleetCommander(player.Name, player.Callsign))
                      .ThenBy(player => player.SquadName)
@@ -3820,6 +4741,9 @@ public partial class MainWindow : Window
                 CanManageFleetInfo = isCommander || permission?.CanManageFleetInfo == true,
                 IsSelf = IsLocalPlayer(player.Name),
                 IsCommander = isCommander,
+                CanCurrentUserEditPermissions = canEditPermissions,
+                CanCurrentUserRemove = CanCurrentUserRemoveFleetMember(player.Name, player.Callsign, isCommander),
+                CanCurrentUserTransferCommand = canTransferCommand,
                 RoleBrush = GetFleetRoleBrush(player.Name, player.Callsign)
             });
         }
@@ -3857,6 +4781,9 @@ public partial class MainWindow : Window
                 CanManageFleetInfo = isCommander || permission.CanManageFleetInfo,
                 IsSelf = IsLocalPlayer(permission.GameName),
                 IsCommander = isCommander,
+                CanCurrentUserEditPermissions = canEditPermissions,
+                CanCurrentUserRemove = CanCurrentUserRemoveFleetMember(permission.GameName, permission.Callsign, isCommander),
+                CanCurrentUserTransferCommand = canTransferCommand,
                 RoleBrush = GetFleetRoleBrush(permission.GameName, permission.Callsign)
             });
         }
@@ -3869,6 +4796,160 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RefreshFleetApplications()
+    {
+        if (FleetApplicationsTab is null || FleetApplicationEmptyText is null)
+        {
+            return;
+        }
+
+        _fleetApplications.Clear();
+
+        var canReviewApplications = _hasFleet && CanCurrentUserManageFleetInfo();
+        FleetApplicationsTab.Visibility = canReviewApplications
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        var pendingApplications = (_fleetApplicationSnapshots ?? [])
+            .Where(application =>
+                string.IsNullOrWhiteSpace(application.Status) ||
+                application.Status.Equals("Pending", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(application => application.CreatedAt)
+            .ToArray();
+
+        FleetApplicationsTab.Header = $"申请 {pendingApplications.Length}";
+
+        if (!canReviewApplications)
+        {
+            FleetApplicationEmptyText.Visibility = Visibility.Visible;
+            FleetApplicationStatusText.Text = "";
+            return;
+        }
+
+        foreach (var application in pendingApplications)
+        {
+            var callsign = NormalizeOptionalField(application.ApplicantCallsign);
+            var gameName = NormalizeOptionalField(application.ApplicantGameName);
+            var displayName = string.IsNullOrWhiteSpace(callsign) ||
+                              callsign.Equals(gameName, StringComparison.OrdinalIgnoreCase)
+                ? gameName
+                : $"{callsign} ({gameName})";
+
+            _fleetApplications.Add(new FleetApplicationRow(
+                application.Id,
+                displayName,
+                gameName,
+                callsign,
+                application.ApplicantAccount,
+                string.IsNullOrWhiteSpace(application.Message) ? "无申请说明" : application.Message,
+                string.IsNullOrWhiteSpace(application.Status) ? "Pending" : application.Status,
+                application.CreatedAt == default
+                    ? "-"
+                    : application.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"),
+                GetInitials(string.IsNullOrWhiteSpace(callsign) ? gameName : callsign),
+                application.AvatarImageData));
+        }
+
+        FleetApplicationEmptyText.Visibility = _fleetApplications.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private async void ApproveFleetApplication_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is FleetApplicationRow row)
+        {
+            await DecideFleetApplicationAsync(row, approve: true);
+        }
+    }
+
+    private async void RejectFleetApplication_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is FleetApplicationRow row)
+        {
+            await DecideFleetApplicationAsync(row, approve: false);
+        }
+    }
+
+    private async Task DecideFleetApplicationAsync(FleetApplicationRow row, bool approve)
+    {
+        if (!EnsureLoggedIn("审核加入申请需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (!CanCurrentUserManageFleetInfo())
+        {
+            FleetApplicationStatusText.Text = "当前账号没有审核加入申请的权限。";
+            return;
+        }
+
+        var actionText = approve ? "批准" : "拒绝";
+        if (System.Windows.MessageBox.Show(
+                this,
+                $"确认{actionText} {row.DisplayName} 的加入申请？",
+                "审核加入申请",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync(
+                "api/fleets/applications/decide",
+                new FleetApplicationDecisionRequest(_fleetCode, row.Id, approve));
+            if (!response.IsSuccessStatusCode)
+            {
+                FleetApplicationStatusText.Text = $"{actionText}失败：{await ReadResponseErrorAsync(response)}";
+                return;
+            }
+
+            var snapshot = await response.Content.ReadFromJsonAsync<NetworkFleetSnapshot>();
+            if (snapshot is not null)
+            {
+                MergeNetworkFleetState(snapshot);
+                SaveCurrentConfig();
+            }
+
+            await PullNetworkSnapshotsAsync(silent: true);
+            await PullNetworkFleetsAsync(silent: true);
+            FleetApplicationStatusText.Text = $"已{actionText} {row.DisplayName}。";
+        }
+        catch (Exception ex)
+        {
+            FleetApplicationStatusText.Text = $"{actionText}失败：{ex.Message}";
+        }
+    }
+
+    private bool CanCurrentUserRemoveFleetMember(string? gameName, string? callsign, bool isCommander)
+    {
+        if (!_hasFleet || isCommander)
+        {
+            return false;
+        }
+
+        var identity = NormalizeOptionalField(gameName);
+        if (IsLocalPlayer(identity) || IsLocalPlayer(callsign ?? ""))
+        {
+            return false;
+        }
+
+        if (IsCurrentUserFleetCommander())
+        {
+            return true;
+        }
+
+        if (!CanCurrentUserRemoveMembers())
+        {
+            return false;
+        }
+
+        var targetPermission = GetFleetPermission(gameName, callsign);
+        return targetPermission is null || !targetPermission.PermissionEnabled;
+    }
+
     private async void SaveFleetMemberPermission_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.Tag is not FleetMemberManagementRow row)
@@ -3879,6 +4960,12 @@ public partial class MainWindow : Window
         if (row.IsCommander)
         {
             FleetMemberManagementStatusText.Text = "舰队指挥官默认拥有所有权限。";
+            return;
+        }
+
+        if (!row.CanEditPermissions)
+        {
+            FleetMemberManagementStatusText.Text = "只有舰队指挥官可以分配权限。";
             return;
         }
 
@@ -3897,7 +4984,7 @@ public partial class MainWindow : Window
 
         AddFleetLog("权限", "成员权限更新", $"{row.DisplayName} -> {role}");
         SaveCurrentConfig();
-        var synced = await PushFleetDirectoryAsync(silent: true);
+        var synced = await PushFleetMemberPermissionAsync(row, silent: true);
         RefreshFleetMemberManagement();
         FleetMemberManagementStatusText.Text = synced
             ? $"已保存并同步 {row.DisplayName} 的权限。"
@@ -3911,9 +4998,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (row.IsSelf)
+        if (!row.CanRemoveFromFleet)
         {
-            FleetMemberManagementStatusText.Text = "不能在这里移除自己。";
+            FleetMemberManagementStatusText.Text = "当前账号没有移除此成员的权限。";
             return;
         }
 
@@ -3930,7 +5017,7 @@ public partial class MainWindow : Window
             _fleetMemberPermissions.Remove(row.GameName);
             AddFleetLog("成员", "移除成员", $"{row.DisplayName} 被移出舰队");
             await PullNetworkSnapshotsAsync(silent: true);
-            await PushFleetDirectoryAsync(silent: true);
+            await PullNetworkFleetsAsync(silent: true);
             RefreshFleetMemberManagement();
             FleetMemberManagementStatusText.Text = $"已移除 {row.DisplayName}。";
         }
@@ -3947,9 +5034,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (row.IsSelf || row.IsCommander)
+        if (!row.CanTransferCommander)
         {
-            FleetMemberManagementStatusText.Text = "当前目标已经是舰队指挥官。";
+            FleetMemberManagementStatusText.Text = "只有舰队指挥官可以转移指挥权。";
             return;
         }
 
@@ -4022,13 +5109,19 @@ public partial class MainWindow : Window
         squad.Description = MySquadDescriptionBox.Text.Trim();
         squad.RefreshComputed();
         RefreshOverlayWindow();
-        _ = PushFleetDirectoryAsync(silent: true);
+        _ = PushFleetSquadsAsync(silent: true);
     }
 
     private void CreateSquad_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("创建小队需要先登录星海舰桥账号。"))
         {
+            return;
+        }
+
+        if (!_hasFleet)
+        {
+            JoinSquadHintText.Text = "请先加入舰队";
             return;
         }
 
@@ -4058,6 +5151,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("创建小队需要先登录星海舰桥账号。"))
         {
+            return;
+        }
+
+        if (!_hasFleet)
+        {
+            CreateSquadValidationText.Text = "请先加入舰队。";
             return;
         }
 
@@ -4114,10 +5213,11 @@ public partial class MainWindow : Window
         AddFleetLog("成员", "创建小队", $"{FormatCommanderName(_callsign, _localPlayer)} 创建 {squad.Name}");
         RenderSquads();
         RenderMySquad();
+        RefreshSquadActionButtons();
         RefreshOverlayWindow();
         SaveCurrentConfig();
         await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetSquadsAsync(silent: true);
     }
 
     private void CreateSquadTypeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -4164,9 +5264,24 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!_hasFleet)
+        {
+            JoinSquadHintText.Text = "请先加入舰队";
+            RefreshSquadActionButtons();
+            return;
+        }
+
         if (_selectedSquad is null)
         {
             JoinSquadHintText.Text = "请选择一个小队";
+            return;
+        }
+
+        if (_joinedSquad is not null &&
+            _joinedSquad.Name.Equals(_selectedSquad.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            JoinSquadHintText.Text = $"已经在 {_joinedSquad.Name}";
+            RefreshSquadActionButtons();
             return;
         }
 
@@ -4174,16 +5289,150 @@ public partial class MainWindow : Window
         JoinSquadHintText.Text = $"已加入 {_joinedSquad.Name}";
         AddFleetLog("成员", "加入小队", $"{FormatCommanderName(_callsign, _localPlayer)} 加入 {_joinedSquad.Name}");
         RenderState();
+        RefreshSquadActionButtons();
         await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetSquadsAsync(silent: true);
     }
 
     private void SquadSelectionList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         _selectedSquad = SquadSelectionList.SelectedItem as SquadRow;
-        JoinSquadButton.IsEnabled = _selectedSquad is not null;
-        JoinSquadHintText.Text = _selectedSquad is null ? "请选择一个小队" : "可以加入所选小队";
+        RefreshSquadActionButtons();
         RenderMySquad();
+    }
+
+    private async void LeaveSquad_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureLoggedIn("离开小队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (_joinedSquad is null)
+        {
+            JoinSquadHintText.Text = "当前没有加入小队";
+            RefreshSquadActionButtons();
+            return;
+        }
+
+        var squadName = _joinedSquad.Name;
+        if (System.Windows.MessageBox.Show(
+                this,
+                $"确认离开小队 {squadName}？",
+                "离开小队",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _joinedSquad = null;
+        AddFleetLog("成员", "离开小队", $"{FormatCommanderName(_callsign, _localPlayer)} 离开 {squadName}");
+        RenderState();
+        RefreshSquadActionButtons();
+        SaveCurrentConfig();
+        await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
+    }
+
+    private async void RemoveSquadMember_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: SquadMemberStatusRow row } ||
+            _selectedSquad is null ||
+            !row.CanRemoveFromSquad)
+        {
+            return;
+        }
+
+        if (System.Windows.MessageBox.Show(
+                this,
+                $"确认将 {row.Callsign} ({row.GameId}) 移出小队 {_selectedSquad.Name}？",
+                "移除小队成员",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var request = new FleetSquadMemberMutationRequest(
+                _fleetCode,
+                _selectedSquad.Name,
+                row.GameId,
+                row.Callsign == "-" ? null : row.Callsign);
+            var response = await PostNetworkJsonAsync("api/fleets/squads/members/remove", request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadResponseErrorAsync(response);
+                JoinSquadHintText.Text = $"移除失败：{error}";
+                return;
+            }
+
+            for (var i = 0; i < _players.Count; i++)
+            {
+                var player = _players[i];
+                var sameSquad = player.SquadName.Equals(_selectedSquad.Name, StringComparison.OrdinalIgnoreCase);
+                var samePlayer = player.Name.Equals(row.GameId, StringComparison.OrdinalIgnoreCase) ||
+                                 (!string.IsNullOrWhiteSpace(player.Callsign) &&
+                                  player.Callsign.Equals(row.Callsign, StringComparison.OrdinalIgnoreCase));
+                if (sameSquad && samePlayer)
+                {
+                    _players[i] = player with { SquadName = "Unassigned" };
+                }
+            }
+
+            AddFleetLog("成员", "移除小队成员", $"{row.Callsign} ({row.GameId}) 被移出 {_selectedSquad.Name}");
+            await PullNetworkFleetsAsync(silent: true);
+            await PullNetworkSnapshotsAsync(silent: true);
+            RenderState();
+            RenderMySquad();
+            RefreshSquadActionButtons();
+            RefreshOverlayWindow();
+            JoinSquadHintText.Text = $"已移除 {row.Callsign}";
+        }
+        catch (Exception ex)
+        {
+            JoinSquadHintText.Text = $"移除失败：{ex.Message}";
+        }
+    }
+
+    private void RefreshSquadActionButtons()
+    {
+        if (JoinSquadButton is null || LeaveSquadButton is null || JoinSquadHintText is null)
+        {
+            return;
+        }
+
+        LeaveSquadButton.Visibility = _joinedSquad is null ? Visibility.Collapsed : Visibility.Visible;
+        if (!_hasFleet)
+        {
+            JoinSquadButton.IsEnabled = false;
+            JoinSquadButton.Content = "加入小队";
+            JoinSquadHintText.Text = "请先加入舰队";
+            return;
+        }
+
+        if (_selectedSquad is null)
+        {
+            JoinSquadButton.IsEnabled = false;
+            JoinSquadButton.Content = "加入小队";
+            JoinSquadHintText.Text = "请选择一个小队";
+            return;
+        }
+
+        var sameSquad = _joinedSquad is not null &&
+                        _joinedSquad.Name.Equals(_selectedSquad.Name, StringComparison.OrdinalIgnoreCase);
+        JoinSquadButton.IsEnabled = !sameSquad;
+        JoinSquadButton.Content = sameSquad
+            ? "已加入"
+            : _joinedSquad is null
+                ? "加入小队"
+                : "切换小队";
+        JoinSquadHintText.Text = sameSquad
+            ? $"已加入 {_joinedSquad!.Name}"
+            : _joinedSquad is null
+                ? "可以加入所选小队"
+                : $"将从 {_joinedSquad.Name} 切换到 {_selectedSquad.Name}";
     }
 
     private void OpenPublishTaskButton_Click(object sender, RoutedEventArgs e)
@@ -4298,7 +5547,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetTaskAsync(silent: true);
         if (emailCall)
         {
             _ = SendFleetEmailNotificationAsync(
@@ -4352,7 +5601,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetTaskAsync(silent: true);
     }
 
     private async void DeleteCurrentTaskButton_Click(object sender, RoutedEventArgs e)
@@ -4374,7 +5623,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetTaskAsync(silent: true);
     }
 
     private async void RenotifyCurrentTaskButton_Click(object sender, RoutedEventArgs e)
@@ -4395,7 +5644,7 @@ public partial class MainWindow : Window
         RefreshFleetInfoPanel();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetTaskAsync(silent: true);
         _ = SendFleetEmailNotificationAsync(
             $"StarBridge 舰队任务提醒：{_fleetCurrentTaskTitle}",
             $"""
@@ -4479,7 +5728,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static string NormalizeOptionalField(string value)
+    private static string NormalizeOptionalField(string? value)
     {
         return string.IsNullOrWhiteSpace(value) ? "未指定" : value;
     }
@@ -4530,7 +5779,7 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.6";
+            : "0.3.7";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -4591,7 +5840,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetNoticeAsync(silent: true);
     }
 
     private async void SaveFleetDescriptionButton_Click(object sender, RoutedEventArgs e)
@@ -4613,7 +5862,7 @@ public partial class MainWindow : Window
         RefreshFleetHeader();
         RefreshTaskManagementPanel();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetInfoAsync(silent: true);
     }
 
     private void OpenCurrentTaskDetail()
@@ -4725,7 +5974,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetActionPlansAsync(silent: true);
         if (plan.NotifyMembers)
         {
             _ = SendFleetEmailNotificationAsync(
@@ -4775,7 +6024,7 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private void JoinFleetActionButton_Click(object sender, RoutedEventArgs e)
+    private async void JoinFleetActionButton_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("预约行动计划需要先登录。"))
         {
@@ -4783,6 +6032,15 @@ public partial class MainWindow : Window
         }
 
         e.Handled = true;
+        if (_joinedActionPlanIds.Contains(_selectedActionPlanId))
+        {
+            await LeaveSelectedActionPlanAsync();
+            RefreshFleetInfoPanel();
+            RefreshTaskManagementPanel();
+            AppendOutput("Action reservation canceled.");
+            return;
+        }
+
         JoinActionPlanTitleText.Text = string.IsNullOrWhiteSpace(_fleetActionTitle)
             ? "行动计划"
             : _fleetActionTitle;
@@ -4835,7 +6093,39 @@ public partial class MainWindow : Window
             GetInitials(gameName)));
         plan.RefreshParticipantSummary();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetActionPlanJoinAsync(plan, plan.Participants.Last(), silent: true);
+    }
+
+    private async Task LeaveSelectedActionPlanAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedActionPlanId))
+        {
+            return;
+        }
+
+        var plan = _fleetActionPlans.FirstOrDefault(plan =>
+            plan.Id.Equals(_selectedActionPlanId, StringComparison.OrdinalIgnoreCase));
+        if (plan is null || !_joinedActionPlanIds.Remove(plan.Id))
+        {
+            return;
+        }
+
+        var identities = EnumerateLocalIdentities().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        for (var index = plan.Participants.Count - 1; index >= 0; index--)
+        {
+            var participant = plan.Participants[index];
+            if (identities.Contains(participant.GameName) ||
+                identities.Contains(participant.Callsign) ||
+                IsLocalPlayer(participant.GameName))
+            {
+                plan.Participants.RemoveAt(index);
+            }
+        }
+
+        plan.RefreshParticipantSummary();
+        SaveCurrentConfig();
+        await PushFleetActionPlanLeaveAsync(plan.Id, silent: true);
+        RefreshOverlayWindow();
     }
 
     private void ChooseAvatar_Click(object sender, RoutedEventArgs e)
@@ -4938,7 +6228,7 @@ public partial class MainWindow : Window
         AppendOutput("Ship database cleared.");
     }
 
-    private void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
+    private async void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
     {
         if (_hasFleet && !IsCurrentUserFleetCommander())
         {
@@ -4955,6 +6245,12 @@ public partial class MainWindow : Window
         _fleetLogoPath = croppedPath;
         LoadCreateFleetLogoPreview();
         LoadFleetHeaderLogoPreview();
+        SaveCurrentConfig();
+        if (_hasFleet)
+        {
+            await PushFleetInfoAsync(silent: true);
+        }
+
         AppendOutput("Fleet logo updated.");
     }
 
@@ -5015,7 +6311,7 @@ public partial class MainWindow : Window
         RenderMySquad();
         RefreshOverlayWindow();
         SaveCurrentConfig();
-        await PushFleetDirectoryAsync(silent: true);
+        await PushFleetSquadsAsync(silent: true);
         AppendOutput($"Squad emblem updated: {squad.Name}");
     }
 
@@ -5590,7 +6886,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
 
         LoadFleetHeaderLogoPreview();
-        ManageFleetTab.Visibility = _hasFleet && IsCurrentUserFleetCommander()
+        ManageFleetTab.Visibility = CanCurrentUserOpenFleetManagement()
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
@@ -5724,8 +7020,8 @@ public partial class MainWindow : Window
             : $"开始时间 / {_fleetActionStartTime:yyyy-MM-dd HH:mm}";
         JoinFleetActionButton.Visibility = Visibility.Visible;
         var joined = _joinedActionPlanIds.Contains(_selectedActionPlanId);
-        JoinFleetActionButton.Content = joined ? "已预约" : "参与";
-        JoinFleetActionButton.IsEnabled = !joined;
+        JoinFleetActionButton.Content = joined ? "取消预约" : "参与";
+        JoinFleetActionButton.IsEnabled = true;
     }
 
     private void SelectFeaturedActionPlan()
@@ -5820,6 +7116,16 @@ public partial class MainWindow : Window
                playerName.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool IsLocalPlayerIdentity(string? gameName, string? callsign)
+    {
+        return (!string.IsNullOrWhiteSpace(gameName) &&
+                !string.IsNullOrWhiteSpace(_localPlayer) &&
+                gameName.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase)) ||
+               (!string.IsNullOrWhiteSpace(callsign) &&
+                !string.IsNullOrWhiteSpace(_callsign) &&
+                callsign.Equals(_callsign, StringComparison.OrdinalIgnoreCase));
+    }
+
     private bool IsCurrentUserFleetCommander()
     {
         return !string.IsNullOrWhiteSpace(_localPlayer) &&
@@ -5888,7 +7194,48 @@ public partial class MainWindow : Window
             player.Status,
             player.Ship,
             player.Location,
-            GetSquadNameBrush(squad, player));
+            GetSquadNameBrush(squad, player),
+            CanCurrentUserRemoveSquadMember(squad, player));
+    }
+
+    private bool CanCurrentUserManageSquad(SquadRow squad)
+    {
+        if (!_hasFleet)
+        {
+            return false;
+        }
+
+        if (IsCurrentUserFleetCommander())
+        {
+            return true;
+        }
+
+        var commanderGameName = GetGameNameFromDisplayName(squad.Commander);
+        var commanderCallsign = GetCallsignFromDisplayName(squad.Commander);
+        return (!string.IsNullOrWhiteSpace(_localPlayer) &&
+                commanderGameName.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase)) ||
+               (!string.IsNullOrWhiteSpace(_callsign) &&
+                commanderCallsign.Equals(_callsign, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool CanCurrentUserRemoveSquadMember(SquadRow squad, PlayerRow player)
+    {
+        if (!CanCurrentUserManageSquad(squad))
+        {
+            return false;
+        }
+
+        if (!player.SquadName.Equals(squad.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (IsSquadCommander(squad, player))
+        {
+            return false;
+        }
+
+        return !IsLocalPlayerIdentity(player.Name, player.Callsign);
     }
 
     private void RenderMySquad()
@@ -5920,13 +7267,10 @@ public partial class MainWindow : Window
         LoadMySquadEmblem(squad.EmblemPath);
 
         _mySquadMembers.Clear();
-        if (ReferenceEquals(squad, _joinedSquad))
+        foreach (var player in _players.Where(player =>
+                     player.SquadName.Equals(squad.Name, StringComparison.OrdinalIgnoreCase)))
         {
-            foreach (var player in _players.Where(player =>
-                         player.SquadName.Equals(squad.Name, StringComparison.OrdinalIgnoreCase)))
-            {
-                _mySquadMembers.Add(CreateSquadStatusRow(squad, player));
-            }
+            _mySquadMembers.Add(CreateSquadStatusRow(squad, player));
         }
     }
 

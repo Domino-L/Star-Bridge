@@ -42,7 +42,7 @@ var playerOnlineTimeout = TimeSpan.FromSeconds(120);
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.6",
+    version = "0.3.7",
     mode = string.IsNullOrWhiteSpace(serverKey) ? "open-test" : "protected",
     accounts = users.Count,
     players = players.Count,
@@ -62,7 +62,7 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
-    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.6",
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.7",
     Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_PACKAGE_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_RELEASE_NOTES") ?? "当前服务器未配置新版安装包。",
@@ -364,6 +364,7 @@ app.MapGet("/api/fleets", () =>
                 EventLog = NormalizeFleetEventLogs(fleet.EventLog),
                 Ships = fleetShips,
                 TaskHistory = NormalizeFleetTaskHistory(fleet.TaskHistory),
+                Applications = NormalizeFleetApplications(fleet.Applications),
                 Squads = MergeSquads([], fleet.Squads),
                 LastUpdated = DateTimeOffset.UtcNow
             };
@@ -408,11 +409,12 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
         CurrentTaskTime = snapshot.CurrentTaskTime,
         CurrentTaskNoticeRevision = Math.Max(0, snapshot.CurrentTaskNoticeRevision),
         ActionPlans = snapshot.ActionPlans ?? [],
-        MemberPermissions = snapshot.MemberPermissions ?? [],
+        MemberPermissions = NormalizeFleetMemberPermissions(snapshot.MemberPermissions),
         Members = NormalizeFleetMembers(snapshot.Members, snapshot.MemberPermissions),
         EventLog = NormalizeFleetEventLogs(snapshot.EventLog),
         Ships = NormalizeFleetShips(snapshot.Ships),
         TaskHistory = NormalizeFleetTaskHistory(snapshot.TaskHistory),
+        Applications = NormalizeFleetApplications(snapshot.Applications),
         OwnerAccount = Normalize(snapshot.OwnerAccount, GetAuthorizedUserName(request, users) ?? ""),
         Squads = MergeSquads([], snapshot.Squads),
         LastUpdated = DateTimeOffset.UtcNow
@@ -439,6 +441,8 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
 
             return normalized with
             {
+                Name = canManageFleetInfo ? normalized.Name : existing.Name,
+                Commander = canOwnFleet ? normalized.Commander : existing.Commander,
                 Description = canManageFleetInfo ? normalized.Description : existing.Description,
                 Type = canManageFleetInfo ? normalized.Type : existing.Type,
                 ActiveTime = canManageFleetInfo ? normalized.ActiveTime : existing.ActiveTime,
@@ -461,7 +465,9 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                     : canJoinActionPlans
                         ? MergeActionPlanParticipants(existing.ActionPlans, normalized.ActionPlans)
                         : existing.ActionPlans,
-                MemberPermissions = canOwnFleet ? normalized.MemberPermissions : existing.MemberPermissions,
+                MemberPermissions = canOwnFleet
+                    ? MergeFleetMemberPermissions(existing.MemberPermissions, normalized.MemberPermissions)
+                    : existing.MemberPermissions,
                 Members = MergeFleetMembers(
                     existing.Members,
                     FilterFleetMemberUpdatesForAccount(
@@ -473,6 +479,9 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                 TaskHistory = canPublishTasks
                     ? MergeFleetTaskHistory(existing.TaskHistory, normalized.TaskHistory)
                     : existing.TaskHistory,
+                Applications = canManageFleetInfo
+                    ? NormalizeFleetApplications(normalized.Applications)
+                    : existing.Applications,
                 EventLog = canAppendFleetLogs
                     ? MergeFleetEventLogs(existing.EventLog, normalized.EventLog)
                     : existing.EventLog,
@@ -482,6 +491,549 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
         });
     await storage.SaveAsync(players, fleets, users, verificationCodes);
     return Results.Ok(merged);
+});
+
+app.MapPost("/api/fleets/notice", async (HttpRequest request, FleetNoticeUpdateRequest update) =>
+{
+    if (string.IsNullOrWhiteSpace(update.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = update.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account) &&
+        !HasFleetPermission(fleet, account, permission => permission.CanManageFleetInfo))
+    {
+        return Results.Unauthorized();
+    }
+
+    var updated = fleet with
+    {
+        NoticeTitle = Normalize(update.Title, ""),
+        NoticeContent = Normalize(update.Content, ""),
+        EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/task", async (HttpRequest request, FleetTaskUpdateRequest update) =>
+{
+    if (string.IsNullOrWhiteSpace(update.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = update.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account) &&
+        !HasFleetPermission(fleet, account, permission => permission.CanPublishTasks))
+    {
+        return Results.Unauthorized();
+    }
+
+    var updated = fleet with
+    {
+        CurrentTaskTitle = Normalize(update.Title, ""),
+        CurrentTaskBrief = Normalize(update.Brief, ""),
+        CurrentTaskParticipants = Normalize(update.Participants, ""),
+        CurrentTaskRally = Normalize(update.Rally, ""),
+        CurrentTaskShip = Normalize(update.Ship, ""),
+        CurrentTaskTime = update.Time,
+        CurrentTaskNoticeRevision = Math.Max(
+            Math.Max(0, update.NoticeRevision),
+            Math.Max(0, fleet.CurrentTaskNoticeRevision)),
+        TaskHistory = MergeFleetTaskHistory(fleet.TaskHistory, update.TaskHistory),
+        EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/action-plans", async (HttpRequest request, FleetActionPlansUpdateRequest update) =>
+{
+    if (string.IsNullOrWhiteSpace(update.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = update.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account) &&
+        !HasFleetPermission(fleet, account, permission => permission.CanPublishPlans))
+    {
+        return Results.Unauthorized();
+    }
+
+    var updated = fleet with
+    {
+        ActionPlans = NormalizeActionPlans(update.ActionPlans),
+        EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/action-plans/join", async (HttpRequest request, FleetActionPlanJoinRequest join) =>
+{
+    if (string.IsNullOrWhiteSpace(join.FleetCode) ||
+        string.IsNullOrWhiteSpace(join.PlanId) ||
+        join.Participant is null)
+    {
+        return Results.BadRequest(new { error = "Fleet code, action plan and participant are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = join.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetMember(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var incoming = new NetworkActionPlanSnapshot(
+        join.PlanId.Trim(),
+        "",
+        "",
+        DateTime.MinValue,
+        false,
+        [join.Participant]);
+    var updated = fleet with
+    {
+        ActionPlans = MergeActionPlanParticipants(fleet.ActionPlans, [incoming]),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/action-plans/leave", async (HttpRequest request, FleetActionPlanLeaveRequest leave) =>
+{
+    if (string.IsNullOrWhiteSpace(leave.FleetCode) ||
+        string.IsNullOrWhiteSpace(leave.PlanId))
+    {
+        return Results.BadRequest(new { error = "Fleet code and action plan are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = leave.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetMember(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var aliases = BuildAccountAliases(account);
+    var updated = fleet with
+    {
+        ActionPlans = RemoveActionPlanParticipants(fleet.ActionPlans, leave.PlanId.Trim(), aliases),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/apply", async (HttpRequest request, FleetJoinApplicationRequest join) =>
+{
+    if (string.IsNullOrWhiteSpace(join.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = join.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (IsFleetMember(fleet, account))
+    {
+        return Results.Ok(fleet with { Applications = NormalizeFleetApplications(fleet.Applications) });
+    }
+
+    var player = FindPlayerForAccount(players, account);
+    if (RequiresFleetApplication(fleet.JoinPolicy))
+    {
+        var application = BuildFleetApplication(account, player, join.Message);
+        var updated = fleet with
+        {
+            Applications = UpsertFleetApplication(fleet.Applications, application),
+            EventLog = AddFleetLog(
+                fleet.EventLog,
+                "申请",
+                "收到加入申请",
+                $"{FormatAccountIdentity(account, player)} 申请加入舰队"),
+            LastUpdated = DateTimeOffset.UtcNow
+        };
+        fleets[fleetCode] = updated;
+        await storage.SaveAsync(players, fleets, users, verificationCodes);
+        return Results.Ok(updated);
+    }
+
+    RemoveAccountFromOtherFleets(fleets, players, fleetCode, account);
+    var member = BuildFleetMemberFromAccount(account, player);
+    foreach (var pair in players.ToArray())
+    {
+        if (MatchesAccountIdentity(pair.Value.Name, account) ||
+            MatchesAccountIdentity(pair.Value.Callsign, account))
+        {
+            players[pair.Key] = pair.Value with
+            {
+                Fleet = fleet.Name,
+                Squad = Normalize(pair.Value.Squad, "Unassigned"),
+                LastUpdated = DateTimeOffset.UtcNow
+            };
+        }
+    }
+
+    var aliases = BuildAccountAliases(account);
+    var joined = fleet with
+    {
+        Members = UpsertFleetMember(fleet.Members, member),
+        MemberPermissions = EnsureFleetPermission(fleet.MemberPermissions, member),
+        Ships = MergeFleetShips(fleet.Ships, player is null ? [] : BuildFleetShipsFromPlayer(player), null),
+        Applications = RemoveFleetApplicationsForAliases(fleet.Applications, aliases),
+        EventLog = AddFleetLog(
+            fleet.EventLog,
+            "成员",
+            "玩家加入",
+            $"{DisplayMember(member)} 加入舰队"),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = joined;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(joined);
+});
+
+app.MapPost("/api/fleets/applications/decide", async (HttpRequest request, FleetApplicationDecisionRequest decision) =>
+{
+    if (string.IsNullOrWhiteSpace(decision.FleetCode) ||
+        string.IsNullOrWhiteSpace(decision.ApplicationId))
+    {
+        return Results.BadRequest(new { error = "Fleet code and application id are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = decision.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account) &&
+        !HasFleetPermission(fleet, account, permission => permission.CanManageFleetInfo))
+    {
+        return Results.Unauthorized();
+    }
+
+    var application = NormalizeFleetApplications(fleet.Applications)
+        .FirstOrDefault(item => item.Id.Equals(decision.ApplicationId.Trim(), StringComparison.OrdinalIgnoreCase));
+    if (application is null)
+    {
+        return Results.NotFound(new { error = "Application not found." });
+    }
+
+    var applicantAccount = users.Values.FirstOrDefault(user => ApplicationMatchesAccount(application, user));
+    var applicantPlayer = applicantAccount is null
+        ? players.Values.FirstOrDefault(player =>
+            IdentityContainsAny(player.Name, ExpandIdentityAliases(application.ApplicantGameName).ToHashSet(StringComparer.OrdinalIgnoreCase)) ||
+            IdentityContainsAny(player.Callsign, ExpandIdentityAliases(application.ApplicantCallsign).ToHashSet(StringComparer.OrdinalIgnoreCase)))
+        : FindPlayerForAccount(players, applicantAccount);
+    var appAliases = BuildApplicationAliases(application, applicantAccount);
+
+    var applications = NormalizeFleetApplications(fleet.Applications)
+        .Where(item => !item.Id.Equals(application.Id, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var updated = fleet with
+    {
+        Applications = applications,
+        EventLog = AddFleetLog(
+            fleet.EventLog,
+            "申请",
+            decision.Approve ? "通过加入申请" : "拒绝加入申请",
+            $"{FormatApplicationIdentity(application)} {(decision.Approve ? "加入舰队" : "被拒绝加入舰队")}"),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+
+    if (decision.Approve)
+    {
+        if (applicantAccount is not null)
+        {
+            RemoveAccountFromOtherFleets(fleets, players, fleetCode, applicantAccount);
+        }
+
+        foreach (var pair in players.ToArray())
+        {
+            var matches = applicantAccount is not null
+                ? MatchesAccountIdentity(pair.Value.Name, applicantAccount) ||
+                  MatchesAccountIdentity(pair.Value.Callsign, applicantAccount)
+                : IdentityContainsAny(pair.Value.Name, appAliases) ||
+                  IdentityContainsAny(pair.Value.Callsign, appAliases);
+            if (!matches)
+            {
+                continue;
+            }
+
+            players[pair.Key] = pair.Value with
+            {
+                Fleet = fleet.Name,
+                Squad = Normalize(pair.Value.Squad, "Unassigned"),
+                LastUpdated = DateTimeOffset.UtcNow
+            };
+        }
+
+        var member = applicantAccount is null
+            ? BuildFleetMemberFromApplication(application, applicantPlayer)
+            : BuildFleetMemberFromAccount(applicantAccount, applicantPlayer);
+        updated = updated with
+        {
+            Members = UpsertFleetMember(updated.Members, member),
+            MemberPermissions = EnsureFleetPermission(updated.MemberPermissions, member),
+            Ships = MergeFleetShips(updated.Ships, applicantPlayer is null ? [] : BuildFleetShipsFromPlayer(applicantPlayer), null)
+        };
+    }
+
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/leave", async (HttpRequest request, FleetLeaveRequest leave) =>
+{
+    if (string.IsNullOrWhiteSpace(leave.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = leave.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (IsFleetOwner(fleet, account))
+    {
+        return Results.BadRequest(new { error = "Fleet commander must transfer command or disband the fleet first." });
+    }
+
+    if (!IsFleetMember(fleet, account))
+    {
+        return Results.Ok(fleet);
+    }
+
+    var aliases = BuildAccountAliases(account);
+    foreach (var pair in players.ToArray())
+    {
+        if (MatchesAccountIdentity(pair.Value.Name, account) ||
+            MatchesAccountIdentity(pair.Value.Callsign, account))
+        {
+            players[pair.Key] = pair.Value with
+            {
+                Fleet = "No Fleet",
+                Squad = "Unassigned",
+                LastUpdated = DateTimeOffset.UtcNow
+            };
+        }
+    }
+
+    var updated = RemoveFleetIdentity(fleet, aliases) with
+    {
+        EventLog = AddFleetLog(
+            fleet.EventLog,
+            "成员",
+            "玩家离开",
+            $"{FormatAccountIdentity(account, FindPlayerForAccount(players, account))} 离开舰队"),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/permissions", async (HttpRequest request, FleetMemberPermissionUpdateRequest update) =>
+{
+    if (string.IsNullOrWhiteSpace(update.FleetCode) || update.Permission is null)
+    {
+        return Results.BadRequest(new { error = "Fleet code and member permission are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = update.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var updated = fleet with
+    {
+        MemberPermissions = MergeFleetMemberPermissions(fleet.MemberPermissions, [update.Permission]),
+        EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/info", async (HttpRequest request, FleetInfoUpdateRequest update) =>
+{
+    if (string.IsNullOrWhiteSpace(update.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = update.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account) &&
+        !HasFleetPermission(fleet, account, permission => permission.CanManageFleetInfo))
+    {
+        return Results.Unauthorized();
+    }
+
+    var logoImageData = NormalizeImageData(update.LogoImageData, 512 * 1024);
+    var updated = fleet with
+    {
+        Description = Normalize(update.Description, "No fleet description."),
+        Type = Normalize(update.Type, "Combat"),
+        ActiveTime = Normalize(update.ActiveTime, "20:00 - 23:59 UTC+8"),
+        JoinPolicy = Normalize(update.JoinPolicy, "Open"),
+        LogoText = Normalize(update.LogoText, Normalize(fleet.LogoText, "LOGO")),
+        LogoImageData = logoImageData ?? fleet.LogoImageData,
+        EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
+});
+
+app.MapPost("/api/fleets/squads", async (HttpRequest request, FleetSquadsUpdateRequest update) =>
+{
+    if (string.IsNullOrWhiteSpace(update.FleetCode))
+    {
+        return Results.BadRequest(new { error = "Fleet code is required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = update.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetOwner(fleet, account) && !IsFleetMember(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var updated = fleet with
+    {
+        Squads = MergeSquads(fleet.Squads, update.Squads),
+        EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(updated);
 });
 
 app.MapPost("/api/players", async (HttpRequest request, NetworkPlayerSnapshot snapshot) =>
@@ -594,24 +1146,132 @@ app.MapPost("/api/fleets/members/remove", async (HttpRequest request, FleetMembe
 
     fleets[fleetCode] = fleet with
     {
-        MemberPermissions = (fleet.MemberPermissions ?? [])
-            .Where(permission => !IdentityContainsAny(permission.GameName, targetAliases) &&
-                                 !IdentityContainsAny(permission.Callsign, targetAliases))
-            .ToArray(),
-        Members = (fleet.Members ?? [])
-            .Where(member => !IdentityContainsAny(member.GameName, targetAliases) &&
-                             !IdentityContainsAny(member.Callsign, targetAliases))
-            .ToArray(),
-        Ships = (fleet.Ships ?? [])
-            .Where(ship => !IdentityContainsAny(ship.OwnerGameName, targetAliases) &&
-                           !IdentityContainsAny(ship.OwnerCallsign, targetAliases))
-            .ToArray(),
+        MemberPermissions = RemoveFleetPermissionsForAliases(fleet.MemberPermissions, targetAliases),
+        Members = RemoveFleetMembersForAliases(fleet.Members, targetAliases),
+        Ships = RemoveFleetShipsForAliases(fleet.Ships, targetAliases),
+        ActionPlans = RemoveActionPlanParticipants(fleet.ActionPlans, null, targetAliases),
+        Applications = RemoveFleetApplicationsForAliases(fleet.Applications, targetAliases),
         EventLog = AddFleetLog(fleet.EventLog, "成员", "移除成员", $"{targetName} 被移出舰队"),
         LastUpdated = DateTimeOffset.UtcNow
     };
 
     await storage.SaveAsync(players, fleets, users, verificationCodes);
     return Results.Ok(new { removed, target = targetName });
+});
+
+app.MapPost("/api/fleets/squads/members/remove", async (HttpRequest request, FleetSquadMemberMutationRequest mutation) =>
+{
+    if (string.IsNullOrWhiteSpace(mutation.FleetCode) ||
+        string.IsNullOrWhiteSpace(mutation.SquadName) ||
+        string.IsNullOrWhiteSpace(mutation.TargetGameName))
+    {
+        return Results.BadRequest(new { error = "Fleet code, squad name and target player are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = mutation.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    var squadName = mutation.SquadName.Trim();
+    var squad = (fleet.Squads ?? []).FirstOrDefault(item =>
+        item.Name.Equals(squadName, StringComparison.OrdinalIgnoreCase));
+    if (squad is null)
+    {
+        return Results.NotFound(new { error = "Squad not found." });
+    }
+
+    var requesterAliases = BuildAccountAliases(account);
+    var isFleetOwner = IsFleetOwner(fleet, account);
+    var canRemoveMembers = HasFleetPermission(fleet, account, permission => permission.CanRemoveMembers);
+    var isSquadCommander = IdentityContainsAny(squad.Commander, requesterAliases);
+    if (!isFleetOwner && !canRemoveMembers && !isSquadCommander)
+    {
+        return Results.Unauthorized();
+    }
+
+    var targetName = mutation.TargetGameName.Trim();
+    var targetAliases = ExpandIdentityAliases(targetName)
+        .Concat(ExpandIdentityAliases(mutation.TargetCallsign))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (MatchesIdentitySet(account, targetAliases))
+    {
+        return Results.BadRequest(new { error = "You cannot remove yourself from the squad." });
+    }
+
+    if (IdentityContainsAny(squad.Commander, targetAliases))
+    {
+        return Results.BadRequest(new { error = "Squad commander cannot be removed from their own squad." });
+    }
+
+    if (!isFleetOwner && IsPrivilegedFleetMember(fleet, targetName))
+    {
+        return Results.Unauthorized();
+    }
+
+    var now = DateTimeOffset.UtcNow;
+    var removed = false;
+    foreach (var pair in players.ToArray())
+    {
+        var playerAliases = ExpandIdentityAliases(pair.Value.Name)
+            .Concat(ExpandIdentityAliases(pair.Value.Callsign))
+            .Concat(ExpandIdentityAliases(pair.Key))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (playerAliases.Overlaps(targetAliases) &&
+            Normalize(pair.Value.Squad, "Unassigned").Equals(squadName, StringComparison.OrdinalIgnoreCase))
+        {
+            players[pair.Key] = pair.Value with
+            {
+                Squad = "Unassigned",
+                LastUpdated = now
+            };
+            removed = true;
+        }
+    }
+
+    var members = NormalizeFleetMembers(fleet.Members, fleet.MemberPermissions)
+        .Select(member =>
+            (IdentityContainsAny(member.GameName, targetAliases) ||
+             IdentityContainsAny(member.Callsign, targetAliases)) &&
+            Normalize(member.SquadName, "Unassigned").Equals(squadName, StringComparison.OrdinalIgnoreCase)
+                ? member with { SquadName = "Unassigned", LastUpdated = now }
+                : member)
+        .ToArray();
+    removed = removed || members.Any(member =>
+        (IdentityContainsAny(member.GameName, targetAliases) ||
+         IdentityContainsAny(member.Callsign, targetAliases)) &&
+        Normalize(member.SquadName, "Unassigned").Equals("Unassigned", StringComparison.OrdinalIgnoreCase));
+
+    var ships = NormalizeFleetShips(fleet.Ships)
+        .Select(ship =>
+            (IdentityContainsAny(ship.OwnerGameName, targetAliases) ||
+             IdentityContainsAny(ship.OwnerCallsign, targetAliases)) &&
+            Normalize(ship.OwnerSquad, "未加入小队").Equals(squadName, StringComparison.OrdinalIgnoreCase)
+                ? ship with { OwnerSquad = "未加入小队" }
+                : ship)
+        .ToArray();
+
+    var targetDisplay = string.IsNullOrWhiteSpace(mutation.TargetCallsign)
+        ? targetName
+        : $"{mutation.TargetCallsign} ({targetName})";
+    var updated = fleet with
+    {
+        Members = members,
+        Ships = ships,
+        EventLog = AddFleetLog(fleet.EventLog, "成员", "移除小队成员", $"{targetDisplay} 被移出 {squadName}"),
+        LastUpdated = now
+    };
+
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(new { removed, target = targetName, squad = squadName });
 });
 
 app.MapPost("/api/fleets/transfer-commander", async (HttpRequest request, FleetCommanderTransferRequest transfer) =>
@@ -980,6 +1640,249 @@ static NetworkFleetTaskHistorySnapshot[] MergeFleetTaskHistory(
     return NormalizeFleetTaskHistory((existing ?? []).Concat(incoming ?? []).ToArray());
 }
 
+static NetworkFleetApplicationSnapshot[] NormalizeFleetApplications(NetworkFleetApplicationSnapshot[]? applications)
+{
+    return (applications ?? [])
+        .Where(application => !string.IsNullOrWhiteSpace(application.ApplicantGameName) ||
+                              !string.IsNullOrWhiteSpace(application.ApplicantAccount))
+        .Select(application =>
+        {
+            var account = Normalize(application.ApplicantAccount, "");
+            var gameName = Normalize(application.ApplicantGameName, Normalize(account, "Unknown"));
+            return application with
+            {
+                Id = Normalize(application.Id, BuildFleetApplicationId(account, gameName)),
+                ApplicantGameName = gameName,
+                ApplicantCallsign = Normalize(application.ApplicantCallsign, ""),
+                ApplicantAccount = account,
+                Message = Normalize(application.Message, ""),
+                Status = Normalize(application.Status, "Pending"),
+                CreatedAt = application.CreatedAt == default ? DateTimeOffset.UtcNow : application.CreatedAt,
+                AvatarImageData = NormalizeImageData(application.AvatarImageData, 512 * 1024)
+            };
+        })
+        .GroupBy(BuildFleetApplicationKey, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.OrderByDescending(application => application.CreatedAt).First())
+        .OrderByDescending(application => application.CreatedAt)
+        .ToArray();
+}
+
+static string BuildFleetApplicationId(string? account, string? gameName)
+{
+    var source = Normalize(account, Normalize(gameName, Guid.NewGuid().ToString("N")));
+    return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant()[..16];
+}
+
+static string BuildFleetApplicationKey(NetworkFleetApplicationSnapshot application)
+{
+    return Normalize(application.ApplicantAccount, Normalize(application.ApplicantGameName, application.Id));
+}
+
+static bool RequiresFleetApplication(string? joinPolicy)
+{
+    var value = Normalize(joinPolicy, "");
+    return value.Contains("申请", StringComparison.OrdinalIgnoreCase) ||
+           value.Contains("审核", StringComparison.OrdinalIgnoreCase) ||
+           value.Contains("application", StringComparison.OrdinalIgnoreCase) ||
+           value.Contains("approval", StringComparison.OrdinalIgnoreCase);
+}
+
+static HashSet<string> BuildAccountAliases(UserAccount account)
+{
+    var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    AddIdentityAliases(aliases, account.UserName);
+    AddIdentityAliases(aliases, account.Email);
+    AddIdentityAliases(aliases, account.GameName);
+    AddIdentityAliases(aliases, account.Callsign);
+    return aliases;
+}
+
+static NetworkPlayerSnapshot? FindPlayerForAccount(
+    ConcurrentDictionary<string, NetworkPlayerSnapshot> players,
+    UserAccount account)
+{
+    return players.Values.FirstOrDefault(player =>
+        MatchesAccountIdentity(player.Name, account) ||
+        MatchesAccountIdentity(player.Callsign, account));
+}
+
+static NetworkFleetApplicationSnapshot BuildFleetApplication(
+    UserAccount account,
+    NetworkPlayerSnapshot? player,
+    string? message)
+{
+    var gameName = Normalize(player?.Name, Normalize(account.GameName, account.UserName));
+    var callsign = Normalize(player?.Callsign, Normalize(account.Callsign, ""));
+    return new NetworkFleetApplicationSnapshot(
+        BuildFleetApplicationId(account.UserName, gameName),
+        gameName,
+        callsign,
+        account.UserName,
+        Normalize(message, ""),
+        "Pending",
+        DateTimeOffset.UtcNow,
+        player?.AvatarImageData);
+}
+
+static NetworkFleetApplicationSnapshot[] UpsertFleetApplication(
+    NetworkFleetApplicationSnapshot[]? applications,
+    NetworkFleetApplicationSnapshot application)
+{
+    var aliases = BuildApplicationAliases(application);
+    return NormalizeFleetApplications(applications)
+        .Where(item => !ApplicationContainsAny(item, aliases))
+        .Append(application)
+        .ToArray();
+}
+
+static HashSet<string> BuildApplicationAliases(NetworkFleetApplicationSnapshot application, UserAccount? account = null)
+{
+    var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    AddIdentityAliases(aliases, application.Id);
+    AddIdentityAliases(aliases, application.ApplicantGameName);
+    AddIdentityAliases(aliases, application.ApplicantCallsign);
+    AddIdentityAliases(aliases, application.ApplicantAccount);
+    if (account is not null)
+    {
+        aliases.UnionWith(BuildAccountAliases(account));
+    }
+
+    return aliases;
+}
+
+static bool ApplicationContainsAny(NetworkFleetApplicationSnapshot application, HashSet<string> aliases)
+{
+    return IdentityContainsAny(application.Id, aliases) ||
+           IdentityContainsAny(application.ApplicantGameName, aliases) ||
+           IdentityContainsAny(application.ApplicantCallsign, aliases) ||
+           IdentityContainsAny(application.ApplicantAccount, aliases);
+}
+
+static bool ApplicationMatchesAccount(NetworkFleetApplicationSnapshot application, UserAccount account)
+{
+    return ApplicationContainsAny(application, BuildAccountAliases(account));
+}
+
+static NetworkFleetApplicationSnapshot[] RemoveFleetApplicationsForAliases(
+    NetworkFleetApplicationSnapshot[]? applications,
+    HashSet<string> aliases)
+{
+    return NormalizeFleetApplications(applications)
+        .Where(application => !ApplicationContainsAny(application, aliases))
+        .ToArray();
+}
+
+static string FormatAccountIdentity(UserAccount account, NetworkPlayerSnapshot? player)
+{
+    var gameName = Normalize(player?.Name, Normalize(account.GameName, account.UserName));
+    var callsign = Normalize(player?.Callsign, Normalize(account.Callsign, ""));
+    return string.IsNullOrWhiteSpace(callsign)
+        ? gameName
+        : $"{callsign} ({gameName})";
+}
+
+static string FormatApplicationIdentity(NetworkFleetApplicationSnapshot application)
+{
+    return string.IsNullOrWhiteSpace(application.ApplicantCallsign)
+        ? application.ApplicantGameName
+        : $"{application.ApplicantCallsign} ({application.ApplicantGameName})";
+}
+
+static NetworkFleetMemberSnapshot BuildFleetMemberFromAccount(UserAccount account, NetworkPlayerSnapshot? player)
+{
+    return new NetworkFleetMemberSnapshot(
+        Normalize(player?.Name, Normalize(account.GameName, account.UserName)),
+        Normalize(player?.Callsign, Normalize(account.Callsign, "")),
+        "成员",
+        Normalize(player?.Squad, "Unassigned"),
+        player?.Online ?? false,
+        Normalize(player?.Ship, "Unknown"),
+        Normalize(player?.Location, "Unknown"),
+        player?.LastUpdated == default ? DateTimeOffset.UtcNow : player?.LastUpdated ?? DateTimeOffset.UtcNow,
+        player?.AvatarImageData);
+}
+
+static NetworkFleetMemberSnapshot BuildFleetMemberFromApplication(
+    NetworkFleetApplicationSnapshot application,
+    NetworkPlayerSnapshot? player)
+{
+    return new NetworkFleetMemberSnapshot(
+        Normalize(player?.Name, application.ApplicantGameName),
+        Normalize(player?.Callsign, Normalize(application.ApplicantCallsign, "")),
+        "成员",
+        Normalize(player?.Squad, "Unassigned"),
+        player?.Online ?? false,
+        Normalize(player?.Ship, "Unknown"),
+        Normalize(player?.Location, "Unknown"),
+        player?.LastUpdated == default ? DateTimeOffset.UtcNow : player?.LastUpdated ?? DateTimeOffset.UtcNow,
+        NormalizeImageData(player?.AvatarImageData, 512 * 1024) ??
+        NormalizeImageData(application.AvatarImageData, 512 * 1024));
+}
+
+static void RemoveAccountFromOtherFleets(
+    ConcurrentDictionary<string, NetworkFleetSnapshot> fleets,
+    ConcurrentDictionary<string, NetworkPlayerSnapshot> players,
+    string keepFleetCode,
+    UserAccount account)
+{
+    var aliases = BuildAccountAliases(account);
+    foreach (var pair in fleets.ToArray())
+    {
+        if (pair.Key.Equals(keepFleetCode, StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        var fleet = pair.Value;
+        if (IsFleetOwner(fleet, account) ||
+            !FleetContainsAnyIdentity(fleet, aliases))
+        {
+            continue;
+        }
+
+        fleets[pair.Key] = RemoveFleetIdentity(fleet, aliases) with
+        {
+            EventLog = AddFleetLog(
+                fleet.EventLog,
+                "成员",
+                "玩家离开",
+                $"{FormatAccountIdentity(account, FindPlayerForAccount(players, account))} 离开舰队"),
+            LastUpdated = DateTimeOffset.UtcNow
+        };
+    }
+}
+
+static bool FleetContainsAnyIdentity(NetworkFleetSnapshot fleet, HashSet<string> aliases)
+{
+    return (fleet.Members ?? []).Any(member =>
+               IdentityContainsAny(member.GameName, aliases) ||
+               IdentityContainsAny(member.Callsign, aliases)) ||
+           (fleet.MemberPermissions ?? []).Any(permission =>
+               IdentityContainsAny(permission.GameName, aliases) ||
+               IdentityContainsAny(permission.Callsign, aliases)) ||
+           (fleet.Ships ?? []).Any(ship =>
+               IdentityContainsAny(ship.OwnerGameName, aliases) ||
+               IdentityContainsAny(ship.OwnerCallsign, aliases)) ||
+           (fleet.ActionPlans ?? []).Any(plan =>
+               (plan.Participants ?? []).Any(participant =>
+                   IdentityContainsAny(participant.GameName, aliases) ||
+                   IdentityContainsAny(participant.Callsign, aliases))) ||
+           (fleet.Applications ?? []).Any(application => ApplicationContainsAny(application, aliases));
+}
+
+static NetworkFleetSnapshot RemoveFleetIdentity(NetworkFleetSnapshot fleet, HashSet<string> aliases)
+{
+    return fleet with
+    {
+        Members = RemoveFleetMembersForAliases(fleet.Members, aliases),
+        MemberPermissions = RemoveFleetPermissionsForAliases(fleet.MemberPermissions, aliases),
+        Ships = RemoveFleetShipsForAliases(fleet.Ships, aliases),
+        Applications = RemoveFleetApplicationsForAliases(fleet.Applications, aliases),
+        ActionPlans = RemoveActionPlanParticipants(fleet.ActionPlans, null, aliases),
+        LastUpdated = DateTimeOffset.UtcNow
+    };
+}
+
 static UserAccount CreateAccount(string name, string password, string? gameName, string? email = null, string? callsign = null)
 {
     var salt = RandomNumberGenerator.GetBytes(16);
@@ -1313,6 +2216,36 @@ static NetworkFleetMemberSnapshot[] UpsertFleetMember(
     return rows;
 }
 
+static NetworkFleetMemberSnapshot[] RemoveFleetMembersForAliases(
+    NetworkFleetMemberSnapshot[]? members,
+    HashSet<string> aliases)
+{
+    return NormalizeFleetMembers(members)
+        .Where(member => !IdentityContainsAny(member.GameName, aliases) &&
+                         !IdentityContainsAny(member.Callsign, aliases))
+        .ToArray();
+}
+
+static NetworkFleetMemberPermissionSnapshot[] RemoveFleetPermissionsForAliases(
+    NetworkFleetMemberPermissionSnapshot[]? permissions,
+    HashSet<string> aliases)
+{
+    return (permissions ?? [])
+        .Where(permission => !IdentityContainsAny(permission.GameName, aliases) &&
+                             !IdentityContainsAny(permission.Callsign, aliases))
+        .ToArray();
+}
+
+static NetworkFleetShipSnapshot[] RemoveFleetShipsForAliases(
+    NetworkFleetShipSnapshot[]? ships,
+    HashSet<string> aliases)
+{
+    return NormalizeFleetShips(ships)
+        .Where(ship => !IdentityContainsAny(ship.OwnerGameName, aliases) &&
+                       !IdentityContainsAny(ship.OwnerCallsign, aliases))
+        .ToArray();
+}
+
 static void UpsertFleetMemberFromPlayer(
     ConcurrentDictionary<string, NetworkFleetSnapshot> fleets,
     NetworkPlayerSnapshot player)
@@ -1387,24 +2320,17 @@ static void RemovePlayerFromStaleFleets(
             continue;
         }
 
-        var nextMembers = (fleet.Members ?? [])
-            .Where(member => !MatchesPlayerIdentity(member.GameName, player) &&
-                             !MatchesPlayerIdentity(member.Callsign, player))
-            .ToArray();
-        var nextPermissions = (fleet.MemberPermissions ?? [])
-            .Where(permission => !MatchesPlayerIdentity(permission.GameName, player) &&
-                                 !MatchesPlayerIdentity(permission.Callsign, player))
-            .ToArray();
-        var nextShips = (fleet.Ships ?? [])
-            .Where(ship => !MatchesPlayerIdentity(ship.OwnerGameName, player) &&
-                           !MatchesPlayerIdentity(ship.OwnerCallsign, player))
-            .ToArray();
+        var playerAliases = ExpandIdentityAliases(player.Name)
+            .Concat(ExpandIdentityAliases(player.Callsign))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         fleets[pair.Key] = fleet with
         {
-            Members = nextMembers,
-            MemberPermissions = nextPermissions,
-            Ships = nextShips,
+            Members = RemoveFleetMembersForAliases(fleet.Members, playerAliases),
+            MemberPermissions = RemoveFleetPermissionsForAliases(fleet.MemberPermissions, playerAliases),
+            Ships = RemoveFleetShipsForAliases(fleet.Ships, playerAliases),
+            ActionPlans = RemoveActionPlanParticipants(fleet.ActionPlans, null, playerAliases),
+            Applications = RemoveFleetApplicationsForAliases(fleet.Applications, playerAliases),
             EventLog = AddFleetLog(
                 fleet.EventLog,
                 "成员",
@@ -1496,6 +2422,71 @@ static NetworkFleetMemberPermissionSnapshot[] EnsureFleetPermission(
         .ToArray();
 }
 
+static NetworkFleetMemberPermissionSnapshot[] NormalizeFleetMemberPermissions(
+    NetworkFleetMemberPermissionSnapshot[]? permissions)
+{
+    var rows = new Dictionary<string, NetworkFleetMemberPermissionSnapshot>(StringComparer.OrdinalIgnoreCase);
+    foreach (var permission in permissions ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(permission.GameName))
+        {
+            continue;
+        }
+
+        var normalized = NormalizeFleetMemberPermission(permission);
+        rows[BuildPermissionKey(normalized)] = normalized;
+    }
+
+    return rows.Values
+        .OrderBy(permission => Normalize(permission.RoleTitle, "成员"))
+        .ThenBy(permission => Normalize(permission.Callsign, permission.GameName))
+        .ToArray();
+}
+
+static NetworkFleetMemberPermissionSnapshot NormalizeFleetMemberPermission(
+    NetworkFleetMemberPermissionSnapshot permission)
+{
+    return permission with
+    {
+        GameName = permission.GameName.Trim(),
+        Callsign = Normalize(permission.Callsign, ""),
+        RoleTitle = Normalize(permission.RoleTitle, "成员"),
+        UpdatedAt = permission.UpdatedAt == default ? DateTimeOffset.UtcNow : permission.UpdatedAt
+    };
+}
+
+static NetworkFleetMemberPermissionSnapshot[] MergeFleetMemberPermissions(
+    NetworkFleetMemberPermissionSnapshot[]? existingPermissions,
+    NetworkFleetMemberPermissionSnapshot[]? incomingPermissions)
+{
+    var rows = NormalizeFleetMemberPermissions(existingPermissions).ToList();
+    foreach (var incoming in NormalizeFleetMemberPermissions(incomingPermissions))
+    {
+        var incomingAliases = ExpandIdentityAliases(incoming.GameName)
+            .Concat(ExpandIdentityAliases(incoming.Callsign))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var existingIndex = rows.FindIndex(existing =>
+            IdentityContainsAny(existing.GameName, incomingAliases) ||
+            IdentityContainsAny(existing.Callsign, incomingAliases));
+
+        if (existingIndex < 0)
+        {
+            rows.Add(incoming);
+            continue;
+        }
+
+        var existing = rows[existingIndex];
+        rows[existingIndex] = incoming.UpdatedAt >= existing.UpdatedAt ? incoming : existing;
+    }
+
+    return NormalizeFleetMemberPermissions(rows.ToArray());
+}
+
+static string BuildPermissionKey(NetworkFleetMemberPermissionSnapshot permission)
+{
+    return Normalize(permission.GameName, permission.Callsign ?? "unknown").Trim();
+}
+
 static NetworkFleetEventLogSnapshot[] NormalizeFleetEventLogs(NetworkFleetEventLogSnapshot[]? logs)
 {
     return (logs ?? [])
@@ -1539,6 +2530,24 @@ static NetworkFleetEventLogSnapshot[] AddFleetLog(
     return NormalizeFleetEventLogs((existingLogs ?? []).Prepend(row).ToArray());
 }
 
+static NetworkActionPlanSnapshot[] NormalizeActionPlans(NetworkActionPlanSnapshot[]? plans)
+{
+    return (plans ?? [])
+        .Where(plan => !string.IsNullOrWhiteSpace(plan.Id) &&
+                       !string.IsNullOrWhiteSpace(plan.Title))
+        .Select(plan => plan with
+        {
+            Id = plan.Id.Trim(),
+            Title = Normalize(plan.Title, "未命名行动"),
+            Content = Normalize(plan.Content, ""),
+            Participants = MergeActionPlanParticipantRows([], plan.Participants)
+        })
+        .GroupBy(plan => plan.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.OrderByDescending(plan => plan.StartTime).First())
+        .OrderBy(plan => plan.StartTime)
+        .ToArray();
+}
+
 static NetworkActionPlanSnapshot[] MergeActionPlanParticipants(
     NetworkActionPlanSnapshot[]? existingPlans,
     NetworkActionPlanSnapshot[]? incomingPlans)
@@ -1563,6 +2572,38 @@ static NetworkActionPlanSnapshot[] MergeActionPlanParticipants(
 
     return rows.Values
         .OrderBy(plan => plan.StartTime)
+        .ToArray();
+}
+
+static NetworkActionPlanSnapshot[] RemoveActionPlanParticipants(
+    NetworkActionPlanSnapshot[]? existingPlans,
+    string? planId,
+    HashSet<string> aliases)
+{
+    return NormalizeActionPlans(existingPlans)
+        .Select(plan =>
+        {
+            if (!string.IsNullOrWhiteSpace(planId) &&
+                !plan.Id.Equals(planId, StringComparison.OrdinalIgnoreCase))
+            {
+                return plan;
+            }
+
+            return plan with
+            {
+                Participants = RemoveActionPlanParticipantRows(plan.Participants, aliases)
+            };
+        })
+        .ToArray();
+}
+
+static NetworkActionPlanParticipantSnapshot[] RemoveActionPlanParticipantRows(
+    NetworkActionPlanParticipantSnapshot[]? participants,
+    HashSet<string> aliases)
+{
+    return MergeActionPlanParticipantRows(participants, [])
+        .Where(participant => !IdentityContainsAny(participant.GameName, aliases) &&
+                              !IdentityContainsAny(participant.Callsign, aliases))
         .ToArray();
 }
 
@@ -1988,6 +3029,70 @@ public sealed record FleetNotificationRequest(
     string Subject,
     string Body);
 
+public sealed record FleetNoticeUpdateRequest(
+    string FleetCode,
+    string? Title,
+    string? Content,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetTaskUpdateRequest(
+    string FleetCode,
+    string? Title,
+    string? Brief,
+    string? Participants,
+    string? Rally,
+    string? Ship,
+    DateTime? Time,
+    int NoticeRevision,
+    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetActionPlansUpdateRequest(
+    string FleetCode,
+    NetworkActionPlanSnapshot[]? ActionPlans,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetActionPlanJoinRequest(
+    string FleetCode,
+    string PlanId,
+    NetworkActionPlanParticipantSnapshot Participant);
+
+public sealed record FleetActionPlanLeaveRequest(
+    string FleetCode,
+    string PlanId);
+
+public sealed record FleetJoinApplicationRequest(
+    string FleetCode,
+    string? Message = null);
+
+public sealed record FleetApplicationDecisionRequest(
+    string FleetCode,
+    string ApplicationId,
+    bool Approve);
+
+public sealed record FleetLeaveRequest(
+    string FleetCode);
+
+public sealed record FleetMemberPermissionUpdateRequest(
+    string FleetCode,
+    NetworkFleetMemberPermissionSnapshot Permission,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetInfoUpdateRequest(
+    string FleetCode,
+    string? Description,
+    string? Type,
+    string? ActiveTime,
+    string? JoinPolicy,
+    string? LogoText,
+    string? LogoImageData,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetSquadsUpdateRequest(
+    string FleetCode,
+    NetworkSquadSnapshot[]? Squads,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
 public sealed record AuthResponse(
     string UserName,
     string? Email,
@@ -2066,7 +3171,8 @@ public sealed record NetworkFleetSnapshot(
     NetworkFleetEventLogSnapshot[]? EventLog = null,
     int CurrentTaskNoticeRevision = 0,
     NetworkFleetShipSnapshot[]? Ships = null,
-    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null);
+    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null,
+    NetworkFleetApplicationSnapshot[]? Applications = null);
 
 public sealed record NetworkFleetMemberPermissionSnapshot(
     string GameName,
@@ -2116,6 +3222,16 @@ public sealed record NetworkFleetTaskHistorySnapshot(
     string RequiredShip,
     string PublishedAtText);
 
+public sealed record NetworkFleetApplicationSnapshot(
+    string Id,
+    string ApplicantGameName,
+    string? ApplicantCallsign,
+    string? ApplicantAccount,
+    string? Message,
+    string Status,
+    DateTimeOffset CreatedAt,
+    string? AvatarImageData = null);
+
 public sealed record FleetDisbandRequest(
     string FleetCode,
     string Password);
@@ -2123,6 +3239,12 @@ public sealed record FleetDisbandRequest(
 public sealed record FleetMemberMutationRequest(
     string FleetCode,
     string TargetGameName);
+
+public sealed record FleetSquadMemberMutationRequest(
+    string FleetCode,
+    string SquadName,
+    string TargetGameName,
+    string? TargetCallsign = null);
 
 public sealed record FleetCommanderTransferRequest(
     string FleetCode,

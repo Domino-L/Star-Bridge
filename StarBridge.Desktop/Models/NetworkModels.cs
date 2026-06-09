@@ -56,7 +56,18 @@ public sealed record NetworkFleetSnapshot(
     NetworkFleetEventLogSnapshot[]? EventLog = null,
     int CurrentTaskNoticeRevision = 0,
     NetworkFleetShipSnapshot[]? Ships = null,
-    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null);
+    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null,
+    NetworkFleetApplicationSnapshot[]? Applications = null);
+
+public sealed record NetworkFleetApplicationSnapshot(
+    string Id,
+    string ApplicantGameName,
+    string? ApplicantCallsign,
+    string? ApplicantAccount,
+    string? Message,
+    string Status,
+    DateTimeOffset CreatedAt,
+    string? AvatarImageData = null);
 
 public sealed record NetworkFleetMemberPermissionSnapshot(
     string GameName,
@@ -115,6 +126,12 @@ public sealed record NetworkSquadSnapshot(
     string? RallyPoint = null,
     string? EmblemImageData = null);
 
+public sealed record FleetSquadMemberMutationRequest(
+    string FleetCode,
+    string SquadName,
+    string TargetGameName,
+    string? TargetCallsign = null);
+
 public sealed record NetworkActionPlanSnapshot(
     string Id,
     string Title,
@@ -171,6 +188,70 @@ public sealed record FleetNotificationRequest(
     string FleetCode,
     string Subject,
     string Body);
+
+public sealed record FleetNoticeUpdateRequest(
+    string FleetCode,
+    string? Title,
+    string? Content,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetTaskUpdateRequest(
+    string FleetCode,
+    string? Title,
+    string? Brief,
+    string? Participants,
+    string? Rally,
+    string? Ship,
+    DateTime? Time,
+    int NoticeRevision,
+    NetworkFleetTaskHistorySnapshot[]? TaskHistory = null,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetActionPlansUpdateRequest(
+    string FleetCode,
+    NetworkActionPlanSnapshot[]? ActionPlans,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetActionPlanJoinRequest(
+    string FleetCode,
+    string PlanId,
+    NetworkActionPlanParticipantSnapshot Participant);
+
+public sealed record FleetActionPlanLeaveRequest(
+    string FleetCode,
+    string PlanId);
+
+public sealed record FleetJoinApplicationRequest(
+    string FleetCode,
+    string? Message = null);
+
+public sealed record FleetApplicationDecisionRequest(
+    string FleetCode,
+    string ApplicationId,
+    bool Approve);
+
+public sealed record FleetLeaveRequest(
+    string FleetCode);
+
+public sealed record FleetMemberPermissionUpdateRequest(
+    string FleetCode,
+    NetworkFleetMemberPermissionSnapshot Permission,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetInfoUpdateRequest(
+    string FleetCode,
+    string? Description,
+    string? Type,
+    string? ActiveTime,
+    string? JoinPolicy,
+    string? LogoText,
+    string? LogoImageData,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
+
+public sealed record FleetSquadsUpdateRequest(
+    string FleetCode,
+    NetworkSquadSnapshot[]? Squads,
+    NetworkFleetEventLogSnapshot[]? EventLog = null);
 
 public sealed record FleetDisbandRequest(
     string FleetCode,

@@ -1,6 +1,6 @@
 ﻿#define MyAppName "Star Bridge"
 #define MyAppNameCn "星海舰桥"
-#define MyAppVersion "0.3.6"
+#define MyAppVersion "0.3.7"
 #define MyAppPublisher "Domino-L"
 #define MyAppExeName "Star Bridge.exe"
 #define MyRelayExeName "Star Bridge Relay Server.exe"

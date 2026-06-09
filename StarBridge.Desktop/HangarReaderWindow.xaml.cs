@@ -47,25 +47,41 @@ public partial class HangarReaderWindow : Window
             await HangarWebView.EnsureCoreWebView2Async();
             var json = await HangarWebView.ExecuteScriptAsync("""
                 (() => {
-                  const titles = [];
+                  const ships = [];
                   document.querySelectorAll('.kind').forEach(kind => {
-                    if ((kind.textContent || '').trim().toLowerCase() !== 'ship') {
+                    const kindText = (kind.textContent || '').trim().toLowerCase();
+                    if (kindText !== 'ship' && kindText !== '飞船') {
                       return;
                     }
                     const item = kind.closest('.item') || kind.parentElement;
                     const title = item && item.querySelector('.title')
                       ? item.querySelector('.title').textContent.trim()
                       : '';
+                    const liner = item && item.querySelector('.liner')
+                      ? item.querySelector('.liner').textContent.trim()
+                      : '';
+                    const manufacturer = liner.match(/\(([A-Z0-9]{3,5})\)/);
                     if (title) {
-                      titles.push(title);
+                      ships.push({
+                        Title: title,
+                        ManufacturerCode: manufacturer ? manufacturer[1] : ''
+                      });
                     }
                   });
-                  return [...new Set(titles)];
+                  const seen = new Set();
+                  return ships.filter(ship => {
+                    const key = `${ship.Title}|${ship.ManufacturerCode}`;
+                    if (seen.has(key)) {
+                      return false;
+                    }
+                    seen.add(key);
+                    return true;
+                  });
                 })();
                 """);
 
-            var titles = JsonSerializer.Deserialize<string[]>(json) ?? [];
-            var result = HangarShipImporter.ImportOfficialShipTitles(titles, _language);
+            var candidates = JsonSerializer.Deserialize<HangarShipCandidate[]>(json) ?? [];
+            var result = HangarShipImporter.ImportOfficialShipCandidates(candidates, _language);
             var added = 0;
             foreach (var ship in result.Ships)
             {
