@@ -33,6 +33,8 @@ internal sealed class AppUpdateService
     {
         try
         {
+            ReportLastPortableUpdateResult(silent);
+
             if (!silent)
             {
                 _setStatus($"正在检查更新... 当前版本 V{currentVersion}");
@@ -97,11 +99,12 @@ internal sealed class AppUpdateService
         _setCheckButtonEnabled(false);
         try
         {
-            var updateRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "StarBridge",
-                "Updates");
+            var updateRoot = GetUpdateRoot();
             Directory.CreateDirectory(updateRoot);
+            var logPath = GetPortableUpdateLogPath(updateRoot);
+            var resultPath = GetPortableUpdateResultPath(updateRoot);
+            TryDeleteFile(logPath);
+            TryDeleteFile(resultPath);
 
             var safeVersion = string.Join("_", manifest.Version.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
             var packagePath = Path.Combine(updateRoot, $"StarBridge-{safeVersion}-win-x64-update.zip");
@@ -110,13 +113,14 @@ internal sealed class AppUpdateService
             _setStatus("下载完成，正在准备覆盖更新...");
             var appDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var exePath = Environment.ProcessPath ?? Path.Combine(appDir, "Star Bridge.exe");
-            var scriptPath = CreatePortableUpdateScript(updateRoot, packagePath, appDir, exePath);
+            var scriptPath = CreatePortableUpdateScript(updateRoot, packagePath, appDir, exePath, resultPath, logPath);
 
             Process.Start(new ProcessStartInfo("powershell.exe")
             {
-                UseShellExecute = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -ProcessId {Environment.ProcessId}"
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -TargetProcessId {Environment.ProcessId}"
             });
 
             Application.Current.Shutdown();
@@ -139,10 +143,7 @@ internal sealed class AppUpdateService
         _setCheckButtonEnabled(false);
         try
         {
-            var updateRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "StarBridge",
-                "Updates");
+            var updateRoot = GetUpdateRoot();
             Directory.CreateDirectory(updateRoot);
 
             var safeVersion = string.Join("_", manifest.Version.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
@@ -197,7 +198,13 @@ internal sealed class AppUpdateService
         }
     }
 
-    private static string CreatePortableUpdateScript(string updateRoot, string packagePath, string appDir, string exePath)
+    private static string CreatePortableUpdateScript(
+        string updateRoot,
+        string packagePath,
+        string appDir,
+        string exePath,
+        string resultPath,
+        string logPath)
     {
         var scriptPath = Path.Combine(updateRoot, "apply-starbridge-update.ps1");
         var extractDir = Path.Combine(updateRoot, "extracted");
@@ -205,58 +212,203 @@ internal sealed class AppUpdateService
         var escapedExtract = EscapePowerShellSingleQuoted(extractDir);
         var escapedAppDir = EscapePowerShellSingleQuoted(appDir);
         var escapedExe = EscapePowerShellSingleQuoted(exePath);
+        var escapedResult = EscapePowerShellSingleQuoted(resultPath);
+        var escapedLog = EscapePowerShellSingleQuoted(logPath);
 
         var script = $$"""
-param([int]$ProcessId)
+param([int]$TargetProcessId)
 $ErrorActionPreference = 'Stop'
 $packagePath = '{{escapedPackage}}'
 $extractDir = '{{escapedExtract}}'
 $appDir = '{{escapedAppDir}}'
 $exePath = '{{escapedExe}}'
+$resultPath = '{{escapedResult}}'
+$logPath = '{{escapedLog}}'
 
-try {
-    Wait-Process -Id $ProcessId -Timeout 60 -ErrorAction SilentlyContinue
-} catch {}
-
-if (Test-Path -LiteralPath $extractDir) {
-    Remove-Item -LiteralPath $extractDir -Recurse -Force
+function Write-UpdateLog([string]$Message) {
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $logPath -Value "[$stamp] $Message" -Encoding UTF8
 }
-New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-Expand-Archive -LiteralPath $packagePath -DestinationPath $extractDir -Force
 
-$sourceDir = $extractDir
-if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'Star Bridge.exe'))) {
-    $candidate = Get-ChildItem -LiteralPath $extractDir -Directory -Recurse |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Star Bridge.exe') } |
-        Select-Object -First 1
-    if ($candidate) {
-        $sourceDir = $candidate.FullName
+function Set-UpdateResult([string]$State, [string]$Message) {
+    Set-Content -LiteralPath $resultPath -Value "$State $Message" -Encoding UTF8
+}
+
+function Invoke-WithRetry([scriptblock]$Action, [string]$Name, [int]$Attempts = 30) {
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            & $Action
+            return
+        } catch {
+            if ($i -eq $Attempts) {
+                throw "$Name failed after $Attempts attempts. $($_.Exception.Message)"
+            }
+
+            Write-UpdateLog "$Name failed on attempt $i. Retrying..."
+            Start-Sleep -Milliseconds 500
+        }
     }
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'Star Bridge.exe'))) {
-    throw '更新包中没有找到 Star Bridge.exe。'
+function Get-StarBridgeProcess {
+    Get-Process -Name 'Star Bridge' -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $_.Id -ne $PID -and $_.Path -eq $exePath
+        } catch {
+            $false
+        }
+    }
 }
 
-Get-ChildItem -LiteralPath $sourceDir -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $appDir -Recurse -Force
+function Wait-StarBridgeExit {
+    for ($i = 0; $i -lt 180; $i++) {
+        $target = Get-Process -Id $TargetProcessId -ErrorAction SilentlyContinue
+        $sameApp = @(Get-StarBridgeProcess)
+        if (-not $target -and $sameApp.Count -eq 0) {
+            return
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw 'Star Bridge did not exit in time.'
 }
 
-Start-Process -FilePath $exePath -WorkingDirectory $appDir
-Start-Sleep -Seconds 2
 try {
-    Remove-Item -LiteralPath $extractDir -Recurse -Force
-    Remove-Item -LiteralPath $packagePath -Force
-} catch {}
+    Write-UpdateLog 'Portable update started.'
+    Wait-StarBridgeExit
+
+    Invoke-WithRetry -Name 'remove extract directory' -Action {
+        if (Test-Path -LiteralPath $extractDir) {
+            Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction Stop
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+    Expand-Archive -LiteralPath $packagePath -DestinationPath $extractDir -Force
+
+    $sourceDir = $extractDir
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'Star Bridge.exe'))) {
+        $candidate = Get-ChildItem -LiteralPath $extractDir -Directory -Recurse |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Star Bridge.exe') } |
+            Select-Object -First 1
+        if ($candidate) {
+            $sourceDir = $candidate.FullName
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'Star Bridge.exe'))) {
+        throw 'Update package does not contain Star Bridge.exe.'
+    }
+
+    Get-ChildItem -LiteralPath $sourceDir -Force | ForEach-Object {
+        $itemPath = $_.FullName
+        $itemName = $_.Name
+        Invoke-WithRetry -Name "copy $itemName" -Action {
+            Copy-Item -LiteralPath $itemPath -Destination $appDir -Recurse -Force -ErrorAction Stop
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        throw 'Updated Star Bridge.exe was not found after copy.'
+    }
+
+    Set-UpdateResult 'OK' 'Portable update applied.'
+    Write-UpdateLog 'Portable update completed.'
+    Start-Process -FilePath $exePath -WorkingDirectory $appDir
+    Start-Sleep -Seconds 2
+    try {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force
+        Remove-Item -LiteralPath $packagePath -Force
+    } catch {}
+} catch {
+    Write-UpdateLog "FAILED: $($_.Exception.Message)"
+    Set-UpdateResult 'FAILED' $_.Exception.Message
+    try {
+        if (Test-Path -LiteralPath $exePath) {
+            Start-Process -FilePath $exePath -WorkingDirectory $appDir
+        }
+    } catch {}
+}
 """;
 
-        File.WriteAllText(scriptPath, script, Encoding.UTF8);
+        File.WriteAllText(scriptPath, script, new UTF8Encoding(false));
         return scriptPath;
     }
 
     private static string EscapePowerShellSingleQuoted(string value)
     {
         return value.Replace("'", "''");
+    }
+
+    private void ReportLastPortableUpdateResult(bool silent)
+    {
+        try
+        {
+            var updateRoot = GetUpdateRoot();
+            var resultPath = GetPortableUpdateResultPath(updateRoot);
+            if (!File.Exists(resultPath))
+            {
+                return;
+            }
+
+            var result = File.ReadAllText(resultPath, Encoding.UTF8).Trim();
+            if (string.IsNullOrWhiteSpace(result))
+            {
+                return;
+            }
+
+            if (result.StartsWith("OK", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!silent)
+                {
+                    _setStatus("上次覆盖更新已完成。");
+                }
+
+                TryDeleteFile(resultPath);
+                return;
+            }
+
+            if (result.StartsWith("FAILED", StringComparison.OrdinalIgnoreCase))
+            {
+                _setStatus($"上次覆盖更新失败。日志：{GetPortableUpdateLogPath(updateRoot)}");
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static string GetUpdateRoot()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StarBridge",
+            "Updates");
+    }
+
+    private static string GetPortableUpdateResultPath(string updateRoot)
+    {
+        return Path.Combine(updateRoot, "last-update-result.txt");
+    }
+
+    private static string GetPortableUpdateLogPath(string updateRoot)
+    {
+        return Path.Combine(updateRoot, "update.log");
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+        }
     }
 
     private static bool IsNewerVersion(string remoteVersion, string currentVersion)

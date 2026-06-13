@@ -1,0 +1,58 @@
+# StarBridge location name table.
+# UTF-8. Supported formats:
+# CODE=中文名
+# CODE   English / 中文名
+
+STANTON system:
+Stanton3_Area18   Area 18 / 18区
+
+RR_ARC_L1   ARC-L1 / 弧 L1
+RR_ARC_L2   ARC-L2 / 弧 L2
+RR_ARC_L3   ARC-L3 / 弧 L3
+RR_ARC_L4   ARC-L4 / 弧 L4
+RR_ARC_L5   ARC-L5 / 弧 L5
+
+RR_HUR_L1   HUR-L1 / 赫 L1
+RR_HUR_L2   HUR-L2 / 赫 L2
+RR_HUR_L3   HUR-L3 / 赫 L3
+RR_HUR_L4   HUR-L4 / 赫 L4
+RR_HUR_L5   HUR-L5 / 赫 L5
+
+RR_MIC_L1   MIC-L1 / 微 L1
+RR_MIC_L2   MIC-L2 / 微 L2
+RR_MIC_L3   MIC-L3 / 微 L3
+RR_MIC_L4   MIC-L4 / 微 L4
+RR_MIC_L5   MIC-L5 / 微 L5
+
+RR_CRU_L1   CRU-L1 / 十 L1
+RR_CRU_L4   CRU-L4 / 十 L4
+RR_CRU_L5   CRU-L5 / 十 L5
+
+PYRO system:
+RR_JP_PyroStanton   Stanton Gateway(pyro) / 斯坦顿星门(派罗)
+RR_JP_PyroNyx   Nyx Gateway(pyro) / 尼克斯星门(派罗)
+RR_P2_L4    Checkmate / 死局空间站
+RR_P3_LEO   Orbituary / 轨道讣闻站
+RR_P6_LEO   Ruin Station / 废墟空间站
+ab_pyro_final_set_dungeon-001	PYAM-SUPVISR-3-5 / 焰联-监管控制站-3-5
+
+# Common quantum-route aliases seen in logs.
+rs_ext_pyro-stanton_jp=斯坦顿星门(派罗)
+rs_ext_pyro-nyx_jp=尼克斯星门(派罗)
+rs_ext_pyro2_l4=死局空间站
+rs_ext_pyro3_leo=轨道讣闻站
+rs_ext_pyro6_leo=废墟空间站
+
+NYX system:
+Nyx_Kaboos    QV物流空间站
+Nyx_TSG_QVExtractionStation    TSG Location / 战术打击群地点
+Nyx_Levski    Levski / 列夫斯基
+AsteroidClusterBase_Nyx_Social_Keeger_001 / People's Service Station Alpha 人民服务空间站 阿尔法
+AsteroidClusterBase_Nyx_Social_Keeger_002 / People's Service Station Delta 人民服务空间站 德尔塔
+AsteroidClusterBase_Nyx_Social_Keeger_003 / People's Service Station Theta 人民服务空间站 西塔
+AsteroidClusterBase_Nyx_Social_Keeger_004 / People's Service Station Lambda 人民服务空间站 拉姆达
+RR_JP_NyxStanton   Stanton Gateway(nyx) / 斯坦顿星门(尼克斯)
+RR_JP_NyxCastra   Stanton Gateway(nyx) / 斯坦顿星门(尼克斯)
+RR_JP_NyxPyro   Pyro Gateway(nyx) / 派罗星门(尼克斯)
+
+Arrived - awaiting location confirmation=已抵达，等待地点确认

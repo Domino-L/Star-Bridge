@@ -18,7 +18,8 @@ public sealed record PlayerRow(
     string Role = "Member",
     MediaBrush? NameBrush = null,
     string RawShip = "Unknown",
-    string ShipConfidence = "None");
+    string ShipConfidence = "None",
+    string RawLocation = "Unknown");
 
 public sealed record SquadMemberStatusRow(
     string Avatar,

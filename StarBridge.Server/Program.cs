@@ -42,7 +42,7 @@ var playerOnlineTimeout = TimeSpan.FromSeconds(120);
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.7",
+    version = "0.3.9",
     mode = string.IsNullOrWhiteSpace(serverKey) ? "open-test" : "protected",
     accounts = users.Count,
     players = players.Count,
@@ -62,10 +62,10 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
-    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.7",
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.9",
     Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_PACKAGE_URL"),
-    Environment.GetEnvironmentVariable("STARBRIDGE_RELEASE_NOTES") ?? "当前服务器未配置新版安装包。",
+    NormalizeEnvironmentText(Environment.GetEnvironmentVariable("STARBRIDGE_RELEASE_NOTES")) ?? "当前服务器未配置新版安装包。",
     string.Equals(Environment.GetEnvironmentVariable("STARBRIDGE_UPDATE_REQUIRED"), "true", StringComparison.OrdinalIgnoreCase),
     DateTimeOffset.UtcNow)));
 
@@ -1036,6 +1036,162 @@ app.MapPost("/api/fleets/squads", async (HttpRequest request, FleetSquadsUpdateR
     return Results.Ok(updated);
 });
 
+app.MapPost("/api/fleets/squads/leave", async (HttpRequest request, FleetSquadLeaveRequest leave) =>
+{
+    if (string.IsNullOrWhiteSpace(leave.FleetCode) ||
+        string.IsNullOrWhiteSpace(leave.SquadName))
+    {
+        return Results.BadRequest(new { error = "Fleet code and squad name are required." });
+    }
+
+    var userName = GetAuthorizedUserName(request, users);
+    if (string.IsNullOrWhiteSpace(userName) || !users.TryGetValue(userName, out var account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var fleetCode = leave.FleetCode.Trim();
+    if (!fleets.TryGetValue(fleetCode, out var fleet))
+    {
+        return Results.NotFound(new { error = "Fleet not found." });
+    }
+
+    if (!IsFleetMember(fleet, account))
+    {
+        return Results.Unauthorized();
+    }
+
+    var squadName = leave.SquadName.Trim();
+    var squads = (fleet.Squads ?? [])
+        .Where(squad => !string.IsNullOrWhiteSpace(squad.Name))
+        .Select(NormalizeSquad)
+        .ToArray();
+    var squad = squads.FirstOrDefault(item =>
+        item.Name.Equals(squadName, StringComparison.OrdinalIgnoreCase));
+    if (squad is null)
+    {
+        return Results.NotFound(new { error = "Squad not found." });
+    }
+
+    var requesterAliases = BuildAccountAliases(account);
+    var fleetMembers = NormalizeFleetMembers(fleet.Members, fleet.MemberPermissions);
+    var squadMembers = fleetMembers
+        .Where(member => Normalize(member.SquadName, "Unassigned")
+            .Equals(squadName, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    var requesterMember = squadMembers.FirstOrDefault(member =>
+        IdentityContainsAny(member.GameName, requesterAliases) ||
+        IdentityContainsAny(member.Callsign, requesterAliases));
+
+    if (requesterMember is null)
+    {
+        return Results.BadRequest(new { error = "You are not in this squad." });
+    }
+
+    var now = DateTimeOffset.UtcNow;
+    var requesterDisplay = DisplayMember(requesterMember);
+    var isSquadCommander = IdentityContainsAny(squad.Commander, requesterAliases);
+    var remainingMembers = squadMembers
+        .Where(member => !IdentityContainsAny(member.GameName, requesterAliases) &&
+                         !IdentityContainsAny(member.Callsign, requesterAliases))
+        .ToArray();
+
+    var updatedMembers = fleetMembers
+        .Select(member =>
+            (IdentityContainsAny(member.GameName, requesterAliases) ||
+             IdentityContainsAny(member.Callsign, requesterAliases)) &&
+            Normalize(member.SquadName, "Unassigned").Equals(squadName, StringComparison.OrdinalIgnoreCase)
+                ? member with { SquadName = "Unassigned", LastUpdated = now }
+                : member)
+        .ToArray();
+
+    var updatedShips = NormalizeFleetShips(fleet.Ships)
+        .Select(ship =>
+            (IdentityContainsAny(ship.OwnerGameName, requesterAliases) ||
+             IdentityContainsAny(ship.OwnerCallsign, requesterAliases)) &&
+            Normalize(ship.OwnerSquad, "未加入小队").Equals(squadName, StringComparison.OrdinalIgnoreCase)
+                ? ship with { OwnerSquad = "未加入小队" }
+                : ship)
+        .ToArray();
+
+    foreach (var pair in players.ToArray())
+    {
+        var playerAliases = ExpandIdentityAliases(pair.Value.Name)
+            .Concat(ExpandIdentityAliases(pair.Value.Callsign))
+            .Concat(ExpandIdentityAliases(pair.Key))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (playerAliases.Overlaps(requesterAliases) &&
+            Normalize(pair.Value.Squad, "Unassigned").Equals(squadName, StringComparison.OrdinalIgnoreCase))
+        {
+            players[pair.Key] = pair.Value with
+            {
+                Squad = "Unassigned",
+                LastUpdated = now
+            };
+        }
+    }
+
+    var eventLog = fleet.EventLog;
+    var disbanded = false;
+    string? successorDisplay = null;
+    NetworkSquadSnapshot[] updatedSquads;
+
+    if (!isSquadCommander)
+    {
+        updatedSquads = squads;
+        eventLog = AddFleetLog(eventLog, "成员", "离开小队", $"{requesterDisplay} 离开 {squadName}");
+    }
+    else if (remainingMembers.Length == 0)
+    {
+        disbanded = true;
+        updatedSquads = squads
+            .Where(item => !item.Name.Equals(squadName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        eventLog = AddFleetLog(eventLog, "成员", "解散小队", $"{requesterDisplay} 离开并解散 {squadName}");
+    }
+    else
+    {
+        var successorAliases = ExpandIdentityAliases(leave.SuccessorGameName)
+            .Concat(ExpandIdentityAliases(leave.SuccessorCallsign))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var successor = successorAliases.Count == 0
+            ? PickRecommendedSquadSuccessor(remainingMembers)
+            : remainingMembers.FirstOrDefault(member =>
+                IdentityContainsAny(member.GameName, successorAliases) ||
+                IdentityContainsAny(member.Callsign, successorAliases));
+
+        if (successor is null)
+        {
+            return Results.BadRequest(new { error = "A valid successor is required before the squad commander can leave." });
+        }
+
+        successorDisplay = DisplayMember(successor);
+        updatedSquads = squads
+            .Select(item => item.Name.Equals(squadName, StringComparison.OrdinalIgnoreCase)
+                ? item with { Commander = successorDisplay }
+                : item)
+            .ToArray();
+        eventLog = AddFleetLog(
+            eventLog,
+            "成员",
+            "移交小队指挥权",
+            $"{requesterDisplay} 将 {squadName} 移交给 {successorDisplay} 并离开");
+    }
+
+    var updated = fleet with
+    {
+        Squads = updatedSquads,
+        Members = updatedMembers,
+        Ships = updatedShips,
+        EventLog = eventLog,
+        LastUpdated = now
+    };
+
+    fleets[fleetCode] = updated;
+    await storage.SaveAsync(players, fleets, users, verificationCodes);
+    return Results.Ok(new { left = true, squad = squadName, disbanded, successor = successorDisplay });
+});
+
 app.MapPost("/api/players", async (HttpRequest request, NetworkPlayerSnapshot snapshot) =>
 {
     if (!IsWriteAllowed(request, serverKey, users))
@@ -1496,6 +1652,37 @@ static string GetClientIp(HttpContext context)
 static string Normalize(string? value, string fallback)
 {
     return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+}
+
+static string? NormalizeEnvironmentText(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return value;
+    }
+
+    // Some Linux service env edits can turn UTF-8 release notes into Latin-1 mojibake.
+    // Repair only when the decoded text clearly contains more CJK characters.
+    if (!value.Contains('Ã') &&
+        !value.Contains('Â') &&
+        !value.Contains('ä') &&
+        !value.Contains('å') &&
+        !value.Contains('æ') &&
+        !value.Contains('è') &&
+        !value.Contains('ç'))
+    {
+        return value;
+    }
+
+    try
+    {
+        var decoded = Encoding.UTF8.GetString(Encoding.Latin1.GetBytes(value));
+        return decoded.Count(IsCjk) > value.Count(IsCjk) ? decoded : value;
+    }
+    catch
+    {
+        return value;
+    }
 }
 
 static string? NormalizeImageData(string? value, int maxBytes)
@@ -2647,6 +2834,15 @@ static string DisplayMember(NetworkFleetMemberSnapshot member)
         : $"{member.Callsign} ({member.GameName})";
 }
 
+static NetworkFleetMemberSnapshot? PickRecommendedSquadSuccessor(IEnumerable<NetworkFleetMemberSnapshot> members)
+{
+    return members
+        .OrderByDescending(member => member.Online)
+        .ThenByDescending(member => member.LastUpdated)
+        .ThenBy(member => Normalize(member.Callsign, member.GameName), StringComparer.OrdinalIgnoreCase)
+        .FirstOrDefault();
+}
+
 static DateTimeOffset Max(DateTimeOffset a, DateTimeOffset b)
 {
     return a >= b ? a : b;
@@ -3245,6 +3441,12 @@ public sealed record FleetSquadMemberMutationRequest(
     string SquadName,
     string TargetGameName,
     string? TargetCallsign = null);
+
+public sealed record FleetSquadLeaveRequest(
+    string FleetCode,
+    string SquadName,
+    string? SuccessorGameName = null,
+    string? SuccessorCallsign = null);
 
 public sealed record FleetCommanderTransferRequest(
     string FleetCode,

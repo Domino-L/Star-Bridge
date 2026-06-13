@@ -8,6 +8,12 @@ $innoScript = Join-Path $root "installer\StarBridge.iss"
 $nugetConfig = Join-Path $root "NuGet.Config"
 $publishDir = Join-Path $root "StarBridge.Desktop\bin\Release\net8.0-windows\win-x64\publish"
 $serverPublishDir = Join-Path $root "StarBridge.Server\bin\Release\net8.0\win-x64\publish"
+[xml]$projectXml = Get-Content -LiteralPath $project -Encoding UTF8
+$version = [string]($projectXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "Project version was not found in $project"
+}
+
 $isccCandidates = @(
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
@@ -77,11 +83,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $serverPublishDir "Star Bridge Relay
 }
 
 Write-Host "Building Inno Setup installer..."
-& $iscc $innoScript
+& $iscc "/DMyAppVersion=$version" $innoScript
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup failed with exit code $LASTEXITCODE."
 }
 
 Write-Host ""
 Write-Host "Installer created:"
-Write-Host (Join-Path $root "dist\StarBridge-0.3.7-win-x64-setup.exe")
+Write-Host (Join-Path $root "dist\StarBridge-$version-win-x64-setup.exe")

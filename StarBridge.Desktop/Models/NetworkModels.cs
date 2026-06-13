@@ -132,6 +132,12 @@ public sealed record FleetSquadMemberMutationRequest(
     string TargetGameName,
     string? TargetCallsign = null);
 
+public sealed record FleetSquadLeaveRequest(
+    string FleetCode,
+    string SquadName,
+    string? SuccessorGameName = null,
+    string? SuccessorCallsign = null);
+
 public sealed record NetworkActionPlanSnapshot(
     string Id,
     string Title,

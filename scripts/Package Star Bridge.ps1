@@ -5,9 +5,15 @@ $root = Split-Path -Parent $scriptsDir
 $project = Join-Path $root "StarBridge.Desktop\StarBridge.Desktop.csproj"
 $publishDir = Join-Path $root "StarBridge.Desktop\bin\Release\net8.0-windows\win-x64\publish"
 $distDir = Join-Path $root "dist"
-$packageDir = Join-Path $distDir "StarBridge-0.3.7"
-$zipPath = Join-Path $distDir "StarBridge-0.3.7-win-x64.zip"
-$updateZipPath = Join-Path $distDir "StarBridge-0.3.7-win-x64-update.zip"
+[xml]$projectXml = Get-Content -LiteralPath $project -Encoding UTF8
+$version = [string]($projectXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "Project version was not found in $project"
+}
+
+$packageDir = Join-Path $distDir "StarBridge-$version"
+$zipPath = Join-Path $distDir "StarBridge-$version-win-x64.zip"
+$updateZipPath = Join-Path $distDir "StarBridge-$version-win-x64-update.zip"
 
 $env:DOTNET_CLI_HOME = Join-Path $root ".dotnet-home"
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
@@ -31,7 +37,7 @@ if (Test-Path -LiteralPath $packageConfigDir) {
 }
 
 @"
-Star Bridge / 星海舰桥 0.3.7
+Star Bridge / 星海舰桥 $version
 
 How to run:
 1. Extract this zip.

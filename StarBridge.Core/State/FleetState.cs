@@ -58,12 +58,28 @@ public sealed class FleetState
                 break;
             case FleetEventType.PlayerLocationChanged:
                 player.Online = true;
+                var location = fleetEvent.Location;
+                var locationScore = fleetEvent.LocationEvidenceScore;
+                var locationEvidence = fleetEvent.LocationEvidence ?? "Location signal";
+                var isQuantumArrival = IsQuantumArrivalPlaceholder(location);
+                if (isQuantumArrival && HasKnownNavigationTarget(player.NavigationTarget))
+                {
+                    location = player.NavigationTarget;
+                    locationScore = Math.Max(locationScore, 85);
+                    locationEvidence = "Quantum arrival target";
+                }
+
                 AddLocationEvidence(
                     player,
-                    fleetEvent.Location,
-                    fleetEvent.LocationEvidenceScore,
-                    fleetEvent.LocationEvidence ?? "Location signal",
+                    location,
+                    locationScore,
+                    locationEvidence,
                     timestamp);
+                if (isQuantumArrival)
+                {
+                    player.NavigationTarget = "None";
+                }
+
                 if (fleetEvent.ClearsShipState)
                 {
                     ClearShipInference(player, "Location inventory context");
@@ -71,13 +87,19 @@ public sealed class FleetState
                 break;
             case FleetEventType.PlayerNavigationTargetChanged:
                 player.Online = true;
-                AddLocationEvidence(
-                    player,
-                    fleetEvent.Location,
-                    fleetEvent.LocationEvidenceScore,
-                    fleetEvent.LocationEvidence ?? "Quantum route start location",
-                    timestamp);
                 player.NavigationTarget = fleetEvent.NavigationTarget ?? player.NavigationTarget;
+                if (!string.IsNullOrWhiteSpace(fleetEvent.Location) &&
+                    (player.Location.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ||
+                     player.Location.Equals(fleetEvent.Location, StringComparison.OrdinalIgnoreCase)))
+                {
+                    AddLocationEvidence(
+                        player,
+                        fleetEvent.Location,
+                        fleetEvent.LocationEvidenceScore,
+                        fleetEvent.LocationEvidence ?? "Quantum route start location",
+                        timestamp);
+                }
+
                 AddShipEvidence(player, fleetEvent.Ship, fleetEvent.ShipInstanceId, 45, "Quantum route context", timestamp);
                 break;
             case FleetEventType.CombatStateChanged:
@@ -137,6 +159,18 @@ public sealed class FleetState
         player = new FleetPlayer { Name = name };
         _players.Add(name, player);
         return player;
+    }
+
+    private static bool IsQuantumArrivalPlaceholder(string? location)
+    {
+        return location?.Equals("Arrived - awaiting location confirmation", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool HasKnownNavigationTarget(string? navigationTarget)
+    {
+        return !string.IsNullOrWhiteSpace(navigationTarget) &&
+               !navigationTarget.Equals("None", StringComparison.OrdinalIgnoreCase) &&
+               !navigationTarget.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AddShipEvidence(

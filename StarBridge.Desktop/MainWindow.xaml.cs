@@ -6,6 +6,7 @@ using StarBridge.Core.State;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -29,6 +30,8 @@ using Color = System.Windows.Media.Color;
 using Cursors = System.Windows.Input.Cursors;
 using HorizontalAlignment = System.Windows.HorizontalAlignment;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using WinForms = System.Windows.Forms;
+using DrawingColor = System.Drawing.Color;
 
 namespace StarBridge.Desktop;
 
@@ -229,7 +232,7 @@ public partial class MainWindow : Window
                 StartWatching(_logPath);
             }
 
-            _ = InitializeLoginAndNetworkAsync();
+            _ = RunStartupFlowAsync();
             _ = _appUpdateService.CheckForInstallerUpdateAsync(silent: true, currentVersion: GetAppVersion());
         };
         _gameProcessTimer.Tick += (_, _) => UpdateLocalOnlineStateFromGameProcess();
@@ -240,7 +243,7 @@ public partial class MainWindow : Window
             _profileSyncDebounceTimer.Stop();
             await FlushProfileSyncDebouncedAsync();
         };
-        AppendOutput("Designer WPF shell ready. Select Game.log to start.");
+        AppendOutput("请选择 Star Citizen 的 Game.log 开始读取。");
         RefreshHeaderStatusBar();
     }
 
@@ -268,12 +271,23 @@ public partial class MainWindow : Window
     {
         MainTabs.SelectedItem = MySquadTab;
         SetActiveNav(MySquadNavButton);
+        if (_hasFleet)
+        {
+            ShowOneTimeGuideHint(
+                "squad-page",
+                "小队引导",
+                "这里可以创建或加入小队。加入小队后，Overlay 会优先展示同小队成员，任务分配也会按小队组织。");
+        }
     }
 
     private void OverlayNav_Click(object sender, RoutedEventArgs e)
     {
         MainTabs.SelectedItem = OverlayEditTab;
         SetActiveNav(OverlayNavButton);
+        ShowOneTimeGuideHint(
+            "overlay-page",
+            "Overlay 引导",
+            "这里可以拖拽布局、切换船厂风格、设置透明度、准星和显示模块。保存布局后，游戏内 Overlay 会使用这套配置。");
     }
 
     private void PersonalNav_Click(object sender, RoutedEventArgs e)
@@ -286,12 +300,14 @@ public partial class MainWindow : Window
     {
         MainTabs.SelectedItem = SupportTab;
         SetActiveNav(null);
+        RefreshOnboardingSupportPanel();
     }
 
     private void FeedbackButton_Click(object sender, RoutedEventArgs e)
     {
         MainTabs.SelectedItem = SupportTab;
         SetActiveNav(null);
+        RefreshOnboardingSupportPanel();
     }
 
     private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e)
@@ -320,7 +336,7 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 FeedbackStatusText.Text = response.StatusCode == HttpStatusCode.NotFound
-                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.7 服务器后重试。"
+                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.8 服务器后重试。"
                     : $"发送失败：{await ReadResponseErrorAsync(response)}";
                 return;
             }
@@ -482,6 +498,10 @@ public partial class MainWindow : Window
         SaveCurrentConfig();
         await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
         await PushFleetDirectoryAsync(silent: true);
+        ShowOneTimeGuideHint(
+            "fleet-created-commander",
+            "舰队指挥官引导",
+            "舰队已经创建。下一步建议前往“管理舰队”设置公告、行动计划、任务、成员权限和舰船数据库，再邀请成员加入。");
     }
 
     private void CreateFleetField_TextChanged(object sender, TextChangedEventArgs e)
@@ -665,7 +685,7 @@ public partial class MainWindow : Window
         _logPath = logPath;
         LogPathBox.Text = logPath;
         SaveCurrentConfig();
-        AppendOutput($"Watching: {logPath}");
+        AppendOutput($"正在读取日志：{Path.GetFileName(logPath)}");
 
         foreach (var line in ReadSharedLines(logPath))
         {
@@ -692,7 +712,7 @@ public partial class MainWindow : Window
                 RefreshHeaderStatusBar();
                 if (output)
                 {
-                    AppendOutput($"GAME SERVER | {_gameServerRegion} | {_gameServerShard}");
+                    AppendOutput($"游戏服务器：{_gameServerRegion}");
                 }
             }
 
@@ -728,10 +748,15 @@ public partial class MainWindow : Window
 
         if (output)
         {
-            AppendOutput($"{fleetEvent.Type} | {fleetEvent.Player} | {fleetEvent.Ship ?? ""} | {fleetEvent.Location ?? fleetEvent.NavigationTarget ?? ""}");
+            var userMessage = FormatLogEventForUser(fleetEvent);
+            if (!string.IsNullOrWhiteSpace(userMessage))
+            {
+                AppendOutput(userMessage);
+            }
+
             if (gameServerChanged)
             {
-                AppendOutput($"GAME SERVER | {_gameServerRegion} | {_gameServerShard}");
+                AppendOutput($"游戏服务器：{_gameServerRegion}");
             }
         }
     }
@@ -762,16 +787,18 @@ public partial class MainWindow : Window
             var online = player.Online && (!isLocalPlayer || _isGameProcessRunning);
             var rawShip = online ? ShipNameLocalizer.NormalizeCode(player.Ship) : "Unknown";
             var shipConfidence = player.ShipConfidence;
-            var displayLocation = online ? FormatLocation(player.Location, player.NavigationTarget) : "Unknown";
+            var rawLocation = online ? FormatRawLocation(player.Location, player.NavigationTarget) : "Unknown";
+            var displayLocation = online ? FormatLocation(rawLocation) : "Unknown";
             if (!isLocalPlayer && networkSnapshot is not null)
             {
                 rawShip = online ? ShipNameLocalizer.NormalizeCode(networkSnapshot.Ship) : "Unknown";
                 shipConfidence = string.IsNullOrWhiteSpace(networkSnapshot.ShipConfidence)
                     ? "Low"
                     : networkSnapshot.ShipConfidence!;
-                displayLocation = online && !string.IsNullOrWhiteSpace(networkSnapshot.Location)
-                    ? FormatLocation(networkSnapshot.Location!, "")
-                    : displayLocation;
+                rawLocation = online && !string.IsNullOrWhiteSpace(networkSnapshot.Location)
+                    ? FormatRawLocation(networkSnapshot.Location!, "")
+                    : rawLocation;
+                displayLocation = online ? FormatLocation(rawLocation) : "Unknown";
             }
 
             var displayShip = ShipNameLocalizer.DisplayName(rawShip, _language);
@@ -783,7 +810,7 @@ public partial class MainWindow : Window
                 player.Name,
                 online ? "Online" : "Offline",
                 displayShip,
-                online ? FormatShipInference(displayShip, shipConfidence) : "Ship: Unknown",
+                online ? FormatShipInference(displayShip, shipConfidence) : "飞船：未知",
                 displayLocation,
                 playerCallsign,
                 IsLocalPlayer(player.Name) ? _avatarPath : networkSnapshot?.AvatarImageData,
@@ -792,7 +819,8 @@ public partial class MainWindow : Window
                 GetFleetRole(player.Name, playerCallsign),
                 GetFleetNameBrush(player.Name),
                 rawShip,
-                shipConfidence));
+                shipConfidence,
+                rawLocation));
         }
 
         TotalMembersText.Text = _players.Count.ToString();
@@ -810,10 +838,15 @@ public partial class MainWindow : Window
             player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
         if (local is not null)
         {
+            var shipText = FormatUnknownForUser(local.Ship);
+            var locationText = FormatUnknownForUser(local.Location);
+            var statusText = local.Status.Equals("Online", StringComparison.OrdinalIgnoreCase)
+                ? "在线"
+                : "离线";
             ShipStateText.Text =
-                $"Current Ship: {local.Ship}{Environment.NewLine}" +
-                $"Location: {local.Location}{Environment.NewLine}" +
-                $"Status: {local.Status}";
+                $"飞船：{shipText}{Environment.NewLine}" +
+                $"地点：{locationText}{Environment.NewLine}" +
+                $"状态：{statusText}";
         }
 
         RefreshHeaderStatusBar();
@@ -824,10 +857,12 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(ship) ||
             ship.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
         {
-            return "Ship: Unknown";
+            return "飞船：未知";
         }
 
-        return $"Ship: {ship} [{confidence}]";
+        return confidence.Equals("Low", StringComparison.OrdinalIgnoreCase)
+            ? $"可能在：{ship}"
+            : $"飞船：{ship}";
     }
 
     private string GetFleetRole(string playerName, string? callsign)
@@ -1020,7 +1055,7 @@ public partial class MainWindow : Window
         return System.Windows.Application.Current.TryFindResource(key) as System.Windows.Media.Brush ?? fallback;
     }
 
-    private static string FormatLocation(string location, string navigationTarget)
+    private static string FormatRawLocation(string location, string navigationTarget)
     {
         if (string.IsNullOrWhiteSpace(location))
         {
@@ -1031,6 +1066,122 @@ public partial class MainWindow : Window
         return separator > 0
             ? location[..separator].Trim()
             : location.Trim();
+    }
+
+    private string FormatLocation(string location)
+    {
+        return LocationNameLocalizer.DisplayName(location, _language);
+    }
+
+    private string FormatLogEventForUser(FleetEvent fleetEvent)
+    {
+        var player = FormatPlayerForUser(fleetEvent.Player);
+        return fleetEvent.Type switch
+        {
+            FleetEventType.PlayerOnline => $"已识别玩家：{player}",
+            FleetEventType.PlayerOffline => $"{player} 已离线",
+            FleetEventType.PlayerEnteredShip => $"{player} 进入飞船：{FormatShipForUser(fleetEvent.Ship)}",
+            FleetEventType.PlayerExitedShip => $"{player} 离开飞船：{FormatShipForUser(fleetEvent.Ship)}",
+            FleetEventType.PlayerControllingShip => $"{player} 进入驾驶位：{FormatShipForUser(fleetEvent.Ship)}",
+            FleetEventType.PlayerStoppedDrivingShip => $"{player} 离开驾驶位：{FormatShipForUser(fleetEvent.Ship)}",
+            FleetEventType.PlayerLocationChanged => FormatLocationChangeForUser(player, fleetEvent),
+            FleetEventType.PlayerNavigationTargetChanged => FormatNavigationTargetForUser(player, fleetEvent),
+            FleetEventType.CombatStateChanged => $"{player} 状态：{FormatCombatStateForUser(fleetEvent.CombatState)}",
+            FleetEventType.NetworkStateChanged => null,
+            FleetEventType.PlayerShipControlSignal => null,
+            _ => null
+        } ?? string.Empty;
+    }
+
+    private string FormatLocationChangeForUser(string player, FleetEvent fleetEvent)
+    {
+        var location = fleetEvent.Location;
+        if (IsQuantumArrivalPlaceholder(location))
+        {
+            location = _fleetState.Players
+                .FirstOrDefault(candidate => candidate.Name.Equals(fleetEvent.Player, StringComparison.OrdinalIgnoreCase))
+                ?.Location;
+            return $"{player} 抵达：{FormatLocationForUser(location)}";
+        }
+
+        return $"{player} 位置更新：{FormatLocationForUser(location)}";
+    }
+
+    private string FormatNavigationTargetForUser(string player, FleetEvent fleetEvent)
+    {
+        var location = FormatLocationForUser(fleetEvent.Location);
+        var target = FormatLocationForUser(fleetEvent.NavigationTarget);
+        var hasLocation = !location.Equals("未知", StringComparison.OrdinalIgnoreCase);
+        var hasTarget = !target.Equals("未知", StringComparison.OrdinalIgnoreCase);
+
+        if (hasLocation && hasTarget)
+        {
+            return $"{player} 设置导航：{location} → {target}";
+        }
+
+        if (hasTarget)
+        {
+            return $"{player} 设置导航目标：{target}";
+        }
+
+        if (hasLocation)
+        {
+            return $"{player} 当前位置：{location}";
+        }
+
+        return string.Empty;
+    }
+
+    private string FormatShipForUser(string? ship)
+    {
+        var display = ShipNameLocalizer.DisplayName(ShipNameLocalizer.NormalizeCode(ship), _language);
+        return FormatUnknownForUser(display);
+    }
+
+    private string FormatLocationForUser(string? location)
+    {
+        if (string.IsNullOrWhiteSpace(location) ||
+            location.Equals("None", StringComparison.OrdinalIgnoreCase) ||
+            location.Equals("Unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return "未知";
+        }
+
+        var rawLocation = FormatRawLocation(location, "");
+        return FormatUnknownForUser(FormatLocation(rawLocation));
+    }
+
+    private static string FormatPlayerForUser(string? player)
+    {
+        return string.IsNullOrWhiteSpace(player) ||
+               player.Equals("LocalPlayer", StringComparison.OrdinalIgnoreCase)
+            ? "本地玩家"
+            : player.Trim();
+    }
+
+    private static string FormatUnknownForUser(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ||
+               value.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ||
+               value.Equals("None", StringComparison.OrdinalIgnoreCase)
+            ? "未知"
+            : value.Trim();
+    }
+
+    private static string FormatCombatStateForUser(string? combatState)
+    {
+        return combatState switch
+        {
+            null or "" => "待命",
+            "Combat" => "战斗中",
+            "Idle" => "待命",
+            _ => combatState
+        };
+    }
+
+    private static bool IsQuantumArrivalPlaceholder(string? location)
+    {
+        return location?.Equals("Arrived - awaiting location confirmation", StringComparison.OrdinalIgnoreCase) == true;
     }
 
     private bool TryUpdateGameServerFromLine(string line)
@@ -1132,6 +1283,42 @@ public partial class MainWindow : Window
         HeaderGameServerRegionText.ToolTip = string.IsNullOrWhiteSpace(_gameServerShard)
             ? "从 Game.log 的 Join PU 信息识别游戏服务器区域"
             : $"服务器区域：{_gameServerRegion}";
+        RefreshOnboardingSupportPanel();
+    }
+
+    private void RefreshOnboardingSupportPanel()
+    {
+        if (GuideProgressPanel is null)
+        {
+            return;
+        }
+
+        if (OnboardingState.IsCompleted())
+        {
+            GuideProgressPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        GuideProgressPanel.Visibility = Visibility.Visible;
+
+        var hasLog = !string.IsNullOrWhiteSpace(_logPath) && File.Exists(_logPath);
+        GuideAccountStatusText.Text = IsLoggedIn
+            ? $"已登录：{(_callsign ?? _accountName ?? "星海舰桥账号")}"
+            : "未登录";
+        GuideLogStatusText.Text = hasLog
+            ? $"已选择：{Path.GetFileName(_logPath)}"
+            : "未选择 Game.log";
+        GuideFleetStatusText.Text = _hasFleet
+            ? $"已加入：{_fleetName}"
+            : "尚未加入舰队";
+        GuideSquadStatusText.Text = _joinedSquad is not null
+            ? $"已加入：{_joinedSquad.Name}"
+            : _hasFleet
+                ? "尚未加入小队"
+                : "需要先加入舰队";
+        GuideOverlayStatusText.Text = _overlayLayout.Count > 0
+            ? "已保存 Overlay 布局"
+            : "尚未保存 Overlay 布局";
     }
 
     private string GetHeaderConnectionStatus()
@@ -1450,6 +1637,176 @@ public partial class MainWindow : Window
         {
             SyncOverlayRetryButton.IsEnabled = true;
         }
+    }
+
+    private async Task RunStartupFlowAsync()
+    {
+        if (OnboardingState.IsCompleted())
+        {
+            await InitializeLoginAndNetworkAsync();
+            return;
+        }
+
+        var guide = new OnboardingWindow(
+            IsLoggedIn,
+            !string.IsNullOrWhiteSpace(_logPath) && File.Exists(_logPath),
+            _hasFleet,
+            _joinedSquad is not null,
+            _overlayLayout.Count > 0)
+        {
+            Owner = this
+        };
+
+        var result = guide.ShowDialog();
+        if (guide.ShouldMarkCompleted)
+        {
+            OnboardingState.MarkCompleted();
+            RefreshOnboardingSupportPanel();
+        }
+
+        if (result == true)
+        {
+            await HandleOnboardingActionAsync(guide.NextAction);
+            return;
+        }
+
+        if (IsLoggedIn)
+        {
+            await AutoConnectNetworkAsync();
+        }
+
+        RefreshOnboardingSupportPanel();
+    }
+
+    private async Task HandleOnboardingActionAsync(OnboardingNextAction action)
+    {
+        switch (action)
+        {
+            case OnboardingNextAction.Login:
+                await ShowLoginDialogAsync();
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                }
+                break;
+            case OnboardingNextAction.SelectLog:
+                SelectLog_Click(this, new RoutedEventArgs());
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                }
+                break;
+            case OnboardingNextAction.FindFleet:
+                MainTabs.SelectedItem = FindFleetTab;
+                SetActiveNav(FindFleetNavButton);
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                    await PullNetworkFleetsAsync(silent: true);
+                }
+                break;
+            case OnboardingNextAction.CreateFleet:
+                if (!IsLoggedIn)
+                {
+                    await ShowLoginDialogAsync();
+                }
+
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                    FleetCreateButton_Click(this, new RoutedEventArgs());
+                }
+                break;
+            case OnboardingNextAction.MySquad:
+                MainTabs.SelectedItem = MySquadTab;
+                SetActiveNav(MySquadNavButton);
+                if (_hasFleet)
+                {
+                    ShowOneTimeGuideHint(
+                        "squad-page",
+                        "小队引导",
+                        "这里可以创建或加入小队。加入小队后，Overlay 会优先展示同小队成员，任务分配也会按小队组织。");
+                }
+
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                }
+                break;
+            case OnboardingNextAction.Overlay:
+                MainTabs.SelectedItem = OverlayEditTab;
+                SetActiveNav(OverlayNavButton);
+                RenderOverlayEditor();
+                ShowOneTimeGuideHint(
+                    "overlay-page",
+                    "Overlay 引导",
+                    "这里可以拖拽布局、切换船厂风格、设置透明度、准星和显示模块。保存布局后，游戏内 Overlay 会使用这套配置。");
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                }
+                break;
+            default:
+                if (IsLoggedIn)
+                {
+                    await AutoConnectNetworkAsync();
+                }
+                break;
+        }
+
+        RefreshOnboardingSupportPanel();
+    }
+
+    private void ShowOneTimeGuideHint(string hintId, string title, string message)
+    {
+        if (OnboardingState.IsHintCompleted(hintId))
+        {
+            return;
+        }
+
+        var dialog = new GuideHintWindow(title, message)
+        {
+            Owner = this
+        };
+        dialog.ShowDialog();
+        OnboardingState.MarkHintCompleted(hintId);
+        RefreshOnboardingSupportPanel();
+    }
+
+    private void GuideCompleteButton_Click(object sender, RoutedEventArgs e)
+    {
+        OnboardingState.MarkCompleted();
+        RefreshOnboardingSupportPanel();
+    }
+
+    private async void GuideLoginButton_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleOnboardingActionAsync(OnboardingNextAction.Login);
+    }
+
+    private async void GuideSelectLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleOnboardingActionAsync(OnboardingNextAction.SelectLog);
+    }
+
+    private async void GuideFindFleetButton_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleOnboardingActionAsync(OnboardingNextAction.FindFleet);
+    }
+
+    private async void GuideCreateFleetButton_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleOnboardingActionAsync(OnboardingNextAction.CreateFleet);
+    }
+
+    private async void GuideSquadButton_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleOnboardingActionAsync(OnboardingNextAction.MySquad);
+    }
+
+    private async void GuideOverlayButton_Click(object sender, RoutedEventArgs e)
+    {
+        await HandleOnboardingActionAsync(OnboardingNextAction.Overlay);
     }
 
     private async Task InitializeLoginAndNetworkAsync()
@@ -1837,7 +2194,7 @@ public partial class MainWindow : Window
             local?.Status.Equals("Online", StringComparison.OrdinalIgnoreCase) == true,
             local?.RawShip ?? "Unknown",
             local?.ShipConfidence ?? "None",
-            local?.Location ?? "Unknown",
+            local?.RawLocation ?? "Unknown",
             "Low",
             DateTimeOffset.UtcNow,
             BuildAvatarImageData(),
@@ -2856,7 +3213,7 @@ public partial class MainWindow : Window
                 if (!silent)
                 {
                     var error = response.StatusCode == HttpStatusCode.NotFound
-                        ? "server notify endpoint is not available; deploy StarBridge 0.3.7 relay"
+                        ? "server notify endpoint is not available; deploy StarBridge 0.3.8 relay"
                         : await ReadResponseErrorAsync(response);
                     AppendOutput($"Fleet email notification failed: {error}");
                 }
@@ -3078,7 +3435,7 @@ public partial class MainWindow : Window
                 _joinedSquad?.Name ?? local?.SquadName ?? "Unassigned",
                 local?.Status.Equals("Online", StringComparison.OrdinalIgnoreCase) == true,
                 string.IsNullOrWhiteSpace(local?.RawShip) ? local?.Ship ?? "Unknown" : local.RawShip,
-                string.IsNullOrWhiteSpace(local?.Location) ? "Unknown" : local.Location,
+                string.IsNullOrWhiteSpace(local?.RawLocation) ? "Unknown" : local.RawLocation,
                 DateTimeOffset.UtcNow,
                 BuildAvatarImageData())
         ];
@@ -3484,6 +3841,10 @@ public partial class MainWindow : Window
             await PullNetworkSnapshotsAsync(silent: true);
             NetworkStatusText.Text = $"已加入舰队：{card.Name}";
             NavigateToMyFleet();
+            ShowOneTimeGuideHint(
+                "fleet-joined-member",
+                "舰队成员引导",
+                "你已经加入舰队。下一步可以进入“我的小队”选择或创建小队，并在“个人”页面完善呼号、头像和舰船数据库。");
         }
         catch (Exception ex)
         {
@@ -4551,6 +4912,15 @@ public partial class MainWindow : Window
             ShowMissionPanelCheck is null ||
             ShowMembersPanelCheck is null ||
             AutoThemeByShipCheck is null ||
+            ShowCrosshairCheck is null ||
+            SimpleCrosshairRadio is null ||
+            TechCrosshairRadio is null ||
+            CrosshairThemeColorCheck is null ||
+            CrosshairSizeSlider is null ||
+            CrosshairThicknessSlider is null ||
+            CrosshairOpacitySlider is null ||
+            CrosshairColorBox is null ||
+            CrosshairColorPickerButton is null ||
             OverlayThemeBox is null)
         {
             return;
@@ -4561,6 +4931,9 @@ public partial class MainWindow : Window
             : ShowGameNameOnlyRadio.IsChecked == true
                 ? OverlayMemberNameMode.GameNameOnly
                 : OverlayMemberNameMode.CallsignAndGameName;
+        var crosshairMode = TechCrosshairRadio.IsChecked == true
+            ? OverlayCrosshairMode.Tech
+            : OverlayCrosshairMode.Simple;
 
         _overlaySettings = new OverlayDisplaySettings(
             HideMissionWhenIdleCheck.IsChecked == true,
@@ -4584,10 +4957,89 @@ public partial class MainWindow : Window
                 7 => OverlayVisualTheme.Rsi,
                 _ => OverlayVisualTheme.Default
             },
-            AutoThemeByShipCheck.IsChecked == true);
+            AutoThemeByShipCheck.IsChecked == true,
+            ShowCrosshairCheck.IsChecked == true,
+            crosshairMode,
+            CrosshairThemeColorCheck.IsChecked == true,
+            OverlayDisplaySettings.NormalizeCrosshairColor(CrosshairColorBox.Text),
+            Math.Clamp(CrosshairSizeSlider.Value, 48, 240),
+            Math.Clamp(CrosshairThicknessSlider.Value, 1, 8),
+            Math.Clamp(CrosshairOpacitySlider.Value / 100.0, 0.2, 1.0));
 
+        RefreshCrosshairSettingLabels();
         SaveCurrentConfig();
+        RenderOverlayEditor();
         RefreshOverlayWindow();
+    }
+
+    private void CrosshairSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        RefreshCrosshairSettingLabels();
+
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        OverlaySetting_Changed(sender, new RoutedEventArgs());
+    }
+
+    private void CrosshairColorBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        RefreshCrosshairSettingLabels();
+
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        OverlaySetting_Changed(sender, new RoutedEventArgs());
+    }
+
+    private void CrosshairColorPreview_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        CrosshairColorPickerButton_Click(sender, e);
+    }
+
+    private void CrosshairColorPickerButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (CrosshairColorBox is null ||
+            CrosshairThemeColorCheck is null)
+        {
+            return;
+        }
+
+        var currentColor = TryParseHexColor(CrosshairColorBox.Text, out var parsedColor)
+            ? parsedColor
+            : Color.FromRgb(235, 247, 255);
+
+        using var dialog = new WinForms.ColorDialog
+        {
+            AnyColor = true,
+            FullOpen = true,
+            SolidColorOnly = false,
+            Color = DrawingColor.FromArgb(currentColor.R, currentColor.G, currentColor.B)
+        };
+
+        var owner = new DialogOwner(new WindowInteropHelper(this).Handle);
+        if (dialog.ShowDialog(owner) != WinForms.DialogResult.OK)
+        {
+            return;
+        }
+
+        var selectedColor = $"#{dialog.Color.R:X2}{dialog.Color.G:X2}{dialog.Color.B:X2}";
+        var wasLoading = _isLoadingSettings;
+        _isLoadingSettings = true;
+        CrosshairThemeColorCheck.IsChecked = false;
+        CrosshairColorBox.Text = selectedColor;
+        _isLoadingSettings = wasLoading;
+
+        RefreshCrosshairSettingLabels();
+
+        if (!wasLoading)
+        {
+            OverlaySetting_Changed(sender, new RoutedEventArgs());
+        }
     }
 
     private void OverlayOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -5301,6 +5753,144 @@ public partial class MainWindow : Window
         RenderMySquad();
     }
 
+    private sealed class SquadSuccessorOption
+    {
+        public SquadSuccessorOption(PlayerRow player)
+        {
+            Player = player;
+            DisplayName = FormatCommanderName(player.Callsign, player.Name);
+            var status = player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase) ? "在线" : "离线";
+            DisplayText = $"{DisplayName} / {status}";
+        }
+
+        public PlayerRow Player { get; }
+        public string DisplayName { get; }
+        public string DisplayText { get; }
+    }
+
+    private bool IsCurrentUserSquadCommander(SquadRow squad)
+    {
+        if (string.IsNullOrWhiteSpace(_localPlayer))
+        {
+            return false;
+        }
+
+        var commanderGameName = GetGameNameFromDisplayName(squad.Commander);
+        var commanderCallsign = GetCallsignFromDisplayName(squad.Commander);
+        return commanderGameName.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase) ||
+               (!string.IsNullOrWhiteSpace(_callsign) &&
+                commanderCallsign.Equals(_callsign, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static PlayerRow? PickRecommendedSquadSuccessor(IEnumerable<PlayerRow> members)
+    {
+        return members
+            .OrderByDescending(member => member.Status.Equals("Online", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(member => member.Callsign ?? member.Name, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    private SquadSuccessorOption? PromptSquadSuccessor(
+        IReadOnlyList<PlayerRow> candidates,
+        PlayerRow recommended,
+        string squadName)
+    {
+        var options = candidates
+            .OrderByDescending(member => member.Name.Equals(recommended.Name, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(member => member.Status.Equals("Online", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(member => member.Callsign ?? member.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(member => new SquadSuccessorOption(member))
+            .ToList();
+        var selected = options.FirstOrDefault(option =>
+                           option.Player.Name.Equals(recommended.Name, StringComparison.OrdinalIgnoreCase)) ??
+                       options.FirstOrDefault();
+        if (selected is null)
+        {
+            return null;
+        }
+
+        var dialog = new Window
+        {
+            Owner = this,
+            Title = "移交小队指挥权",
+            Width = 480,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Background = FindBrush("PanelBackgroundBrush", new SolidColorBrush(Color.FromRgb(3, 12, 20))),
+            Foreground = Brushes.White
+        };
+
+        var comboBox = new System.Windows.Controls.ComboBox
+        {
+            ItemsSource = options,
+            SelectedItem = selected,
+            DisplayMemberPath = nameof(SquadSuccessorOption.DisplayText),
+            Margin = new Thickness(0, 12, 0, 0),
+            MinHeight = 34
+        };
+
+        var confirmButton = new System.Windows.Controls.Button
+        {
+            Content = "确认移交并离开",
+            Width = 150,
+            MinHeight = 34,
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        var cancelButton = new System.Windows.Controls.Button
+        {
+            Content = "取消",
+            Width = 100,
+            MinHeight = 34
+        };
+
+        SquadSuccessorOption? result = null;
+        confirmButton.Click += (_, _) =>
+        {
+            result = comboBox.SelectedItem as SquadSuccessorOption;
+            dialog.DialogResult = result is not null;
+            dialog.Close();
+        };
+        cancelButton.Click += (_, _) =>
+        {
+            dialog.DialogResult = false;
+            dialog.Close();
+        };
+
+        var buttonRow = new StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 18, 0, 0)
+        };
+        buttonRow.Children.Add(cancelButton);
+        buttonRow.Children.Add(confirmButton);
+
+        var panel = new StackPanel
+        {
+            Margin = new Thickness(24)
+        };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "离开前需要移交小队指挥权",
+            FontSize = 20,
+            FontWeight = FontWeights.Bold,
+            Foreground = FindBrush("AccentBrush", Brushes.DeepSkyBlue)
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"小队 {squadName} 仍有其他成员。请选择新的小队指挥官，默认已选择推荐接任者。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 10, 0, 0),
+            Foreground = FindBrush("MutedTextBrush", Brushes.LightSteelBlue)
+        });
+        panel.Children.Add(comboBox);
+        panel.Children.Add(buttonRow);
+        dialog.Content = panel;
+
+        return dialog.ShowDialog() == true ? result : null;
+    }
+
     private async void LeaveSquad_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("离开小队需要先登录星海舰桥账号。"))
@@ -5315,21 +5905,117 @@ public partial class MainWindow : Window
             return;
         }
 
-        var squadName = _joinedSquad.Name;
-        if (System.Windows.MessageBox.Show(
-                this,
-                $"确认离开小队 {squadName}？",
-                "离开小队",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        var squad = _joinedSquad;
+        var squadName = squad.Name;
+        var isCommander = IsCurrentUserSquadCommander(squad);
+        var squadMembers = _players
+            .Where(player => player.SquadName.Equals(squadName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var remainingMembers = squadMembers
+            .Where(player => !IsLocalPlayerIdentity(player.Name, player.Callsign))
+            .ToList();
+        PlayerRow? successor = null;
+
+        if (!isCommander)
         {
+            if (System.Windows.MessageBox.Show(
+                    this,
+                    $"确认离开小队 {squadName}？",
+                    "离开小队",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+        else if (remainingMembers.Count == 0)
+        {
+            if (System.Windows.MessageBox.Show(
+                    this,
+                    $"离开后小队 {squadName} 将解散。确认解散并离开？",
+                    "解散小队",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+        else
+        {
+            var recommended = PickRecommendedSquadSuccessor(remainingMembers);
+            if (recommended is null)
+            {
+                JoinSquadHintText.Text = "没有可移交的小队成员";
+                return;
+            }
+
+            var selection = PromptSquadSuccessor(remainingMembers, recommended, squadName);
+            if (selection is null)
+            {
+                return;
+            }
+
+            successor = selection.Player;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync(
+                "api/fleets/squads/leave",
+                new FleetSquadLeaveRequest(
+                    _fleetCode,
+                    squadName,
+                    successor?.Name,
+                    successor?.Callsign));
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ReadResponseErrorAsync(response);
+                JoinSquadHintText.Text = $"离开失败：{error}";
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            JoinSquadHintText.Text = $"离开失败：{ex.Message}";
             return;
         }
 
+        for (var i = 0; i < _players.Count; i++)
+        {
+            var player = _players[i];
+            if (IsLocalPlayerIdentity(player.Name, player.Callsign) &&
+                player.SquadName.Equals(squadName, StringComparison.OrdinalIgnoreCase))
+            {
+                _players[i] = player with { SquadName = "Unassigned" };
+            }
+        }
+
+        if (isCommander && remainingMembers.Count == 0)
+        {
+            _squads.Remove(squad);
+            if (_selectedSquad is not null &&
+                _selectedSquad.Name.Equals(squadName, StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedSquad = null;
+                SquadSelectionList.SelectedItem = null;
+            }
+        }
+        else if (successor is not null)
+        {
+            squad.Commander = FormatCommanderName(successor.Callsign, successor.Name);
+            squad.RefreshComputed();
+        }
+
         _joinedSquad = null;
-        AddFleetLog("成员", "离开小队", $"{FormatCommanderName(_callsign, _localPlayer)} 离开 {squadName}");
+        JoinSquadHintText.Text = isCommander && remainingMembers.Count == 0
+            ? $"已解散 {squadName}"
+            : $"已离开 {squadName}";
+        await PullNetworkFleetsAsync(silent: true);
+        await PullNetworkSnapshotsAsync(silent: true);
         RenderState();
+        RenderMySquad();
         RefreshSquadActionButtons();
+        RefreshOverlayWindow();
         SaveCurrentConfig();
         await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
     }
@@ -5779,7 +6465,7 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.7";
+            : "0.3.8";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -6387,6 +7073,198 @@ public partial class MainWindow : Window
             panel.Height = item.Height * OverlayEditorCanvas.Height;
             OverlayEditorCanvas.Children.Add(panel);
         }
+
+        AddOverlayEditorCrosshair();
+    }
+
+    private void AddOverlayEditorCrosshair()
+    {
+        if (!_overlaySettings.ShowCrosshair ||
+            OverlayEditorCanvas.ActualWidth <= 0 ||
+            OverlayEditorCanvas.ActualHeight <= 0)
+        {
+            return;
+        }
+
+        var accent = GetCrosshairPreviewBrush(_overlaySettings);
+        var crosshair = _overlaySettings.CrosshairMode == OverlayCrosshairMode.Tech
+            ? CreateTechCrosshairPreview(accent, _overlaySettings.CrosshairSize, _overlaySettings.CrosshairThickness, _overlaySettings.CrosshairOpacity)
+            : CreateSimpleCrosshairPreview(accent, _overlaySettings.CrosshairSize, _overlaySettings.CrosshairThickness, _overlaySettings.CrosshairOpacity);
+
+        Canvas.SetLeft(crosshair, (OverlayEditorCanvas.ActualWidth - crosshair.Width) / 2.0);
+        Canvas.SetTop(crosshair, (OverlayEditorCanvas.ActualHeight - crosshair.Height) / 2.0);
+        OverlayEditorCanvas.Children.Add(crosshair);
+    }
+
+    private static Canvas CreateSimpleCrosshairPreview(System.Windows.Media.Brush brush, double size, double thickness, double opacity)
+    {
+        size = Math.Clamp(size, 48, 240);
+        thickness = Math.Clamp(thickness, 1, 8);
+        var center = size / 2.0;
+        var gap = Math.Max(8, size * 0.145);
+        var arm = Math.Max(14, size * 0.25);
+
+        var canvas = new Canvas
+        {
+            Width = size,
+            Height = size,
+            Opacity = Math.Clamp(opacity, 0.2, 1.0),
+            IsHitTestVisible = false
+        };
+
+        AddLine(canvas, center, center - gap - arm, center, center - gap, brush, thickness);
+        AddLine(canvas, center, center + gap, center, center + gap + arm, brush, thickness);
+        AddLine(canvas, center - gap - arm, center, center - gap, center, brush, thickness);
+        AddLine(canvas, center + gap, center, center + gap + arm, center, brush, thickness);
+
+        var dotSize = Math.Max(3, thickness * 2);
+        var dot = new System.Windows.Shapes.Ellipse
+        {
+            Width = dotSize,
+            Height = dotSize,
+            Fill = brush
+        };
+        Canvas.SetLeft(dot, center - dotSize / 2.0);
+        Canvas.SetTop(dot, center - dotSize / 2.0);
+        canvas.Children.Add(dot);
+        return canvas;
+    }
+
+    private static Canvas CreateTechCrosshairPreview(System.Windows.Media.Brush accent, double size, double thickness, double opacity)
+    {
+        size = Math.Clamp(size, 48, 240);
+        thickness = Math.Clamp(thickness, 1, 8);
+        var center = size / 2.0;
+        var soft = accent.Clone();
+        soft.Opacity = 0.42;
+
+        var canvas = new Canvas
+        {
+            Width = size,
+            Height = size,
+            Opacity = Math.Clamp(opacity, 0.2, 1.0),
+            IsHitTestVisible = false
+        };
+
+        var outerSize = size * 0.324;
+        var outerRing = new System.Windows.Shapes.Ellipse
+        {
+            Width = outerSize,
+            Height = outerSize,
+            Stroke = soft,
+            StrokeThickness = Math.Max(1, thickness * 0.55)
+        };
+        Canvas.SetLeft(outerRing, center - outerSize / 2.0);
+        Canvas.SetTop(outerRing, center - outerSize / 2.0);
+        canvas.Children.Add(outerRing);
+
+        var centerSize = Math.Max(8, size * 0.085);
+        var centerRing = new System.Windows.Shapes.Ellipse
+        {
+            Width = centerSize,
+            Height = centerSize,
+            Stroke = accent,
+            StrokeThickness = Math.Max(1.1, thickness * 0.7)
+        };
+        Canvas.SetLeft(centerRing, center - centerSize / 2.0);
+        Canvas.SetTop(centerRing, center - centerSize / 2.0);
+        canvas.Children.Add(centerRing);
+
+        var majorInner = size * 0.338;
+        var majorOuter = size * 0.873;
+        var majorStart = size * 0.127;
+        var majorEnd = size * 0.662;
+        AddLine(canvas, center, majorStart, center, majorInner, accent, thickness);
+        AddLine(canvas, center, majorEnd, center, majorOuter, accent, thickness);
+        AddLine(canvas, majorStart, center, majorInner, center, accent, thickness);
+        AddLine(canvas, majorEnd, center, majorOuter, center, accent, thickness);
+
+        var tickInner = size * 0.38;
+        var tickOuter = size * 0.465;
+        var tickInner2 = size * 0.535;
+        var tickOuter2 = size * 0.62;
+        var thin = Math.Max(1, thickness * 0.75);
+        AddLine(canvas, tickInner, center, tickOuter, center, soft, thin);
+        AddLine(canvas, tickInner2, center, tickOuter2, center, soft, thin);
+        AddLine(canvas, center, tickInner, center, tickOuter, soft, thin);
+        AddLine(canvas, center, tickInner2, center, tickOuter2, soft, thin);
+        return canvas;
+    }
+
+    private static System.Windows.Media.Brush GetCrosshairPreviewBrush(OverlayDisplaySettings settings)
+    {
+        if (!settings.CrosshairUseThemeColor && TryParseHexColor(settings.CrosshairColor, out var customColor))
+        {
+            return new SolidColorBrush(customColor);
+        }
+
+        return GetOverlayThemeAccent(settings.Theme);
+    }
+
+    private static void AddLine(Canvas canvas, double x1, double y1, double x2, double y2, System.Windows.Media.Brush brush, double thickness)
+    {
+        canvas.Children.Add(new System.Windows.Shapes.Line
+        {
+            X1 = x1,
+            Y1 = y1,
+            X2 = x2,
+            Y2 = y2,
+            Stroke = brush,
+            StrokeThickness = thickness,
+            StrokeStartLineCap = PenLineCap.Square,
+            StrokeEndLineCap = PenLineCap.Square
+        });
+    }
+
+    private static System.Windows.Media.Brush GetOverlayThemeAccent(OverlayVisualTheme theme)
+    {
+        return theme switch
+        {
+            OverlayVisualTheme.Anvil => new SolidColorBrush(Color.FromRgb(78, 255, 171)),
+            OverlayVisualTheme.Drake => new SolidColorBrush(Color.FromRgb(255, 178, 48)),
+            OverlayVisualTheme.Argo => new SolidColorBrush(Color.FromRgb(255, 132, 73)),
+            OverlayVisualTheme.Mirai => new SolidColorBrush(Color.FromRgb(255, 228, 128)),
+            OverlayVisualTheme.Crusader => new SolidColorBrush(Color.FromRgb(110, 205, 255)),
+            OverlayVisualTheme.Aegis => new SolidColorBrush(Color.FromRgb(84, 245, 232)),
+            OverlayVisualTheme.Rsi => new SolidColorBrush(Color.FromRgb(214, 201, 255)),
+            _ => new SolidColorBrush(Color.FromRgb(83, 190, 255))
+        };
+    }
+
+    private static bool TryParseHexColor(string? value, out Color color)
+    {
+        color = default;
+        var text = value?.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (text.StartsWith('#'))
+        {
+            text = text[1..];
+        }
+
+        if (text.Length == 3)
+        {
+            text = string.Concat(text.Select(ch => $"{ch}{ch}"));
+        }
+
+        if (text.Length == 6 &&
+            byte.TryParse(text[..2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var red) &&
+            byte.TryParse(text.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var green) &&
+            byte.TryParse(text.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var blue))
+        {
+            color = Color.FromRgb(red, green, blue);
+            return true;
+        }
+
+        return false;
+    }
+
+    private sealed class DialogOwner(IntPtr handle) : WinForms.IWin32Window
+    {
+        public IntPtr Handle { get; } = handle;
     }
 
     private bool IsOverlayEditorItemVisible(OverlayLayoutItem item)
@@ -6648,6 +7526,14 @@ public partial class MainWindow : Window
         ShowMissionPanelCheck.IsChecked = _overlaySettings.ShowMission;
         ShowMembersPanelCheck.IsChecked = _overlaySettings.ShowMembers;
         AutoThemeByShipCheck.IsChecked = _overlaySettings.AutoThemeByShip;
+        ShowCrosshairCheck.IsChecked = _overlaySettings.ShowCrosshair;
+        SimpleCrosshairRadio.IsChecked = _overlaySettings.CrosshairMode == OverlayCrosshairMode.Simple;
+        TechCrosshairRadio.IsChecked = _overlaySettings.CrosshairMode == OverlayCrosshairMode.Tech;
+        CrosshairThemeColorCheck.IsChecked = _overlaySettings.CrosshairUseThemeColor;
+        CrosshairSizeSlider.Value = Math.Clamp(_overlaySettings.CrosshairSize, 48, 240);
+        CrosshairThicknessSlider.Value = Math.Clamp(_overlaySettings.CrosshairThickness, 1, 8);
+        CrosshairOpacitySlider.Value = Math.Clamp(_overlaySettings.CrosshairOpacity, 0.2, 1.0) * 100.0;
+        CrosshairColorBox.Text = OverlayDisplaySettings.NormalizeCrosshairColor(_overlaySettings.CrosshairColor);
         OverlayThemeBox.SelectedIndex = _overlaySettings.Theme switch
         {
             OverlayVisualTheme.Anvil => 1,
@@ -6664,6 +7550,37 @@ public partial class MainWindow : Window
         ShowCallsignOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignOnly;
         ShowGameNameOnlyRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.GameNameOnly;
         ShowCallsignAndNameRadio.IsChecked = _overlaySettings.MemberNameMode == OverlayMemberNameMode.CallsignAndGameName;
+        RefreshCrosshairSettingLabels();
+    }
+
+    private void RefreshCrosshairSettingLabels()
+    {
+        if (CrosshairSizeSlider is null ||
+            CrosshairThicknessSlider is null ||
+            CrosshairOpacitySlider is null ||
+            CrosshairSizeValueText is null ||
+            CrosshairThicknessValueText is null ||
+            CrosshairOpacityValueText is null ||
+            CrosshairColorBox is null ||
+            CrosshairColorPreview is null ||
+            CrosshairThemeColorCheck is null ||
+            CrosshairColorPickerButton is null)
+        {
+            return;
+        }
+
+        CrosshairSizeValueText.Text = $"{Math.Round(CrosshairSizeSlider.Value)}px";
+        CrosshairThicknessValueText.Text = $"{CrosshairThicknessSlider.Value:0.##}px";
+        CrosshairOpacityValueText.Text = $"{Math.Round(CrosshairOpacitySlider.Value)}%";
+        var usesThemeColor = CrosshairThemeColorCheck.IsChecked == true;
+        CrosshairColorBox.IsEnabled = !usesThemeColor;
+        CrosshairColorBox.Opacity = usesThemeColor ? 0.6 : 1.0;
+
+        CrosshairColorPreview.Background = usesThemeColor
+            ? GetOverlayThemeAccent(_overlaySettings.Theme)
+            : new SolidColorBrush(TryParseHexColor(CrosshairColorBox.Text, out var parsed)
+                ? parsed
+                : Color.FromRgb(235, 247, 255));
     }
 
     private void ApplyLanguageToControls()
@@ -6754,6 +7671,16 @@ public partial class MainWindow : Window
             ((ComboBoxItem)OverlayThemeBox.Items[6]).Content = zh ? "圣盾" : "Aegis";
             ((ComboBoxItem)OverlayThemeBox.Items[7]).Content = "RSI";
         }
+        CrosshairLabel.Text = zh ? "虚拟准星" : "VIRTUAL CROSSHAIR";
+        ShowCrosshairCheck.Content = zh ? "显示虚拟准星" : "Show virtual crosshair";
+        SimpleCrosshairRadio.Content = zh ? "简洁" : "Simple";
+        TechCrosshairRadio.Content = zh ? "科技" : "Tech";
+        CrosshairThemeColorCheck.Content = zh ? "跟随当前风格颜色" : "Use current theme color";
+        CrosshairSizeLabel.Text = zh ? "大小" : "SIZE";
+        CrosshairThicknessLabel.Text = zh ? "粗细" : "THICKNESS";
+        CrosshairOpacityLabel.Text = zh ? "准星透明度" : "CROSSHAIR OPACITY";
+        CrosshairColorPickerButton.Content = zh ? "选择颜色" : "Pick color";
+        CrosshairColorPreview.ToolTip = zh ? "选择颜色" : "Pick color";
         BackgroundModeLabel.Text = zh ? "后台模式" : "BACKGROUND";
         TrayModeCheck.Content = zh ? "窗口最小化时仍然可以显示 Overlay" : "Keep Overlay visible when minimized";
         TrayModeHintText.Text = zh

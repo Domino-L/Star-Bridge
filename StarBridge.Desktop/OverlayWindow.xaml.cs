@@ -1,4 +1,5 @@
 ﻿using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -166,6 +167,18 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
     private Brush _iconBackgroundBrush = new SolidColorBrush(Color.FromRgb(4, 16, 28));
     private Brush _onlineBrush = new SolidColorBrush(Color.FromRgb(121, 255, 158));
     private Brush _offlineBrush = new SolidColorBrush(Color.FromRgb(255, 105, 105));
+    private Brush _crosshairBrush = new SolidColorBrush(Color.FromRgb(235, 247, 255));
+    private Brush _crosshairAlertBrush = new SolidColorBrush(Color.FromRgb(255, 240, 0));
+    private Visibility _crosshairVisibility = Visibility.Collapsed;
+    private Visibility _simpleCrosshairVisibility = Visibility.Collapsed;
+    private Visibility _techCrosshairVisibility = Visibility.Collapsed;
+    private double _crosshairSize = 96;
+    private double _crosshairOpacity = 0.85;
+    private double _simpleCrosshairStrokeThickness = 2;
+    private double _simpleCrosshairDotSize = 4;
+    private double _techCrosshairStrokeThickness = 1.6;
+    private double _techCrosshairThinStrokeThickness = 1.2;
+    private double _techCrosshairCornerStrokeThickness = 1.2;
 
     public OverlayViewModel(
         IEnumerable<SquadRow> squads,
@@ -331,6 +344,78 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         private set => SetProperty(ref _offlineBrush, value);
     }
 
+    public Brush CrosshairBrush
+    {
+        get => _crosshairBrush;
+        private set => SetProperty(ref _crosshairBrush, value);
+    }
+
+    public Brush CrosshairAlertBrush
+    {
+        get => _crosshairAlertBrush;
+        private set => SetProperty(ref _crosshairAlertBrush, value);
+    }
+
+    public Visibility CrosshairVisibility
+    {
+        get => _crosshairVisibility;
+        private set => SetProperty(ref _crosshairVisibility, value);
+    }
+
+    public Visibility SimpleCrosshairVisibility
+    {
+        get => _simpleCrosshairVisibility;
+        private set => SetProperty(ref _simpleCrosshairVisibility, value);
+    }
+
+    public Visibility TechCrosshairVisibility
+    {
+        get => _techCrosshairVisibility;
+        private set => SetProperty(ref _techCrosshairVisibility, value);
+    }
+
+    public double CrosshairSize
+    {
+        get => _crosshairSize;
+        private set => SetProperty(ref _crosshairSize, value);
+    }
+
+    public double CrosshairOpacity
+    {
+        get => _crosshairOpacity;
+        private set => SetProperty(ref _crosshairOpacity, value);
+    }
+
+    public double SimpleCrosshairStrokeThickness
+    {
+        get => _simpleCrosshairStrokeThickness;
+        private set => SetProperty(ref _simpleCrosshairStrokeThickness, value);
+    }
+
+    public double SimpleCrosshairDotSize
+    {
+        get => _simpleCrosshairDotSize;
+        private set => SetProperty(ref _simpleCrosshairDotSize, value);
+    }
+
+    public double TechCrosshairStrokeThickness
+    {
+        get => _techCrosshairStrokeThickness;
+        private set => SetProperty(ref _techCrosshairStrokeThickness, value);
+    }
+
+    public double TechCrosshairThinStrokeThickness
+    {
+        get => _techCrosshairThinStrokeThickness;
+        private set => SetProperty(ref _techCrosshairThinStrokeThickness, value);
+    }
+
+    public double TechCrosshairCornerStrokeThickness
+    {
+        get => _techCrosshairCornerStrokeThickness;
+        private set => SetProperty(ref _techCrosshairCornerStrokeThickness, value);
+    }
+
     public string NoticeTimerLabel => $"{_noticeSecondsRemaining}s";
 
     public Visibility NotificationVisibility => _showNotice && _noticeSecondsRemaining > 0
@@ -350,6 +435,14 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         _showNotice = settings.ShowNotice;
         OverlayOpacity = settings.Opacity;
         ApplyTheme(settings.Theme);
+        ApplyCrosshairSettings(settings);
+        CrosshairVisibility = settings.ShowCrosshair ? Visibility.Visible : Visibility.Collapsed;
+        SimpleCrosshairVisibility = settings.ShowCrosshair && settings.CrosshairMode == OverlayCrosshairMode.Simple
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        TechCrosshairVisibility = settings.ShowCrosshair && settings.CrosshairMode == OverlayCrosshairMode.Tech
+            ? Visibility.Visible
+            : Visibility.Collapsed;
         SquadsVisibility = settings.ShowSquads ? Visibility.Visible : Visibility.Collapsed;
         MembersVisibility = settings.ShowMembers ? Visibility.Visible : Visibility.Collapsed;
 
@@ -399,6 +492,29 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         OnChanged(nameof(NotificationVisibility));
     }
 
+    private void ApplyCrosshairSettings(OverlayDisplaySettings settings)
+    {
+        var size = Math.Clamp(settings.CrosshairSize, 48, 240);
+        var thickness = Math.Clamp(settings.CrosshairThickness, 1, 8);
+        CrosshairSize = size;
+        CrosshairOpacity = Math.Clamp(settings.CrosshairOpacity, 0.2, 1.0);
+
+        var simpleCompensation = 96.0 / size;
+        SimpleCrosshairStrokeThickness = thickness * simpleCompensation;
+        SimpleCrosshairDotSize = Math.Max(3, thickness * 2.0) * simpleCompensation;
+
+        var techCompensation = 142.0 / size;
+        TechCrosshairStrokeThickness = thickness * techCompensation;
+        TechCrosshairThinStrokeThickness = Math.Max(1, thickness * 0.72) * techCompensation;
+        TechCrosshairCornerStrokeThickness = Math.Max(0.8, thickness * 0.6) * techCompensation;
+
+        if (!settings.CrosshairUseThemeColor &&
+            TryParseHexColor(settings.CrosshairColor, out var customColor))
+        {
+            CrosshairBrush = BrushFromArgb(215, customColor.R, customColor.G, customColor.B);
+        }
+    }
+
     private void ApplyTheme(OverlayVisualTheme theme)
     {
         if (theme == OverlayVisualTheme.Anvil)
@@ -412,6 +528,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(120, 0, 42, 28);
             OnlineBrush = BrushFromRgb(121, 255, 92);
             OfflineBrush = BrushFromRgb(255, 92, 76);
+            SetCrosshairBrushes(78, 255, 171, 208, 255, 0);
             return;
         }
 
@@ -426,6 +543,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(132, 52, 22, 0);
             OnlineBrush = BrushFromRgb(255, 190, 52);
             OfflineBrush = BrushFromRgb(196, 72, 48);
+            SetCrosshairBrushes(255, 178, 48, 255, 222, 89);
             return;
         }
 
@@ -440,6 +558,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(118, 64, 22, 8);
             OnlineBrush = BrushFromRgb(125, 255, 126);
             OfflineBrush = BrushFromRgb(255, 78, 61);
+            SetCrosshairBrushes(255, 132, 73, 142, 255, 116);
             return;
         }
 
@@ -454,6 +573,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(124, 48, 40, 12);
             OnlineBrush = BrushFromRgb(94, 255, 225);
             OfflineBrush = BrushFromRgb(255, 111, 95);
+            SetCrosshairBrushes(255, 228, 128, 91, 255, 230);
             return;
         }
 
@@ -468,6 +588,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(110, 3, 32, 68);
             OnlineBrush = BrushFromRgb(97, 255, 126);
             OfflineBrush = BrushFromRgb(255, 104, 122);
+            SetCrosshairBrushes(110, 205, 255, 84, 255, 107);
             return;
         }
 
@@ -482,6 +603,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(118, 0, 44, 42);
             OnlineBrush = BrushFromRgb(92, 255, 185);
             OfflineBrush = BrushFromRgb(255, 63, 55);
+            SetCrosshairBrushes(84, 245, 232, 255, 51, 41);
             return;
         }
 
@@ -496,6 +618,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             IconBackgroundBrush = BrushFromArgb(124, 35, 22, 64);
             OnlineBrush = BrushFromRgb(116, 238, 210);
             OfflineBrush = BrushFromRgb(255, 112, 86);
+            SetCrosshairBrushes(214, 201, 255, 255, 151, 58);
             return;
         }
 
@@ -508,6 +631,13 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         IconBackgroundBrush = BrushFromRgb(4, 16, 28);
         OnlineBrush = BrushFromRgb(121, 255, 158);
         OfflineBrush = BrushFromRgb(255, 105, 105);
+        SetCrosshairBrushes(235, 247, 255, 255, 240, 0);
+    }
+
+    private void SetCrosshairBrushes(byte red, byte green, byte blue, byte alertRed, byte alertGreen, byte alertBlue)
+    {
+        CrosshairBrush = BrushFromArgb(215, red, green, blue);
+        CrosshairAlertBrush = BrushFromArgb(225, alertRed, alertGreen, alertBlue);
     }
 
     private static SolidColorBrush BrushFromRgb(byte red, byte green, byte blue)
@@ -522,6 +652,37 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
         var brush = new SolidColorBrush(Color.FromArgb(alpha, red, green, blue));
         brush.Freeze();
         return brush;
+    }
+
+    private static bool TryParseHexColor(string? value, out Color color)
+    {
+        color = default;
+        var text = value?.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (text.StartsWith('#'))
+        {
+            text = text[1..];
+        }
+
+        if (text.Length == 3)
+        {
+            text = string.Concat(text.Select(ch => $"{ch}{ch}"));
+        }
+
+        if (text.Length == 6 &&
+            byte.TryParse(text[..2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var red) &&
+            byte.TryParse(text.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var green) &&
+            byte.TryParse(text.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var blue))
+        {
+            color = Color.FromRgb(red, green, blue);
+            return true;
+        }
+
+        return false;
     }
 
     private void RefreshSquads(IEnumerable<SquadRow> squads, OverlayDisplaySettings settings, bool zh, bool hasFleet)

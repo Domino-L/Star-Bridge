@@ -60,7 +60,7 @@
                             VerticalAlignment="Center"
                             Margin="18,0,0,0">
                     <TextBlock x:Name="WindowTitleText"
-                               Text="星海舰桥 V0.3.7"
+                               Text="星海舰桥 V0.3.8"
                                VerticalAlignment="Center"
                                FontSize="14"
                                FontWeight="SemiBold"
@@ -3679,6 +3679,117 @@
                                           Checked="OverlaySetting_Changed"
                                           Unchecked="OverlaySetting_Changed" />
 
+                                <TextBlock x:Name="CrosshairLabel" Text="虚拟准星" Style="{StaticResource HudCaptionText}" Margin="0,0,0,8" />
+                                <CheckBox x:Name="ShowCrosshairCheck"
+                                          Content="显示虚拟准星"
+                                          Margin="0,0,0,8"
+                                          Checked="OverlaySetting_Changed"
+                                          Unchecked="OverlaySetting_Changed" />
+                                <Grid Margin="0,0,0,18">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <RadioButton x:Name="SimpleCrosshairRadio"
+                                                 Content="简洁"
+                                                 GroupName="OverlayCrosshair"
+                                                 Checked="OverlaySetting_Changed" />
+                                    <RadioButton x:Name="TechCrosshairRadio"
+                                                 Grid.Column="1"
+                                                 Content="科技"
+                                                 GroupName="OverlayCrosshair"
+                                                 Margin="12,0,0,0"
+                                                 Checked="OverlaySetting_Changed" />
+                                </Grid>
+                                <CheckBox x:Name="CrosshairThemeColorCheck"
+                                          Content="跟随当前风格颜色"
+                                          Margin="0,0,0,10"
+                                          Checked="OverlaySetting_Changed"
+                                          Unchecked="OverlaySetting_Changed" />
+                                <Grid Margin="0,0,0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="CrosshairSizeLabel"
+                                               Text="大小"
+                                               Style="{StaticResource HudCaptionText}" />
+                                    <TextBlock x:Name="CrosshairSizeValueText"
+                                               Grid.Column="1"
+                                               Text="96px"
+                                               Foreground="{StaticResource MutedTextBrush}" />
+                                </Grid>
+                                <Slider x:Name="CrosshairSizeSlider"
+                                        Minimum="48"
+                                        Maximum="240"
+                                        TickFrequency="4"
+                                        ValueChanged="CrosshairSlider_ValueChanged" />
+                                <Grid Margin="0,10,0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="CrosshairThicknessLabel"
+                                               Text="粗细"
+                                               Style="{StaticResource HudCaptionText}" />
+                                    <TextBlock x:Name="CrosshairThicknessValueText"
+                                               Grid.Column="1"
+                                               Text="2px"
+                                               Foreground="{StaticResource MutedTextBrush}" />
+                                </Grid>
+                                <Slider x:Name="CrosshairThicknessSlider"
+                                        Minimum="1"
+                                        Maximum="8"
+                                        TickFrequency="0.25"
+                                        ValueChanged="CrosshairSlider_ValueChanged" />
+                                <Grid Margin="0,10,0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="CrosshairOpacityLabel"
+                                               Text="准星透明度"
+                                               Style="{StaticResource HudCaptionText}" />
+                                    <TextBlock x:Name="CrosshairOpacityValueText"
+                                               Grid.Column="1"
+                                               Text="85%"
+                                               Foreground="{StaticResource MutedTextBrush}" />
+                                </Grid>
+                                <Slider x:Name="CrosshairOpacitySlider"
+                                        Minimum="20"
+                                        Maximum="100"
+                                        TickFrequency="5"
+                                        ValueChanged="CrosshairSlider_ValueChanged" />
+                                <Grid Margin="0,10,0,18">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="28" />
+                                        <ColumnDefinition Width="92" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="CrosshairColorBox"
+                                             Text="#EBF7FF"
+                                             Height="30"
+                                             TextChanged="CrosshairColorBox_TextChanged" />
+                                    <Border x:Name="CrosshairColorPreview"
+                                            Grid.Column="1"
+                                            Width="22"
+                                            Height="22"
+                                            Margin="6,4,0,0"
+                                            BorderBrush="{StaticResource AccentBrush}"
+                                            BorderThickness="1"
+                                            Background="#EBF7FF"
+                                            Cursor="Hand"
+                                            ToolTip="选择颜色"
+                                            MouseLeftButtonUp="CrosshairColorPreview_MouseLeftButtonUp" />
+                                    <Button x:Name="CrosshairColorPickerButton"
+                                            Grid.Column="2"
+                                            Content="选择颜色"
+                                            Height="30"
+                                            Margin="10,0,0,0"
+                                            Style="{StaticResource SecondaryButton}"
+                                            Click="CrosshairColorPickerButton_Click" />
+                                </Grid>
+
                                 <TextBlock x:Name="BackgroundModeLabel" Text="BACKGROUND" Style="{StaticResource HudCaptionText}" Margin="0,0,0,8" />
                                 <TextBlock x:Name="OverlayOpacityLabel"
                                            Text="OPACITY"
@@ -3922,9 +4033,12 @@
             <TabItem x:Name="SupportTab"
                      Header="Support"
                      Visibility="Collapsed">
-                <Border Margin="0,14,0,0"
-                        Style="{StaticResource HudPanel}"
-                        Padding="28">
+                <ScrollViewer Margin="0,14,0,0"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                <Border Style="{StaticResource HudPanel}"
+                        Padding="28"
+                        Margin="0,0,0,14">
                     <StackPanel>
                         <TextBlock Text="星海舰桥"
                                    Foreground="{StaticResource AccentBrush}"
@@ -3967,6 +4081,202 @@
                                         VerticalAlignment="Center"
                                         Click="CheckUpdateButton_Click" />
                             </Grid>
+                        </Border>
+                        <Border x:Name="GuideProgressPanel"
+                                Margin="0,18,0,0"
+                                Padding="18"
+                                Background="{StaticResource FieldBackBrush}"
+                                BorderBrush="{StaticResource AccentDimBrush}"
+                                BorderThickness="1">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="170" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="快速上手引导"
+                                                   Foreground="{StaticResource PrimaryTextBrush}"
+                                                   FontSize="18"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="未完成的引导会保留在这里。你可以按自己的节奏继续，不会被启动弹窗反复打断。"
+                                                   Margin="0,8,24,0"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1"
+                                            Content="完成引导"
+                                            Style="{StaticResource SecondaryButton}"
+                                            Height="38"
+                                            VerticalAlignment="Center"
+                                            Click="GuideCompleteButton_Click" />
+                                </Grid>
+
+                                <Grid Margin="0,16,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <Border Grid.Row="0"
+                                            Grid.Column="0"
+                                            Margin="0,0,8,8"
+                                            Padding="12"
+                                            BorderBrush="{StaticResource AccentDimBrush}"
+                                            BorderThickness="1"
+                                            Background="#6609121E">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="128" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="登录身份"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock x:Name="GuideAccountStatusText"
+                                                           Margin="0,5,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Content="登录 / 注册"
+                                                    Style="{StaticResource PrimaryButton}"
+                                                    Height="34"
+                                                    VerticalAlignment="Center"
+                                                    Click="GuideLoginButton_Click" />
+                                        </Grid>
+                                    </Border>
+
+                                    <Border Grid.Row="0"
+                                            Grid.Column="1"
+                                            Margin="8,0,0,8"
+                                            Padding="12"
+                                            BorderBrush="{StaticResource AccentDimBrush}"
+                                            BorderThickness="1"
+                                            Background="#6609121E">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="128" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="选择日志"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock x:Name="GuideLogStatusText"
+                                                           Margin="0,5,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Content="选择日志"
+                                                    Style="{StaticResource PrimaryButton}"
+                                                    Height="34"
+                                                    VerticalAlignment="Center"
+                                                    Click="GuideSelectLogButton_Click" />
+                                        </Grid>
+                                    </Border>
+
+                                    <Border Grid.Row="1"
+                                            Grid.Column="0"
+                                            Margin="0,8,8,8"
+                                            Padding="12"
+                                            BorderBrush="{StaticResource AccentDimBrush}"
+                                            BorderThickness="1"
+                                            Background="#6609121E">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="128" />
+                                                <ColumnDefinition Width="128" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="舰队"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock x:Name="GuideFleetStatusText"
+                                                           Margin="0,5,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Content="寻找舰队"
+                                                    Style="{StaticResource SecondaryButton}"
+                                                    Height="34"
+                                                    Margin="0,0,8,0"
+                                                    VerticalAlignment="Center"
+                                                    Click="GuideFindFleetButton_Click" />
+                                            <Button Grid.Column="2"
+                                                    Content="创建舰队"
+                                                    Style="{StaticResource PrimaryButton}"
+                                                    Height="34"
+                                                    VerticalAlignment="Center"
+                                                    Click="GuideCreateFleetButton_Click" />
+                                        </Grid>
+                                    </Border>
+
+                                    <Border Grid.Row="1"
+                                            Grid.Column="1"
+                                            Margin="8,8,0,8"
+                                            Padding="12"
+                                            BorderBrush="{StaticResource AccentDimBrush}"
+                                            BorderThickness="1"
+                                            Background="#6609121E">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="128" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="小队"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock x:Name="GuideSquadStatusText"
+                                                           Margin="0,5,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Content="前往小队"
+                                                    Style="{StaticResource PrimaryButton}"
+                                                    Height="34"
+                                                    VerticalAlignment="Center"
+                                                    Click="GuideSquadButton_Click" />
+                                        </Grid>
+                                    </Border>
+
+                                    <Border Grid.Row="2"
+                                            Grid.ColumnSpan="2"
+                                            Margin="0,8,0,0"
+                                            Padding="12"
+                                            BorderBrush="{StaticResource AccentDimBrush}"
+                                            BorderThickness="1"
+                                            Background="#6609121E">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="160" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="Overlay"
+                                                           Foreground="{StaticResource AccentBrush}"
+                                                           FontWeight="SemiBold" />
+                                                <TextBlock x:Name="GuideOverlayStatusText"
+                                                           Margin="0,5,0,0"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Content="配置 Overlay"
+                                                    Style="{StaticResource PrimaryButton}"
+                                                    Height="34"
+                                                    VerticalAlignment="Center"
+                                                    Click="GuideOverlayButton_Click" />
+                                        </Grid>
+                                    </Border>
+                                </Grid>
+                            </StackPanel>
                         </Border>
                         <Border Margin="0,26,0,0"
                                 Padding="18"
@@ -4011,6 +4321,7 @@
                         </Border>
                     </StackPanel>
                 </Border>
+                </ScrollViewer>
             </TabItem>
 
             <TabItem x:Name="MonitorTab" Header="Monitor">
@@ -4022,7 +4333,7 @@
                     <StackPanel Grid.Column="0">
                         <Border Style="{StaticResource HudPanel}">
                             <TextBlock x:Name="ShipStateText"
-                                       Text="Current Ship: Unknown&#x0a;Driving Ship: None&#x0a;Control Signal: None"
+                                       Text="飞船：未知&#x0a;地点：未知&#x0a;状态：离线"
                                        TextWrapping="Wrap" />
                         </Border>
                         <Border Style="{StaticResource HudPanel}">

@@ -24,6 +24,12 @@ public enum OverlayVisualTheme
     Rsi
 }
 
+public enum OverlayCrosshairMode
+{
+    Simple,
+    Tech
+}
+
 public sealed record OverlayDisplaySettings(
     bool HideMissionWhenIdle,
     OverlayMemberNameMode MemberNameMode,
@@ -36,7 +42,14 @@ public sealed record OverlayDisplaySettings(
     bool ShowMission,
     bool ShowMembers,
     OverlayVisualTheme Theme,
-    bool AutoThemeByShip)
+    bool AutoThemeByShip,
+    bool ShowCrosshair,
+    OverlayCrosshairMode CrosshairMode,
+    bool CrosshairUseThemeColor,
+    string CrosshairColor,
+    double CrosshairSize,
+    double CrosshairThickness,
+    double CrosshairOpacity)
 {
     public static OverlayDisplaySettings Default { get; } = new(
         HideMissionWhenIdle: false,
@@ -50,7 +63,14 @@ public sealed record OverlayDisplaySettings(
         ShowMission: true,
         ShowMembers: true,
         Theme: OverlayVisualTheme.Default,
-        AutoThemeByShip: false);
+        AutoThemeByShip: false,
+        ShowCrosshair: false,
+        CrosshairMode: OverlayCrosshairMode.Simple,
+        CrosshairUseThemeColor: true,
+        CrosshairColor: "#EBF7FF",
+        CrosshairSize: 96,
+        CrosshairThickness: 2,
+        CrosshairOpacity: 0.85);
 
     public string Serialize()
     {
@@ -67,7 +87,14 @@ public sealed record OverlayDisplaySettings(
             ShowMission ? "1" : "0",
             ShowMembers ? "1" : "0",
             Theme,
-            AutoThemeByShip ? "1" : "0");
+            AutoThemeByShip ? "1" : "0",
+            ShowCrosshair ? "1" : "0",
+            CrosshairMode,
+            CrosshairUseThemeColor ? "1" : "0",
+            NormalizeCrosshairColor(CrosshairColor),
+            Math.Clamp(CrosshairSize, 48, 240).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            Math.Clamp(CrosshairThickness, 1, 8).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            Math.Clamp(CrosshairOpacity, 0.2, 1.0).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
     }
 
     public static OverlayDisplaySettings Parse(string? value)
@@ -99,7 +126,47 @@ public sealed record OverlayDisplaySettings(
             parts.Length > 10 && Enum.TryParse<OverlayVisualTheme>(parts[10], out var theme)
                 ? theme
                 : Default.Theme,
-            parts.Length > 11 && parts[11] == "1");
+            parts.Length > 11 && parts[11] == "1",
+            parts.Length > 12 && parts[12] == "1",
+            parts.Length > 13 && Enum.TryParse<OverlayCrosshairMode>(parts[13], out var crosshairMode)
+                ? crosshairMode
+                : Default.CrosshairMode,
+            parts.Length <= 14 || parts[14] == "1",
+            parts.Length > 15
+                ? NormalizeCrosshairColor(parts[15])
+                : Default.CrosshairColor,
+            parts.Length > 16 && double.TryParse(parts[16], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var crosshairSize)
+                ? Math.Clamp(crosshairSize, 48, 240)
+                : Default.CrosshairSize,
+            parts.Length > 17 && double.TryParse(parts[17], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var crosshairThickness)
+                ? Math.Clamp(crosshairThickness, 1, 8)
+                : Default.CrosshairThickness,
+            parts.Length > 18 && double.TryParse(parts[18], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var crosshairOpacity)
+                ? Math.Clamp(crosshairOpacity, 0.2, 1.0)
+                : Default.CrosshairOpacity);
+    }
+
+    public static string NormalizeCrosshairColor(string? value)
+    {
+        var text = value?.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return Default.CrosshairColor;
+        }
+
+        if (text.StartsWith('#'))
+        {
+            text = text[1..];
+        }
+
+        if (text.Length == 3)
+        {
+            text = string.Concat(text.Select(ch => $"{ch}{ch}"));
+        }
+
+        return text.Length == 6 && text.All(Uri.IsHexDigit)
+            ? $"#{text.ToUpperInvariant()}"
+            : Default.CrosshairColor;
     }
 }
 

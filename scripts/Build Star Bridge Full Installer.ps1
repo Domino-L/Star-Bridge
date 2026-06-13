@@ -5,7 +5,12 @@ $root = Split-Path -Parent $scriptsDir
 $project = Join-Path $root "StarBridge.Desktop\StarBridge.Desktop.csproj"
 $nugetConfig = Join-Path $root "NuGet.Config"
 $distDir = Join-Path $root "dist"
-$version = "0.3.7"
+[xml]$projectXml = Get-Content -LiteralPath $project -Encoding UTF8
+$version = [string]($projectXml.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "Project version was not found in $project"
+}
+
 $publishDir = Join-Path $root "StarBridge.Desktop\bin\Release\net8.0-windows\win-x64\publish"
 $stageDir = Join-Path $distDir "StarBridge-$version-win-x64-full"
 $installerExe = Join-Path $distDir "StarBridge-$version-win-x64-full-installer.exe"

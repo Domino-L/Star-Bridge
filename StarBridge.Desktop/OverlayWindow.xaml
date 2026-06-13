@@ -293,6 +293,94 @@
             </Grid>
         </Border>
 
+        <Grid Visibility="{Binding CrosshairVisibility}"
+              Width="{Binding ActualWidth, ElementName=OverlayCanvas}"
+              Height="{Binding ActualHeight, ElementName=OverlayCanvas}"
+              IsHitTestVisible="False">
+            <Viewbox Width="{Binding CrosshairSize}"
+                     Height="{Binding CrosshairSize}"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     Opacity="{Binding CrosshairOpacity}"
+                     Visibility="{Binding SimpleCrosshairVisibility}">
+                <Grid Width="96" Height="96">
+                    <Line X1="48" Y1="10" X2="48" Y2="34"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding SimpleCrosshairStrokeThickness}"
+                          StrokeStartLineCap="Square"
+                          StrokeEndLineCap="Square" />
+                    <Line X1="48" Y1="62" X2="48" Y2="86"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding SimpleCrosshairStrokeThickness}"
+                          StrokeStartLineCap="Square"
+                          StrokeEndLineCap="Square" />
+                    <Line X1="10" Y1="48" X2="34" Y2="48"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding SimpleCrosshairStrokeThickness}"
+                          StrokeStartLineCap="Square"
+                          StrokeEndLineCap="Square" />
+                    <Line X1="62" Y1="48" X2="86" Y2="48"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding SimpleCrosshairStrokeThickness}"
+                          StrokeStartLineCap="Square"
+                          StrokeEndLineCap="Square" />
+                    <Ellipse Width="{Binding SimpleCrosshairDotSize}"
+                             Height="{Binding SimpleCrosshairDotSize}"
+                             Fill="{Binding CrosshairBrush}"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
+                </Grid>
+            </Viewbox>
+
+            <Viewbox Width="{Binding CrosshairSize}"
+                     Height="{Binding CrosshairSize}"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     Opacity="{Binding CrosshairOpacity}"
+                     Visibility="{Binding TechCrosshairVisibility}">
+                <Grid Width="142" Height="142">
+                    <Ellipse Width="46"
+                             Height="46"
+                             Stroke="{Binding CrosshairBrush}"
+                             StrokeThickness="{Binding TechCrosshairThinStrokeThickness}"
+                             Opacity="0.36"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
+                    <Ellipse Width="12"
+                             Height="12"
+                             Stroke="{Binding CrosshairAlertBrush}"
+                             StrokeThickness="{Binding TechCrosshairThinStrokeThickness}"
+                             Opacity="0.88"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
+                    <Line X1="71" Y1="18" X2="71" Y2="48"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding TechCrosshairStrokeThickness}"
+                          Opacity="0.86" />
+                    <Line X1="71" Y1="94" X2="71" Y2="124"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding TechCrosshairStrokeThickness}"
+                          Opacity="0.86" />
+                    <Line X1="18" Y1="71" X2="48" Y2="71"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding TechCrosshairStrokeThickness}"
+                          Opacity="0.86" />
+                    <Line X1="94" Y1="71" X2="124" Y2="71"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding TechCrosshairStrokeThickness}"
+                          Opacity="0.86" />
+                    <Path Data="M34,34 L46,34 M34,34 L34,46 M108,34 L96,34 M108,34 L108,46 M34,108 L46,108 M34,108 L34,96 M108,108 L96,108 M108,108 L108,96"
+                          Stroke="{Binding CrosshairBrush}"
+                          StrokeThickness="{Binding TechCrosshairCornerStrokeThickness}"
+                          Opacity="0.52" />
+                    <Path Data="M54,71 L66,71 M76,71 L88,71 M71,54 L71,66 M71,76 L71,88"
+                          Stroke="{Binding CrosshairAlertBrush}"
+                          StrokeThickness="{Binding TechCrosshairThinStrokeThickness}"
+                          Opacity="0.78" />
+                </Grid>
+            </Viewbox>
+        </Grid>
+
         <TextBlock Canvas.Left="0"
                    Canvas.Bottom="16"
                    Width="{Binding ActualWidth, ElementName=OverlayCanvas}"
