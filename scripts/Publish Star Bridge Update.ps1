@@ -69,8 +69,16 @@ if (-not $SkipGitHubRelease) {
     }
 
     Write-Host "Uploading GitHub release $tag..."
-    & gh release view $tag --repo $GitHubRepo *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $releaseExists = $false
+    try {
+        & gh release view $tag --repo $GitHubRepo *> $null
+        $releaseExists = $LASTEXITCODE -eq 0
+    }
+    catch {
+        $releaseExists = $false
+    }
+
+    if ($releaseExists) {
         & gh release upload $tag $installerPath $updateZipPath --repo $GitHubRepo --clobber
         if ($LASTEXITCODE -ne 0) {
             throw "GitHub release upload failed."
