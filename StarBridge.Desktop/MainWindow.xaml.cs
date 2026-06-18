@@ -13,6 +13,7 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -35,7 +36,7 @@ using DrawingColor = System.Drawing.Color;
 
 namespace StarBridge.Desktop;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Window, IAppUpdateUi
 {
     private const int OverlayHotkeyId = 0x5343;
     private const int WmHotkey = 0x0312;
@@ -146,6 +147,8 @@ public partial class MainWindow : Window
     private DateTimeOffset _nextNetworkSyncAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastProcessDrivenRenderAt = DateTimeOffset.MinValue;
     private CancellationTokenSource? _syncStatusOverlayCts;
+    private TaskCompletionSource<bool>? _updateConfirmationSource;
+    private bool _updateOverlayCanClose;
     private HwndSource? _hotkeySource;
     private bool _hotkeyRegistered;
     private bool _hasFleet;
@@ -164,7 +167,8 @@ public partial class MainWindow : Window
             BuildNetworkUri,
             this,
             text => UpdateStatusText.Text = text,
-            isEnabled => CheckUpdateButton.IsEnabled = isEnabled);
+            isEnabled => CheckUpdateButton.IsEnabled = isEnabled,
+            this);
         WindowTitleText.Text = $"星海舰桥 V{GetAppVersion()}";
         NavigateToMyFleet();
         PlayersList.ItemsSource = _players;
@@ -315,6 +319,116 @@ public partial class MainWindow : Window
         await _appUpdateService.CheckForInstallerUpdateAsync(silent: false, currentVersion: GetAppVersion());
     }
 
+    public Task<bool> ConfirmUpdateAsync(UpdateManifest manifest, string currentVersion, string updateMode)
+    {
+        _updateConfirmationSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _updateOverlayCanClose = false;
+
+        Dispatcher.Invoke(() =>
+        {
+            var notes = string.IsNullOrWhiteSpace(manifest.Notes) ? "无版本说明。" : manifest.Notes.Trim();
+            UpdateOverlayTitleText.Text = $"发现新版本 V{manifest.Version}";
+            UpdateOverlayVersionText.Text = $"当前版本 V{currentVersion}  ->  新版本 V{manifest.Version}";
+            UpdateOverlayModeText.Text = $"更新方式：{updateMode}";
+            UpdateOverlayNotesText.Text = notes;
+            UpdateOverlayStatusText.Text = "确认后将开始下载更新。更新期间会锁定应用操作；下载完成后星海舰桥可能会自动关闭并重启。";
+            UpdateOverlayProgressBar.IsIndeterminate = false;
+            UpdateOverlayProgressBar.Value = 0;
+            UpdateOverlayProgressText.Text = "0%";
+            UpdateOverlayCancelButton.Visibility = Visibility.Visible;
+            UpdateOverlayCancelButton.IsEnabled = true;
+            UpdateOverlayPrimaryButton.Visibility = Visibility.Visible;
+            UpdateOverlayPrimaryButton.IsEnabled = true;
+            UpdateOverlayPrimaryButton.Content = "立即更新";
+            UpdateProgressOverlay.Visibility = Visibility.Visible;
+        });
+
+        return _updateConfirmationSource.Task;
+    }
+
+    public void ReportProgress(string status, long? percent)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            UpdateOverlayStatusText.Text = status;
+            UpdateOverlayCancelButton.Visibility = Visibility.Collapsed;
+            UpdateOverlayPrimaryButton.Visibility = Visibility.Collapsed;
+            UpdateOverlayProgressBar.IsIndeterminate = percent is null;
+            if (percent is null)
+            {
+                UpdateOverlayProgressText.Text = "下载中";
+                return;
+            }
+
+            var clamped = Math.Clamp(percent.Value, 0, 100);
+            UpdateOverlayProgressBar.Value = clamped;
+            UpdateOverlayProgressText.Text = $"{clamped}%";
+            UpdateProgressOverlay.Visibility = Visibility.Visible;
+        });
+    }
+
+    public void ReportCompleted(string status)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            UpdateOverlayStatusText.Text = status;
+            UpdateOverlayProgressBar.IsIndeterminate = false;
+            UpdateOverlayProgressBar.Value = 100;
+            UpdateOverlayProgressText.Text = "100%";
+            UpdateOverlayCancelButton.Visibility = Visibility.Collapsed;
+            UpdateOverlayPrimaryButton.Visibility = Visibility.Collapsed;
+            UpdateProgressOverlay.Visibility = Visibility.Visible;
+        });
+    }
+
+    public void ReportFailed(string status)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _updateOverlayCanClose = true;
+            UpdateOverlayStatusText.Text = status;
+            UpdateOverlayProgressBar.IsIndeterminate = false;
+            UpdateOverlayCancelButton.Visibility = Visibility.Collapsed;
+            UpdateOverlayPrimaryButton.Content = "关闭";
+            UpdateOverlayPrimaryButton.Visibility = Visibility.Visible;
+            UpdateOverlayPrimaryButton.IsEnabled = true;
+            UpdateProgressOverlay.Visibility = Visibility.Visible;
+        });
+    }
+
+    private void UpdateOverlayPrimaryButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_updateConfirmationSource is not null)
+        {
+            var source = _updateConfirmationSource;
+            _updateConfirmationSource = null;
+            UpdateOverlayPrimaryButton.Visibility = Visibility.Collapsed;
+            UpdateOverlayCancelButton.Visibility = Visibility.Collapsed;
+            UpdateOverlayStatusText.Text = "正在准备更新...";
+            source.TrySetResult(true);
+            return;
+        }
+
+        if (_updateOverlayCanClose)
+        {
+            UpdateProgressOverlay.Visibility = Visibility.Collapsed;
+            _updateOverlayCanClose = false;
+        }
+    }
+
+    private void UpdateOverlayCancelButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_updateConfirmationSource is null)
+        {
+            return;
+        }
+
+        var source = _updateConfirmationSource;
+        _updateConfirmationSource = null;
+        UpdateProgressOverlay.Visibility = Visibility.Collapsed;
+        source.TrySetResult(false);
+    }
+
     private async void SendFeedbackButton_Click(object sender, RoutedEventArgs e)
     {
         var message = FeedbackMessageBox.Text.Trim();
@@ -336,8 +450,8 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 FeedbackStatusText.Text = response.StatusCode == HttpStatusCode.NotFound
-                    ? "发送失败：当前服务器未更新反馈接口，请部署 0.3.8 服务器后重试。"
-                    : $"发送失败：{await ReadResponseErrorAsync(response)}";
+                    ? "发送反馈失败：当前服务器未更新反馈接口，请联系管理员更新服务器。"
+                    : FormatActionFailure("发送反馈", await ReadResponseErrorAsync(response));
                 return;
             }
 
@@ -787,18 +901,22 @@ public partial class MainWindow : Window
             var online = player.Online && (!isLocalPlayer || _isGameProcessRunning);
             var rawShip = online ? ShipNameLocalizer.NormalizeCode(player.Ship) : "Unknown";
             var shipConfidence = player.ShipConfidence;
+            var locationConfidence = player.LocationConfidence;
             var rawLocation = online ? FormatRawLocation(player.Location, player.NavigationTarget) : "Unknown";
-            var displayLocation = online ? FormatLocation(rawLocation) : "Unknown";
+            var displayLocation = online ? FormatLocationInference(rawLocation, locationConfidence) : "地点：未知";
             if (!isLocalPlayer && networkSnapshot is not null)
             {
                 rawShip = online ? ShipNameLocalizer.NormalizeCode(networkSnapshot.Ship) : "Unknown";
                 shipConfidence = string.IsNullOrWhiteSpace(networkSnapshot.ShipConfidence)
                     ? "Low"
                     : networkSnapshot.ShipConfidence!;
+                locationConfidence = string.IsNullOrWhiteSpace(networkSnapshot.LocationConfidence)
+                    ? "Low"
+                    : networkSnapshot.LocationConfidence!;
                 rawLocation = online && !string.IsNullOrWhiteSpace(networkSnapshot.Location)
                     ? FormatRawLocation(networkSnapshot.Location!, "")
                     : rawLocation;
-                displayLocation = online ? FormatLocation(rawLocation) : "Unknown";
+                displayLocation = online ? FormatLocationInference(rawLocation, locationConfidence) : "地点：未知";
             }
 
             var displayShip = ShipNameLocalizer.DisplayName(rawShip, _language);
@@ -820,6 +938,7 @@ public partial class MainWindow : Window
                 GetFleetNameBrush(player.Name),
                 rawShip,
                 shipConfidence,
+                locationConfidence,
                 rawLocation));
         }
 
@@ -839,13 +958,13 @@ public partial class MainWindow : Window
         if (local is not null)
         {
             var shipText = FormatUnknownForUser(local.Ship);
-            var locationText = FormatUnknownForUser(local.Location);
+            var locationText = local.Location;
             var statusText = local.Status.Equals("Online", StringComparison.OrdinalIgnoreCase)
                 ? "在线"
                 : "离线";
             ShipStateText.Text =
                 $"飞船：{shipText}{Environment.NewLine}" +
-                $"地点：{locationText}{Environment.NewLine}" +
+                $"{locationText}{Environment.NewLine}" +
                 $"状态：{statusText}";
         }
 
@@ -863,6 +982,34 @@ public partial class MainWindow : Window
         return confidence.Equals("Low", StringComparison.OrdinalIgnoreCase)
             ? $"可能在：{ship}"
             : $"飞船：{ship}";
+    }
+
+    private string FormatLocationInference(string location, string? confidence)
+    {
+        var displayLocation = FormatLocationForUser(location);
+        if (displayLocation.Equals("未知", StringComparison.OrdinalIgnoreCase))
+        {
+            return "地点：未知";
+        }
+
+        return confidence switch
+        {
+            { } value when value.Equals("High", StringComparison.OrdinalIgnoreCase) => $"地点：{displayLocation}",
+            { } value when value.Equals("Medium", StringComparison.OrdinalIgnoreCase) => $"可能在：{displayLocation}",
+            { } value when value.Equals("Low", StringComparison.OrdinalIgnoreCase) => $"可能离开：{displayLocation}",
+            _ => $"可能离开：{displayLocation}"
+        };
+    }
+
+    private static int LocationEvidenceScoreFromConfidence(string? confidence)
+    {
+        return confidence switch
+        {
+            { } value when value.Equals("High", StringComparison.OrdinalIgnoreCase) => 85,
+            { } value when value.Equals("Medium", StringComparison.OrdinalIgnoreCase) => 55,
+            { } value when value.Equals("Low", StringComparison.OrdinalIgnoreCase) => 20,
+            _ => 15
+        };
     }
 
     private string GetFleetRole(string playerName, string? callsign)
@@ -977,6 +1124,75 @@ public partial class MainWindow : Window
     private bool CanCurrentUserRemoveMembers()
     {
         return HasCurrentUserFleetPermission(permission => permission.CanRemoveMembers);
+    }
+
+    private void RefreshFleetManagementPermissions()
+    {
+        if (ManageFleetTab is null)
+        {
+            return;
+        }
+
+        var canOpenManagement = CanCurrentUserOpenFleetManagement();
+        ManageFleetTab.Visibility = canOpenManagement ? Visibility.Visible : Visibility.Collapsed;
+        if (!canOpenManagement)
+        {
+            if (MainTabs is not null && MainTabs.SelectedItem == ManageFleetTab)
+            {
+                MainTabs.SelectedItem = FleetTab;
+                SetActiveNav(MyFleetNavButton);
+            }
+
+            return;
+        }
+
+        var canManageFleetInfo = CanCurrentUserManageFleetInfo();
+        var canPublishTasks = CanCurrentUserPublishTasks();
+        var canPublishPlans = CanCurrentUserPublishPlans();
+        var canRemoveMembers = CanCurrentUserRemoveMembers();
+        var isCommander = IsCurrentUserFleetCommander();
+
+        SetManageFleetTabVisibility(ManageFleetNoticeTab, canManageFleetInfo);
+        SetManageFleetTabVisibility(ManageFleetProfileTab, canManageFleetInfo);
+        SetManageFleetTabVisibility(FleetApplicationsTab, canManageFleetInfo);
+        SetManageFleetTabVisibility(ManageFleetTaskTab, canPublishTasks);
+        SetManageFleetTabVisibility(ManageFleetPlanTab, canPublishPlans);
+        SetManageFleetTabVisibility(ManageFleetMembersTab, isCommander || canRemoveMembers);
+        SetManageFleetTabVisibility(ManageFleetLogTab, true);
+        SetManageFleetTabVisibility(ManageFleetShipsTab, true);
+        SetManageFleetTabVisibility(ManageFleetDisbandTab, isCommander);
+        SelectFirstVisibleManageFleetTab();
+    }
+
+    private static void SetManageFleetTabVisibility(TabItem? tab, bool isVisible)
+    {
+        if (tab is not null)
+        {
+            tab.Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private void SelectFirstVisibleManageFleetTab()
+    {
+        if (ManageFleetTabs is null)
+        {
+            return;
+        }
+
+        if (ManageFleetTabs.SelectedItem is TabItem selected &&
+            selected.Visibility == Visibility.Visible)
+        {
+            return;
+        }
+
+        foreach (var item in ManageFleetTabs.Items.OfType<TabItem>())
+        {
+            if (item.Visibility == Visibility.Visible)
+            {
+                ManageFleetTabs.SelectedItem = item;
+                return;
+            }
+        }
     }
 
     private IEnumerable<string> EnumerateLocalIdentities()
@@ -1542,9 +1758,9 @@ public partial class MainWindow : Window
         _isNetworkSyncRunning = true;
         try
         {
-            var pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
             var pulledFleets = await PullNetworkFleetsAsync(silent: true);
             var pulledPlayers = await PullNetworkSnapshotsAsync(silent: true);
+            var pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
             if (pushedLocal || pulledFleets || pulledPlayers)
             {
                 _networkSyncFailureCount = 0;
@@ -1944,7 +2160,7 @@ public partial class MainWindow : Window
             if (!response.IsSuccessStatusCode)
             {
                 var error = await ReadResponseErrorAsync(response);
-                return $"发送失败：{MapVerificationError(error)}";
+                return FormatActionFailure("发送验证码", MapVerificationError(error));
             }
 
             return "验证码已发送，10 分钟内有效。";
@@ -2044,14 +2260,20 @@ public partial class MainWindow : Window
             return "请输入邮箱地址。";
         }
 
-        return string.IsNullOrWhiteSpace(serverError)
-            ? "服务器没有返回详细原因。"
-            : serverError;
+        return NormalizeServerError(serverError, "发送验证码");
     }
 
     private static string MapAuthenticationError(HttpStatusCode statusCode, string serverError, bool isRegister)
     {
+        var actionName = isRegister ? "注册" : "登录";
+        var cleanedServerError = NormalizeServerError(serverError, actionName);
         var normalized = serverError.ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(cleanedServerError) &&
+            ContainsUserFacingError(cleanedServerError))
+        {
+            return FormatActionFailure(actionName, cleanedServerError);
+        }
+
         if (statusCode == HttpStatusCode.Unauthorized)
         {
             return isRegister
@@ -2089,9 +2311,58 @@ public partial class MainWindow : Window
             return "请输入登录邮箱和密码。";
         }
 
-        return string.IsNullOrWhiteSpace(serverError)
-            ? $"{(isRegister ? "注册" : "登录")}失败：服务器没有返回详细原因。"
-            : $"{(isRegister ? "注册" : "登录")}失败：{serverError}";
+        return FormatActionFailure(actionName, cleanedServerError);
+    }
+
+    private static string FormatActionFailure(string actionName, string? reason)
+    {
+        var cleaned = NormalizeServerError(reason, actionName);
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            cleaned = "服务器没有返回详细原因。";
+        }
+
+        return $"{actionName}失败：{cleaned}";
+    }
+
+    private static string NormalizeServerError(string? serverError, string actionName)
+    {
+        var cleaned = (serverError ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return "";
+        }
+
+        var prefixes = new[]
+        {
+            $"{actionName}失败：",
+            $"{actionName}失败:",
+            "发送失败：",
+            "发送失败:"
+        };
+
+        foreach (var prefix in prefixes)
+        {
+            if (cleaned.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return cleaned[prefix.Length..].Trim();
+            }
+        }
+
+        return cleaned;
+    }
+
+    private static bool ContainsUserFacingError(string message)
+    {
+        return message.Contains('：') ||
+               message.Contains("验证码", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("邮箱", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("邮件", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("密码", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("呼号", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("SMTP", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("未配置", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("过期", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string MapNetworkException(Exception exception)
@@ -2195,7 +2466,7 @@ public partial class MainWindow : Window
             local?.RawShip ?? "Unknown",
             local?.ShipConfidence ?? "None",
             local?.RawLocation ?? "Unknown",
-            "Low",
+            local?.LocationConfidence ?? "None",
             DateTimeOffset.UtcNow,
             BuildAvatarImageData(),
             BuildOwnedShipSnapshots());
@@ -2792,7 +3063,7 @@ public partial class MainWindow : Window
                     ? "None"
                     : "Low",
                 string.IsNullOrWhiteSpace(member.Location) ? "Unknown" : member.Location,
-                "Low",
+                string.IsNullOrWhiteSpace(member.LocationConfidence) ? "Low" : member.LocationConfidence,
                 member.LastUpdated == default ? DateTimeOffset.UtcNow : member.LastUpdated,
                 member.AvatarImageData,
                 null);
@@ -2857,7 +3128,7 @@ public partial class MainWindow : Window
                 FleetEventType.PlayerLocationChanged,
                 snapshot.Name,
                 Location: snapshot.Location,
-                LocationEvidenceScore: 55,
+                LocationEvidenceScore: LocationEvidenceScoreFromConfidence(snapshot.LocationConfidence),
                 LocationEvidence: "Fleet member sync",
                 Timestamp: timestamp));
         }
@@ -3030,7 +3301,7 @@ public partial class MainWindow : Window
                 FleetEventType.PlayerLocationChanged,
                 snapshot.Name,
                 Location: snapshot.Location,
-                LocationEvidenceScore: 55,
+                LocationEvidenceScore: LocationEvidenceScoreFromConfidence(snapshot.LocationConfidence),
                 LocationEvidence: "Network relay",
                 Timestamp: snapshot.LastUpdated));
         }
@@ -3112,7 +3383,44 @@ public partial class MainWindow : Window
     private void MergeNetworkFleetSquads(NetworkFleetSnapshot snapshot)
     {
         var changed = false;
-        foreach (var squadSnapshot in snapshot.Squads ?? [])
+        var remoteSquadSnapshots = snapshot.Squads ?? [];
+        var remoteSquadNames = remoteSquadSnapshots
+            .Where(squad => !string.IsNullOrWhiteSpace(squad.Name))
+            .Select(squad => squad.Name.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (snapshot.Squads is not null)
+        {
+            var removedSquadNames = _squads
+                .Where(squad => !remoteSquadNames.Contains(squad.Name))
+                .Select(squad => squad.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (removedSquadNames.Count > 0)
+            {
+                for (var index = _squads.Count - 1; index >= 0; index--)
+                {
+                    if (removedSquadNames.Contains(_squads[index].Name))
+                    {
+                        _squads.RemoveAt(index);
+                        changed = true;
+                    }
+                }
+
+                if (_joinedSquad is not null && removedSquadNames.Contains(_joinedSquad.Name))
+                {
+                    _joinedSquad = null;
+                }
+
+                if (_selectedSquad is not null && removedSquadNames.Contains(_selectedSquad.Name))
+                {
+                    _selectedSquad = _joinedSquad ?? _squads.FirstOrDefault();
+                    SquadSelectionList.SelectedItem = _selectedSquad;
+                }
+            }
+        }
+
+        foreach (var squadSnapshot in remoteSquadSnapshots)
         {
             if (string.IsNullOrWhiteSpace(squadSnapshot.Name))
             {
@@ -3132,7 +3440,8 @@ public partial class MainWindow : Window
                     RallyPoint = string.IsNullOrWhiteSpace(squadSnapshot.RallyPoint) ? "Use Global" : squadSnapshot.RallyPoint!,
                     Type = string.IsNullOrWhiteSpace(squadSnapshot.Type) ? "Assault" : squadSnapshot.Type!,
                     Description = string.IsNullOrWhiteSpace(squadSnapshot.Description) ? "No squad briefing yet." : squadSnapshot.Description!,
-                    EmblemPath = SaveNetworkSquadEmblem(snapshot, squadSnapshot)
+                    EmblemPath = SaveNetworkSquadEmblem(snapshot, squadSnapshot),
+                    UpdatedAt = squadSnapshot.UpdatedAt
                 });
                 changed = true;
                 continue;
@@ -3143,13 +3452,25 @@ public partial class MainWindow : Window
             var nextRallyPoint = string.IsNullOrWhiteSpace(squadSnapshot.RallyPoint) ? existing.RallyPoint : squadSnapshot.RallyPoint!;
             var nextType = string.IsNullOrWhiteSpace(squadSnapshot.Type) ? existing.Type : squadSnapshot.Type!;
             var nextDescription = string.IsNullOrWhiteSpace(squadSnapshot.Description) ? existing.Description : squadSnapshot.Description!;
-            var nextEmblemPath = SaveNetworkSquadEmblem(snapshot, squadSnapshot) ?? existing.EmblemPath;
+            var remoteHasTimestamp = squadSnapshot.UpdatedAt != default;
+            var nextUpdatedAt = remoteHasTimestamp
+                ? squadSnapshot.UpdatedAt
+                : existing.UpdatedAt;
+            if (remoteHasTimestamp && existing.UpdatedAt != default && nextUpdatedAt < existing.UpdatedAt)
+            {
+                continue;
+            }
+
+            var nextEmblemPath = !remoteHasTimestamp && !string.IsNullOrWhiteSpace(existing.EmblemPath)
+                ? existing.EmblemPath
+                : SaveNetworkSquadEmblem(snapshot, squadSnapshot) ?? existing.EmblemPath;
             if (existing.Commander != nextCommander ||
                 existing.Mission != nextMission ||
                 existing.RallyPoint != nextRallyPoint ||
                 existing.Type != nextType ||
                 existing.Description != nextDescription ||
-                existing.EmblemPath != nextEmblemPath)
+                existing.EmblemPath != nextEmblemPath ||
+                existing.UpdatedAt != nextUpdatedAt)
             {
                 existing.Commander = nextCommander;
                 existing.Mission = nextMission;
@@ -3157,6 +3478,7 @@ public partial class MainWindow : Window
                 existing.Type = nextType;
                 existing.Description = nextDescription;
                 existing.EmblemPath = nextEmblemPath;
+                existing.UpdatedAt = nextUpdatedAt;
                 existing.RefreshComputed();
                 changed = true;
             }
@@ -3166,6 +3488,8 @@ public partial class MainWindow : Window
         {
             RenderSquads();
             RenderMySquad();
+            RefreshOverlayWindow();
+            SaveCurrentConfig();
         }
     }
 
@@ -3213,7 +3537,7 @@ public partial class MainWindow : Window
                 if (!silent)
                 {
                     var error = response.StatusCode == HttpStatusCode.NotFound
-                        ? "server notify endpoint is not available; deploy StarBridge 0.3.8 relay"
+                        ? "server notify endpoint is not available; deploy the latest StarBridge relay"
                         : await ReadResponseErrorAsync(response);
                     AppendOutput($"Fleet email notification failed: {error}");
                 }
@@ -3250,6 +3574,11 @@ public partial class MainWindow : Window
                         errorElement.ValueKind == JsonValueKind.String)
                     {
                         return errorElement.GetString() ?? $"{(int)response.StatusCode} {response.ReasonPhrase}";
+                    }
+
+                    if (document.RootElement.ValueKind == JsonValueKind.String)
+                    {
+                        return document.RootElement.GetString() ?? $"{(int)response.StatusCode} {response.ReasonPhrase}";
                     }
                 }
                 catch (JsonException)
@@ -3316,7 +3645,8 @@ public partial class MainWindow : Window
                 squad.Description,
                 squad.Mission,
                 squad.RallyPoint,
-                BuildImageDataFromPath(squad.EmblemPath, 512 * 1024)))
+                BuildImageDataFromPath(squad.EmblemPath, 512 * 1024),
+                squad.UpdatedAt))
             .ToArray();
     }
 
@@ -3437,7 +3767,8 @@ public partial class MainWindow : Window
                 string.IsNullOrWhiteSpace(local?.RawShip) ? local?.Ship ?? "Unknown" : local.RawShip,
                 string.IsNullOrWhiteSpace(local?.RawLocation) ? "Unknown" : local.RawLocation,
                 DateTimeOffset.UtcNow,
-                BuildAvatarImageData())
+                BuildAvatarImageData(),
+                local?.LocationConfidence ?? "None")
         ];
     }
 
@@ -3630,9 +3961,10 @@ public partial class MainWindow : Window
 
     private string? SaveNetworkFleetLogo(NetworkFleetSnapshot snapshot)
     {
+        var path = BuildNetworkFleetLogoPath(snapshot.Code);
         if (string.IsNullOrWhiteSpace(snapshot.LogoImageData))
         {
-            return null;
+            return File.Exists(path) ? path : null;
         }
 
         try
@@ -3650,15 +3982,6 @@ public partial class MainWindow : Window
                 return null;
             }
 
-            var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
-            Directory.CreateDirectory(directory);
-            var safeCode = new string(snapshot.Code.Where(char.IsLetterOrDigit).ToArray());
-            if (string.IsNullOrWhiteSpace(safeCode))
-            {
-                safeCode = "fleet";
-            }
-
-            var path = Path.Combine(directory, $"fleet-{safeCode}-logo.png");
             WriteImageFileIfChanged(path, bytes);
             return path;
         }
@@ -3690,21 +4013,8 @@ public partial class MainWindow : Window
                 return null;
             }
 
-            var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
-            Directory.CreateDirectory(directory);
-            var safeFleetCode = new string((fleetSnapshot.Code ?? "fleet").Where(char.IsLetterOrDigit).ToArray());
-            var safeSquadName = new string(squadSnapshot.Name.Where(char.IsLetterOrDigit).ToArray());
-            if (string.IsNullOrWhiteSpace(safeFleetCode))
-            {
-                safeFleetCode = "fleet";
-            }
-
-            if (string.IsNullOrWhiteSpace(safeSquadName))
-            {
-                safeSquadName = "squad";
-            }
-
-            var path = Path.Combine(directory, $"squad-{safeFleetCode}-{safeSquadName}-emblem.png");
+            var hash = Convert.ToHexString(SHA256.HashData(bytes))[..12].ToLowerInvariant();
+            var path = BuildNetworkSquadEmblemPath(fleetSnapshot.Code, squadSnapshot.Name, hash);
             WriteImageFileIfChanged(path, bytes);
             return path;
         }
@@ -3712,6 +4022,39 @@ public partial class MainWindow : Window
         {
             return null;
         }
+    }
+
+    private static string BuildNetworkFleetLogoPath(string? fleetCode)
+    {
+        var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
+        Directory.CreateDirectory(directory);
+        var safeCode = new string((fleetCode ?? "fleet").Where(char.IsLetterOrDigit).ToArray());
+        if (string.IsNullOrWhiteSpace(safeCode))
+        {
+            safeCode = "fleet";
+        }
+
+        return Path.Combine(directory, $"fleet-{safeCode}-logo.png");
+    }
+
+    private static string BuildNetworkSquadEmblemPath(string? fleetCode, string? squadName, string? contentHash = null)
+    {
+        var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
+        Directory.CreateDirectory(directory);
+        var safeFleetCode = new string((fleetCode ?? "fleet").Where(char.IsLetterOrDigit).ToArray());
+        var safeSquadName = new string((squadName ?? "squad").Where(char.IsLetterOrDigit).ToArray());
+        if (string.IsNullOrWhiteSpace(safeFleetCode))
+        {
+            safeFleetCode = "fleet";
+        }
+
+        if (string.IsNullOrWhiteSpace(safeSquadName))
+        {
+            safeSquadName = "squad";
+        }
+
+        var suffix = string.IsNullOrWhiteSpace(contentHash) ? "" : $"-{contentHash}";
+        return Path.Combine(directory, $"squad-{safeFleetCode}-{safeSquadName}-emblem{suffix}.png");
     }
 
     private static void WriteImageFileIfChanged(string path, byte[] bytes)
@@ -3884,7 +4227,8 @@ public partial class MainWindow : Window
                 Mission = string.IsNullOrWhiteSpace(squad.Mission) ? "Standby" : squad.Mission!,
                 RallyPoint = string.IsNullOrWhiteSpace(squad.RallyPoint) ? "Use Global" : squad.RallyPoint!,
                 Description = string.IsNullOrWhiteSpace(squad.Description) ? "No squad briefing yet." : squad.Description!,
-                EmblemPath = SaveNetworkSquadEmblem(snapshot, squad)
+                EmblemPath = SaveNetworkSquadEmblem(snapshot, squad),
+                UpdatedAt = squad.UpdatedAt
             });
         }
 
@@ -4215,7 +4559,8 @@ public partial class MainWindow : Window
                 squad.RallyPoint,
                 squad.Description,
                 squad.Type,
-                squad.EmblemPath)).ToArray(),
+                squad.EmblemPath,
+                squad.UpdatedAt)).ToArray(),
             _joinedSquad?.Name,
             _fleetActionPlans.Select(plan => new LocalFleetActionPlan(
                 plan.Id,
@@ -4298,7 +4643,8 @@ public partial class MainWindow : Window
                     RallyPoint = string.IsNullOrWhiteSpace(squad.RallyPoint) ? "Use Global" : squad.RallyPoint,
                     Description = string.IsNullOrWhiteSpace(squad.Description) ? "No squad briefing yet." : squad.Description,
                     Type = string.IsNullOrWhiteSpace(squad.Type) ? "Assault" : squad.Type,
-                    EmblemPath = squad.EmblemPath
+                    EmblemPath = squad.EmblemPath,
+                    UpdatedAt = squad.UpdatedAt
                 });
             }
 
@@ -4817,15 +5163,25 @@ public partial class MainWindow : Window
             return OverlayVisualTheme.Default;
         }
 
-        return code.Split('_', 2)[0].ToUpperInvariant() switch
+        var normalizedCode = code.ToUpperInvariant();
+        var manufacturerCode = normalizedCode.Split('_', 2)[0];
+
+        return manufacturerCode switch
         {
             "ANVL" => OverlayVisualTheme.Anvil,
             "DRAK" => OverlayVisualTheme.Drake,
             "ARGO" => OverlayVisualTheme.Argo,
             "MRAI" or "MIRAI" => OverlayVisualTheme.Mirai,
+            "MISC" when normalizedCode.Contains("RAZOR", StringComparison.OrdinalIgnoreCase) => OverlayVisualTheme.Mirai,
+            "MISC" => OverlayVisualTheme.Musashi,
             "CRUS" => OverlayVisualTheme.Crusader,
             "AEGS" => OverlayVisualTheme.Aegis,
             "RSI" => OverlayVisualTheme.Rsi,
+            "ORIG" => OverlayVisualTheme.Origin,
+            "GAMA" => OverlayVisualTheme.Gatac,
+            "XIAN" when normalizedCode.Contains("RAILEN", StringComparison.OrdinalIgnoreCase) => OverlayVisualTheme.Gatac,
+            "XIAN" or "AOPOA" or "AOPA" => OverlayVisualTheme.Aopoa,
+            "ESPR" => OverlayVisualTheme.Esperia,
             _ => OverlayVisualTheme.Default
         };
     }
@@ -4951,10 +5307,15 @@ public partial class MainWindow : Window
                 1 => OverlayVisualTheme.Anvil,
                 2 => OverlayVisualTheme.Drake,
                 3 => OverlayVisualTheme.Argo,
-                4 => OverlayVisualTheme.Mirai,
-                5 => OverlayVisualTheme.Crusader,
-                6 => OverlayVisualTheme.Aegis,
-                7 => OverlayVisualTheme.Rsi,
+                4 => OverlayVisualTheme.Musashi,
+                5 => OverlayVisualTheme.Mirai,
+                6 => OverlayVisualTheme.Crusader,
+                7 => OverlayVisualTheme.Aegis,
+                8 => OverlayVisualTheme.Rsi,
+                9 => OverlayVisualTheme.Origin,
+                10 => OverlayVisualTheme.Aopoa,
+                11 => OverlayVisualTheme.Esperia,
+                12 => OverlayVisualTheme.Gatac,
                 _ => OverlayVisualTheme.Default
             },
             AutoThemeByShipCheck.IsChecked == true,
@@ -5559,6 +5920,7 @@ public partial class MainWindow : Window
         }
 
         squad.Description = MySquadDescriptionBox.Text.Trim();
+        squad.UpdatedAt = DateTimeOffset.UtcNow;
         squad.RefreshComputed();
         RefreshOverlayWindow();
         _ = PushFleetSquadsAsync(silent: true);
@@ -5653,7 +6015,8 @@ public partial class MainWindow : Window
             Type = squadType,
             Description = string.IsNullOrWhiteSpace(CreateSquadDescriptionBox.Text)
                 ? "No squad briefing yet."
-                : CreateSquadDescriptionBox.Text.Trim()
+                : CreateSquadDescriptionBox.Text.Trim(),
+            UpdatedAt = DateTimeOffset.UtcNow
         };
 
         _squads.Add(squad);
@@ -6128,6 +6491,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!CanCurrentUserPublishTasks())
+        {
+            PublishTaskValidationText.Text = "当前账号没有发布任务的权限。";
+            return;
+        }
+
         OpenPublishTaskPanel();
     }
 
@@ -6135,6 +6504,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("发布集结点需要先登录星海舰桥账号。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserPublishTasks())
+        {
+            PublishTaskValidationText.Text = "当前账号没有发布集结点的权限。";
             return;
         }
 
@@ -6187,6 +6562,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("发布任务需要先登录星海舰桥账号。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserPublishTasks())
+        {
+            PublishTaskValidationText.Text = "当前账号没有发布任务的权限。";
             return;
         }
 
@@ -6260,6 +6641,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!CanCurrentUserPublishTasks())
+        {
+            AppendOutput("Current account cannot edit fleet tasks.");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
         {
             return;
@@ -6272,6 +6659,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("完成任务需要先登录。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserPublishTasks())
+        {
+            AppendOutput("Current account cannot complete fleet tasks.");
             return;
         }
 
@@ -6297,6 +6690,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!CanCurrentUserPublishTasks())
+        {
+            AppendOutput("Current account cannot delete fleet tasks.");
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
         {
             return;
@@ -6316,6 +6715,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("再次通知需要先登录。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserPublishTasks())
+        {
+            AppendOutput("Current account cannot re-notify fleet tasks.");
             return;
         }
 
@@ -6352,6 +6757,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!CanCurrentUserManageFleetInfo())
+        {
+            FleetNoticeValidationText.Text = "当前账号没有发布舰队公告的权限。";
+            return;
+        }
+
         OpenFleetNoticeEditor();
     }
 
@@ -6359,6 +6770,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("创建行动计划需要先登录。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserPublishPlans())
+        {
+            ActionPlanValidationText.Text = "当前账号没有发布行动计划的权限。";
             return;
         }
 
@@ -6465,13 +6882,18 @@ public partial class MainWindow : Window
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.8";
+            : "0.3.11";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         if (_selectedFleetInfoPanel == FleetInfoPanelKind.ActionPlan)
         {
+            if (!CanCurrentUserPublishPlans())
+            {
+                return;
+            }
+
             if (!EnsureLoggedIn("编辑行动计划需要先登录。"))
             {
                 return;
@@ -6483,7 +6905,7 @@ public partial class MainWindow : Window
         {
             OpenCurrentTaskDetail();
         }
-        else if (_selectedFleetInfoPanel == FleetInfoPanelKind.Notice && IsCurrentUserFleetCommander())
+        else if (_selectedFleetInfoPanel == FleetInfoPanelKind.Notice && CanCurrentUserManageFleetInfo())
         {
             OpenFleetNoticeEditor();
         }
@@ -6491,6 +6913,11 @@ public partial class MainWindow : Window
 
     private void OpenFleetNoticeEditor()
     {
+        if (!CanCurrentUserManageFleetInfo())
+        {
+            return;
+        }
+
         FleetNoticeTitleBox.Text = _fleetNoticeTitle;
         FleetNoticeContentBox.Text = _fleetNoticeContent;
         FleetNoticeValidationText.Text = "";
@@ -6506,6 +6933,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("发布舰队公告需要先登录。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserManageFleetInfo())
+        {
+            FleetNoticeValidationText.Text = "当前账号没有发布舰队公告的权限。";
             return;
         }
 
@@ -6536,9 +6969,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!IsCurrentUserFleetCommander())
+        if (!CanCurrentUserManageFleetInfo())
         {
-            FleetDescriptionStatusText.Text = "只有舰队指挥官可以修改舰队介绍。";
+            FleetDescriptionStatusText.Text = "当前账号没有修改舰队介绍的权限。";
             return;
         }
 
@@ -6603,6 +7036,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!CanCurrentUserPublishPlans())
+        {
+            return;
+        }
+
         ActionPlanTitleBox.Text = _fleetActionTitle;
         ActionPlanContentBox.Text = _fleetActionContent;
         var start = _fleetActionStartTime ?? DateTime.Now.AddHours(1);
@@ -6622,6 +7060,12 @@ public partial class MainWindow : Window
     {
         if (!EnsureLoggedIn("发布行动计划需要先登录。"))
         {
+            return;
+        }
+
+        if (!CanCurrentUserPublishPlans())
+        {
+            ActionPlanValidationText.Text = "当前账号没有发布行动计划的权限。";
             return;
         }
 
@@ -6916,9 +7360,9 @@ public partial class MainWindow : Window
 
     private async void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
     {
-        if (_hasFleet && !IsCurrentUserFleetCommander())
+        if (_hasFleet && !CanCurrentUserManageFleetInfo())
         {
-            AppendOutput("Only the fleet commander can update the fleet logo.");
+            AppendOutput("Current account cannot update the fleet logo.");
             return;
         }
 
@@ -6942,7 +7386,7 @@ public partial class MainWindow : Window
 
     private void FleetHeaderLogo_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        if (!_hasFleet || !IsCurrentUserFleetCommander())
+        if (!_hasFleet || !CanCurrentUserManageFleetInfo())
         {
             return;
         }
@@ -6992,6 +7436,7 @@ public partial class MainWindow : Window
         }
 
         squad.EmblemPath = croppedPath;
+        squad.UpdatedAt = DateTimeOffset.UtcNow;
         squad.RefreshComputed();
         RenderSquads();
         RenderMySquad();
@@ -7223,10 +7668,15 @@ public partial class MainWindow : Window
             OverlayVisualTheme.Anvil => new SolidColorBrush(Color.FromRgb(78, 255, 171)),
             OverlayVisualTheme.Drake => new SolidColorBrush(Color.FromRgb(255, 178, 48)),
             OverlayVisualTheme.Argo => new SolidColorBrush(Color.FromRgb(255, 132, 73)),
-            OverlayVisualTheme.Mirai => new SolidColorBrush(Color.FromRgb(255, 228, 128)),
+            OverlayVisualTheme.Musashi => new SolidColorBrush(Color.FromRgb(255, 228, 128)),
+            OverlayVisualTheme.Mirai => new SolidColorBrush(Color.FromRgb(134, 225, 255)),
             OverlayVisualTheme.Crusader => new SolidColorBrush(Color.FromRgb(110, 205, 255)),
             OverlayVisualTheme.Aegis => new SolidColorBrush(Color.FromRgb(84, 245, 232)),
             OverlayVisualTheme.Rsi => new SolidColorBrush(Color.FromRgb(214, 201, 255)),
+            OverlayVisualTheme.Origin => new SolidColorBrush(Color.FromRgb(176, 219, 255)),
+            OverlayVisualTheme.Aopoa => new SolidColorBrush(Color.FromRgb(126, 255, 237)),
+            OverlayVisualTheme.Esperia => new SolidColorBrush(Color.FromRgb(255, 92, 112)),
+            OverlayVisualTheme.Gatac => new SolidColorBrush(Color.FromRgb(255, 205, 230)),
             _ => new SolidColorBrush(Color.FromRgb(83, 190, 255))
         };
     }
@@ -7539,10 +7989,15 @@ public partial class MainWindow : Window
             OverlayVisualTheme.Anvil => 1,
             OverlayVisualTheme.Drake => 2,
             OverlayVisualTheme.Argo => 3,
-            OverlayVisualTheme.Mirai => 4,
-            OverlayVisualTheme.Crusader => 5,
-            OverlayVisualTheme.Aegis => 6,
-            OverlayVisualTheme.Rsi => 7,
+            OverlayVisualTheme.Musashi => 4,
+            OverlayVisualTheme.Mirai => 5,
+            OverlayVisualTheme.Crusader => 6,
+            OverlayVisualTheme.Aegis => 7,
+            OverlayVisualTheme.Rsi => 8,
+            OverlayVisualTheme.Origin => 9,
+            OverlayVisualTheme.Aopoa => 10,
+            OverlayVisualTheme.Esperia => 11,
+            OverlayVisualTheme.Gatac => 12,
             _ => 0
         };
         OverlayOpacitySlider.Value = Math.Clamp(_overlaySettings.Opacity, 0.15, 1.0) * 100.0;
@@ -7660,16 +8115,21 @@ public partial class MainWindow : Window
         ShowGameNameOnlyRadio.Content = zh ? "只显示游戏名" : "Only game name";
         OverlayThemeLabel.Text = zh ? "外观风格" : "APPEARANCE";
         AutoThemeByShipCheck.Content = zh ? "自动切换至当前飞船厂商风格" : "Auto switch to current ship manufacturer style";
-        if (OverlayThemeBox.Items.Count >= 8)
+        if (OverlayThemeBox.Items.Count >= 13)
         {
             ((ComboBoxItem)OverlayThemeBox.Items[0]).Content = zh ? "默认" : "Default";
             ((ComboBoxItem)OverlayThemeBox.Items[1]).Content = zh ? "铁砧" : "Anvil";
             ((ComboBoxItem)OverlayThemeBox.Items[2]).Content = zh ? "德雷克" : "Drake";
             ((ComboBoxItem)OverlayThemeBox.Items[3]).Content = zh ? "南船座" : "Argo";
-            ((ComboBoxItem)OverlayThemeBox.Items[4]).Content = zh ? "武藏" : "Mirai";
-            ((ComboBoxItem)OverlayThemeBox.Items[5]).Content = zh ? "十字军" : "Crusader";
-            ((ComboBoxItem)OverlayThemeBox.Items[6]).Content = zh ? "圣盾" : "Aegis";
-            ((ComboBoxItem)OverlayThemeBox.Items[7]).Content = "RSI";
+            ((ComboBoxItem)OverlayThemeBox.Items[4]).Content = zh ? "武藏" : "MISC";
+            ((ComboBoxItem)OverlayThemeBox.Items[5]).Content = zh ? "未来" : "Mirai";
+            ((ComboBoxItem)OverlayThemeBox.Items[6]).Content = zh ? "十字军" : "Crusader";
+            ((ComboBoxItem)OverlayThemeBox.Items[7]).Content = zh ? "圣盾" : "Aegis";
+            ((ComboBoxItem)OverlayThemeBox.Items[8]).Content = "RSI";
+            ((ComboBoxItem)OverlayThemeBox.Items[9]).Content = zh ? "起源" : "Origin";
+            ((ComboBoxItem)OverlayThemeBox.Items[10]).Content = zh ? "奥波亚" : "Aopoa";
+            ((ComboBoxItem)OverlayThemeBox.Items[11]).Content = zh ? "埃斯佩里亚" : "Esperia";
+            ((ComboBoxItem)OverlayThemeBox.Items[12]).Content = zh ? "盖塔克" : "Gatac";
         }
         CrosshairLabel.Text = zh ? "虚拟准星" : "VIRTUAL CROSSHAIR";
         ShowCrosshairCheck.Content = zh ? "显示虚拟准星" : "Show virtual crosshair";
@@ -7813,9 +8273,7 @@ public partial class MainWindow : Window
         RefreshTaskManagementPanel();
 
         LoadFleetHeaderLogoPreview();
-        ManageFleetTab.Visibility = CanCurrentUserOpenFleetManagement()
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        RefreshFleetManagementPermissions();
     }
 
     private static string FormatCommanderName(string? callsign, string? gameName, string fallback = "Unassigned")
@@ -7873,7 +8331,7 @@ public partial class MainWindow : Window
 
         FleetActionPlanTitleText.Text = _fleetNoticeTitle;
         FleetActionPlanSummaryText.Text = _fleetNoticeContent;
-        FleetActionPlanTimeText.Text = IsCurrentUserFleetCommander()
+        FleetActionPlanTimeText.Text = CanCurrentUserManageFleetInfo()
             ? "点击编辑公告"
             : "";
         JoinFleetActionButton.Visibility = Visibility.Collapsed;
@@ -7884,10 +8342,10 @@ public partial class MainWindow : Window
         var hasTask = !string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle);
         if (!hasTask)
         {
-            FleetActionPlanTitleText.Text = IsCurrentUserFleetCommander()
+            FleetActionPlanTitleText.Text = CanCurrentUserPublishTasks()
                 ? "暂无当前任务"
                 : "当前无任务";
-            FleetActionPlanSummaryText.Text = IsCurrentUserFleetCommander()
+            FleetActionPlanSummaryText.Text = CanCurrentUserPublishTasks()
                 ? "请前往 管理舰队-发布任务 进行任务发布"
                 : "";
             FleetActionPlanTimeText.Text = "";
@@ -7997,6 +8455,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        RefreshFleetManagementPermissions();
+
         ManageFleetNoticeTitleText.Text = string.IsNullOrWhiteSpace(_fleetNoticeTitle)
             ? "暂无舰队公告"
             : _fleetNoticeTitle;
@@ -8027,10 +8487,12 @@ public partial class MainWindow : Window
             ? $"发布时间 / {_fleetCurrentTaskTime:yyyy-MM-dd HH:mm}"
             : "";
 
-        EditCurrentTaskButton.IsEnabled = hasTask;
-        CompleteCurrentTaskButton.IsEnabled = hasTask;
-        DeleteCurrentTaskButton.IsEnabled = hasTask;
-        RenotifyCurrentTaskButton.IsEnabled = hasTask;
+        var canPublishTasks = CanCurrentUserPublishTasks();
+        OpenPublishTaskButton.IsEnabled = canPublishTasks;
+        EditCurrentTaskButton.IsEnabled = hasTask && canPublishTasks;
+        CompleteCurrentTaskButton.IsEnabled = hasTask && canPublishTasks;
+        DeleteCurrentTaskButton.IsEnabled = hasTask && canPublishTasks;
+        RenotifyCurrentTaskButton.IsEnabled = hasTask && canPublishTasks;
         FleetTaskHistoryEmptyText.Visibility = _fleetTaskHistory.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;

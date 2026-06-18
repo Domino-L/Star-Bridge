@@ -562,7 +562,7 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             return;
         }
 
-        if (theme == OverlayVisualTheme.Mirai)
+        if (theme == OverlayVisualTheme.Musashi)
         {
             PanelBackgroundBrush = BrushFromArgb(188, 20, 17, 5);
             PanelBorderBrush = BrushFromRgb(255, 212, 98);
@@ -574,6 +574,21 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             OnlineBrush = BrushFromRgb(94, 255, 225);
             OfflineBrush = BrushFromRgb(255, 111, 95);
             SetCrosshairBrushes(255, 228, 128, 91, 255, 230);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Mirai)
+        {
+            PanelBackgroundBrush = BrushFromArgb(184, 5, 20, 30);
+            PanelBorderBrush = BrushFromRgb(83, 196, 255);
+            TitleBrush = BrushFromRgb(134, 225, 255);
+            TextBrush = BrushFromRgb(235, 250, 255);
+            MutedBrush = BrushFromRgb(122, 191, 220);
+            AlertBrush = BrushFromRgb(255, 92, 72);
+            IconBackgroundBrush = BrushFromArgb(120, 8, 44, 64);
+            OnlineBrush = BrushFromRgb(105, 255, 218);
+            OfflineBrush = BrushFromRgb(255, 91, 74);
+            SetCrosshairBrushes(134, 225, 255, 255, 92, 72);
             return;
         }
 
@@ -619,6 +634,66 @@ public sealed class OverlayViewModel : System.ComponentModel.INotifyPropertyChan
             OnlineBrush = BrushFromRgb(116, 238, 210);
             OfflineBrush = BrushFromRgb(255, 112, 86);
             SetCrosshairBrushes(214, 201, 255, 255, 151, 58);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Origin)
+        {
+            PanelBackgroundBrush = BrushFromArgb(178, 7, 17, 28);
+            PanelBorderBrush = BrushFromRgb(88, 170, 255);
+            TitleBrush = BrushFromRgb(176, 219, 255);
+            TextBrush = BrushFromRgb(245, 250, 255);
+            MutedBrush = BrushFromRgb(132, 185, 232);
+            AlertBrush = BrushFromRgb(255, 96, 83);
+            IconBackgroundBrush = BrushFromArgb(116, 16, 36, 58);
+            OnlineBrush = BrushFromRgb(135, 255, 180);
+            OfflineBrush = BrushFromRgb(255, 104, 94);
+            SetCrosshairBrushes(176, 219, 255, 255, 96, 83);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Aopoa)
+        {
+            PanelBackgroundBrush = BrushFromArgb(182, 4, 28, 30);
+            PanelBorderBrush = BrushFromRgb(77, 255, 225);
+            TitleBrush = BrushFromRgb(126, 255, 237);
+            TextBrush = BrushFromRgb(230, 255, 250);
+            MutedBrush = BrushFromRgb(116, 211, 198);
+            AlertBrush = BrushFromRgb(171, 255, 67);
+            IconBackgroundBrush = BrushFromArgb(122, 0, 58, 62);
+            OnlineBrush = BrushFromRgb(156, 255, 77);
+            OfflineBrush = BrushFromRgb(255, 72, 64);
+            SetCrosshairBrushes(126, 255, 237, 171, 255, 67);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Esperia)
+        {
+            PanelBackgroundBrush = BrushFromArgb(184, 30, 6, 20);
+            PanelBorderBrush = BrushFromRgb(255, 60, 78);
+            TitleBrush = BrushFromRgb(255, 92, 112);
+            TextBrush = BrushFromRgb(255, 228, 236);
+            MutedBrush = BrushFromRgb(211, 125, 162);
+            AlertBrush = BrushFromRgb(168, 77, 255);
+            IconBackgroundBrush = BrushFromArgb(126, 70, 8, 34);
+            OnlineBrush = BrushFromRgb(255, 108, 128);
+            OfflineBrush = BrushFromRgb(152, 74, 255);
+            SetCrosshairBrushes(255, 92, 112, 168, 77, 255);
+            return;
+        }
+
+        if (theme == OverlayVisualTheme.Gatac)
+        {
+            PanelBackgroundBrush = BrushFromArgb(184, 24, 10, 32);
+            PanelBorderBrush = BrushFromRgb(255, 176, 210);
+            TitleBrush = BrushFromRgb(255, 205, 230);
+            TextBrush = BrushFromRgb(255, 238, 246);
+            MutedBrush = BrushFromRgb(203, 147, 221);
+            AlertBrush = BrushFromRgb(255, 122, 76);
+            IconBackgroundBrush = BrushFromArgb(124, 54, 18, 64);
+            OnlineBrush = BrushFromRgb(255, 190, 230);
+            OfflineBrush = BrushFromRgb(255, 117, 76);
+            SetCrosshairBrushes(255, 205, 230, 255, 122, 76);
             return;
         }
 

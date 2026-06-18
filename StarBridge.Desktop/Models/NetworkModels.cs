@@ -89,7 +89,8 @@ public sealed record NetworkFleetMemberSnapshot(
     string? Ship,
     string? Location,
     DateTimeOffset LastUpdated,
-    string? AvatarImageData = null);
+    string? AvatarImageData = null,
+    string? LocationConfidence = null);
 
 public sealed record NetworkFleetShipSnapshot(
     string Code,
@@ -124,7 +125,8 @@ public sealed record NetworkSquadSnapshot(
     string? Description,
     string? Mission = null,
     string? RallyPoint = null,
-    string? EmblemImageData = null);
+    string? EmblemImageData = null,
+    DateTimeOffset UpdatedAt = default);
 
 public sealed record FleetSquadMemberMutationRequest(
     string FleetCode,
@@ -188,7 +190,9 @@ public sealed record UpdateManifest(
     string? PackageUrl,
     string? Notes,
     bool Required = false,
-    DateTimeOffset? PublishedAt = null);
+    DateTimeOffset? PublishedAt = null,
+    string? DownloadSha256 = null,
+    string? PackageSha256 = null);
 
 public sealed record FleetNotificationRequest(
     string FleetCode,

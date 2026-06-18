@@ -1,11 +1,14 @@
-namespace StarBridge.Desktop;
-
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
+using WpfApplication = System.Windows.Application;
+using WpfMessageBox = System.Windows.MessageBox;
+
+namespace StarBridge.Desktop;
 
 internal sealed class AppUpdateService
 {
@@ -14,19 +17,22 @@ internal sealed class AppUpdateService
     private readonly Window _owner;
     private readonly Action<string> _setStatus;
     private readonly Action<bool> _setCheckButtonEnabled;
+    private readonly IAppUpdateUi? _updateUi;
 
     public AppUpdateService(
         HttpClient httpClient,
         Func<string, Uri> buildUri,
         Window owner,
         Action<string> setStatus,
-        Action<bool> setCheckButtonEnabled)
+        Action<bool> setCheckButtonEnabled,
+        IAppUpdateUi? updateUi = null)
     {
         _httpClient = httpClient;
         _buildUri = buildUri;
         _owner = owner;
         _setStatus = setStatus;
         _setCheckButtonEnabled = setCheckButtonEnabled;
+        _updateUi = updateUi;
     }
 
     public async Task CheckForInstallerUpdateAsync(bool silent, string currentVersion)
@@ -53,7 +59,11 @@ internal sealed class AppUpdateService
 
             if (!IsNewerVersion(manifest.Version, currentVersion))
             {
-                _setStatus($"当前已是最新版本 V{currentVersion}。");
+                if (!silent)
+                {
+                    _setStatus($"当前已是最新版本 V{currentVersion}。");
+                }
+
                 return;
             }
 
@@ -61,29 +71,44 @@ internal sealed class AppUpdateService
             _setStatus($"发现新版本 V{manifest.Version}。{notes}");
             if (string.IsNullOrWhiteSpace(manifest.PackageUrl) && string.IsNullOrWhiteSpace(manifest.DownloadUrl))
             {
-                _setStatus($"发现新版本 V{manifest.Version}。{notes} 服务器尚未配置下载地址。");
+                _setStatus($"发现新版本 V{manifest.Version}，但服务器尚未配置下载地址。");
                 return;
             }
 
-            var updateMode = string.IsNullOrWhiteSpace(manifest.PackageUrl) ? "完整安装包更新" : "软件内覆盖更新";
-            var message = $"发现新版本 V{manifest.Version}。\n\n{notes}\n\n更新方式：{updateMode}\n是否现在更新？";
-            if (MessageBox.Show(_owner, message, "星海舰桥更新", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+            var updateMode = string.IsNullOrWhiteSpace(manifest.PackageUrl)
+                ? "完整安装包更新"
+                : "应用内覆盖更新";
+            var shouldUpdate = _updateUi is not null
+                ? await _updateUi.ConfirmUpdateAsync(manifest, currentVersion, updateMode)
+                : WpfMessageBox.Show(
+                    _owner,
+                    $"发现新版本 V{manifest.Version}。\n\n{notes}\n\n更新方式：{updateMode}\n更新期间应用会暂时锁定，完成后可能会自动关闭并重启。\n是否现在更新？",
+                    "星海舰桥更新",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Information) == MessageBoxResult.Yes;
+
+            if (!shouldUpdate)
             {
-                if (!string.IsNullOrWhiteSpace(manifest.PackageUrl))
-                {
-                    await DownloadAndApplyPackageUpdateAsync(manifest);
-                }
-                else
-                {
-                    await DownloadAndRunInstallerUpdateAsync(manifest);
-                }
+                _setStatus($"已暂缓更新。当前版本 V{currentVersion}。");
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(manifest.PackageUrl))
+            {
+                await DownloadAndApplyPackageUpdateAsync(manifest);
+            }
+            else
+            {
+                await DownloadAndRunInstallerUpdateAsync(manifest);
             }
         }
         catch (Exception ex)
         {
             if (!silent)
             {
-                _setStatus($"检查更新失败：{ex.Message}");
+                var message = $"检查更新失败：{ex.Message}";
+                _setStatus(message);
+                _updateUi?.ReportFailed(message);
             }
         }
     }
@@ -92,11 +117,14 @@ internal sealed class AppUpdateService
     {
         if (!Uri.TryCreate(manifest.PackageUrl, UriKind.Absolute, out var packageUri))
         {
-            _setStatus("更新失败：服务器返回的覆盖更新包地址无效。");
+            const string message = "更新失败：服务器返回的覆盖更新包地址无效。";
+            _setStatus(message);
+            _updateUi?.ReportFailed(message);
             return;
         }
 
         _setCheckButtonEnabled(false);
+        _updateUi?.ReportProgress("正在准备应用内覆盖更新...", 0);
         try
         {
             var updateRoot = GetUpdateRoot();
@@ -108,9 +136,11 @@ internal sealed class AppUpdateService
 
             var safeVersion = string.Join("_", manifest.Version.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
             var packagePath = Path.Combine(updateRoot, $"StarBridge-{safeVersion}-win-x64-update.zip");
-            await DownloadUpdateFileAsync(packageUri, packagePath, manifest.Version);
+            await DownloadUpdateFileAsync(packageUri, packagePath, manifest.Version, manifest.PackageSha256);
 
-            _setStatus("下载完成，正在准备覆盖更新...");
+            const string status = "下载完成，正在关闭应用并执行覆盖更新。更新完成后将自动重启。";
+            _setStatus(status);
+            _updateUi?.ReportCompleted(status);
             var appDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var exePath = Environment.ProcessPath ?? Path.Combine(appDir, "Star Bridge.exe");
             var scriptPath = CreatePortableUpdateScript(updateRoot, packagePath, appDir, exePath, resultPath, logPath);
@@ -123,11 +153,13 @@ internal sealed class AppUpdateService
                 Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -TargetProcessId {Environment.ProcessId}"
             });
 
-            Application.Current.Shutdown();
+            WpfApplication.Current.Shutdown();
         }
         catch (Exception ex)
         {
-            _setStatus($"更新失败：{ex.Message}");
+            var message = $"更新失败：{ex.Message}";
+            _setStatus(message);
+            _updateUi?.ReportFailed(message);
             _setCheckButtonEnabled(true);
         }
     }
@@ -136,11 +168,14 @@ internal sealed class AppUpdateService
     {
         if (!Uri.TryCreate(manifest.DownloadUrl, UriKind.Absolute, out var downloadUri))
         {
-            _setStatus("更新失败：服务器返回的安装包地址无效。");
+            const string message = "更新失败：服务器返回的安装包地址无效。";
+            _setStatus(message);
+            _updateUi?.ReportFailed(message);
             return;
         }
 
         _setCheckButtonEnabled(false);
+        _updateUi?.ReportProgress("正在准备安装包更新...", 0);
         try
         {
             var updateRoot = GetUpdateRoot();
@@ -149,27 +184,32 @@ internal sealed class AppUpdateService
             var safeVersion = string.Join("_", manifest.Version.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
             var installerPath = Path.Combine(updateRoot, $"StarBridge-{safeVersion}-win-x64-setup.exe");
 
-            await DownloadUpdateFileAsync(downloadUri, installerPath, manifest.Version);
+            await DownloadUpdateFileAsync(downloadUri, installerPath, manifest.Version, manifest.DownloadSha256);
 
-            _setStatus("下载完成，正在启动覆盖安装...");
+            const string status = "下载完成，正在启动安装器。应用将自动关闭，并由安装器完成更新。";
+            _setStatus(status);
+            _updateUi?.ReportCompleted(status);
             Process.Start(new ProcessStartInfo(installerPath)
             {
                 UseShellExecute = true,
                 Arguments = "/CLOSEAPPLICATIONS /NORESTART /SP-"
             });
 
-            Application.Current.Shutdown();
+            WpfApplication.Current.Shutdown();
         }
         catch (Exception ex)
         {
-            _setStatus($"更新失败：{ex.Message}");
+            var message = $"更新失败：{ex.Message}";
+            _setStatus(message);
+            _updateUi?.ReportFailed(message);
             _setCheckButtonEnabled(true);
         }
     }
 
-    private async Task DownloadUpdateFileAsync(Uri downloadUri, string destinationPath, string version)
+    private async Task DownloadUpdateFileAsync(Uri downloadUri, string destinationPath, string version, string? expectedSha256)
     {
         _setStatus($"正在下载 V{version} 更新...");
+        _updateUi?.ReportProgress($"正在下载 V{version} 更新...", 0);
         using var updateClient = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
         using var response = await updateClient.GetAsync(downloadUri, HttpCompletionOption.ResponseHeadersRead);
         response.EnsureSuccessStatusCode();
@@ -177,6 +217,7 @@ internal sealed class AppUpdateService
         var totalBytes = response.Content.Headers.ContentLength;
         await using var source = await response.Content.ReadAsStreamAsync();
         await using var destination = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
         var buffer = new byte[128 * 1024];
         long receivedBytes = 0;
@@ -189,13 +230,35 @@ internal sealed class AppUpdateService
             }
 
             await destination.WriteAsync(buffer.AsMemory(0, read));
+            hasher.AppendData(buffer.AsSpan(0, read));
             receivedBytes += read;
             if (totalBytes is > 0)
             {
                 var percent = Math.Clamp(receivedBytes * 100 / totalBytes.Value, 0, 100);
                 _setStatus($"正在下载 V{version} 更新... {percent}%");
+                _updateUi?.ReportProgress($"正在下载 V{version} 更新...", percent);
+            }
+            else
+            {
+                _updateUi?.ReportProgress($"正在下载 V{version} 更新...", null);
             }
         }
+
+        if (!string.IsNullOrWhiteSpace(expectedSha256))
+        {
+            var actualSha256 = Convert.ToHexString(hasher.GetHashAndReset());
+            var expected = NormalizeSha256(expectedSha256);
+            if (!actualSha256.Equals(expected, StringComparison.OrdinalIgnoreCase))
+            {
+                TryDeleteFile(destinationPath);
+                throw new InvalidOperationException("更新包校验失败：下载内容与服务器公布的 SHA-256 不一致，请重新检查更新。");
+            }
+        }
+    }
+
+    private static string NormalizeSha256(string value)
+    {
+        return value.Trim().Replace(" ", "").Replace("-", "");
     }
 
     private static string CreatePortableUpdateScript(
@@ -360,18 +423,19 @@ try {
 
             if (result.StartsWith("OK", StringComparison.OrdinalIgnoreCase))
             {
-                if (!silent)
-                {
-                    _setStatus("上次覆盖更新已完成。");
-                }
-
+                _setStatus("上次应用内覆盖更新已完成。");
                 TryDeleteFile(resultPath);
                 return;
             }
 
             if (result.StartsWith("FAILED", StringComparison.OrdinalIgnoreCase))
             {
-                _setStatus($"上次覆盖更新失败。日志：{GetPortableUpdateLogPath(updateRoot)}");
+                var message = $"上次应用内覆盖更新失败。日志：{GetPortableUpdateLogPath(updateRoot)}";
+                _setStatus(message);
+                if (!silent)
+                {
+                    _updateUi?.ReportFailed(message);
+                }
             }
         }
         catch
@@ -429,4 +493,15 @@ try {
             _ => version
         };
     }
+}
+
+internal interface IAppUpdateUi
+{
+    Task<bool> ConfirmUpdateAsync(UpdateManifest manifest, string currentVersion, string updateMode);
+
+    void ReportProgress(string status, long? percent);
+
+    void ReportCompleted(string status);
+
+    void ReportFailed(string status);
 }

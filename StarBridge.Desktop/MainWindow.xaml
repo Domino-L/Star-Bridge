@@ -60,7 +60,7 @@
                             VerticalAlignment="Center"
                             Margin="18,0,0,0">
                     <TextBlock x:Name="WindowTitleText"
-                               Text="星海舰桥 V0.3.8"
+                               Text="星海舰桥 V0.3.11"
                                VerticalAlignment="Center"
                                FontSize="14"
                                FontWeight="SemiBold"
@@ -1430,7 +1430,7 @@
                             <TabControl x:Name="ManageFleetTabs"
                                         Margin="0,14,0,0"
                                         TabStripPlacement="Left">
-                                <TabItem Header="公告">
+                                <TabItem x:Name="ManageFleetNoticeTab" Header="公告">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -1479,7 +1479,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="舰队介绍">
+                                <TabItem x:Name="ManageFleetProfileTab" Header="舰队介绍">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -1522,7 +1522,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="计划">
+                                <TabItem x:Name="ManageFleetPlanTab" Header="计划">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -1678,7 +1678,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="发布任务">
+                                <TabItem x:Name="ManageFleetTaskTab" Header="发布任务">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -1960,7 +1960,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="成员">
+                                <TabItem x:Name="ManageFleetMembersTab" Header="成员">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -2190,7 +2190,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="日志">
+                                <TabItem x:Name="ManageFleetLogTab" Header="日志">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -2283,7 +2283,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="舰船">
+                                <TabItem x:Name="ManageFleetShipsTab" Header="舰船">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -2453,7 +2453,7 @@
                                         </Grid>
                                     </Border>
                                 </TabItem>
-                                <TabItem Header="解散">
+                                <TabItem x:Name="ManageFleetDisbandTab" Header="解散">
                                     <Border Style="{StaticResource HudPanel}"
                                             Padding="18">
                                         <Grid>
@@ -3669,9 +3669,14 @@
                                     <ComboBoxItem Content="德雷克" />
                                     <ComboBoxItem Content="南船座" />
                                     <ComboBoxItem Content="武藏" />
+                                    <ComboBoxItem Content="未来" />
                                     <ComboBoxItem Content="十字军" />
                                     <ComboBoxItem Content="圣盾" />
                                     <ComboBoxItem Content="RSI" />
+                                    <ComboBoxItem Content="起源" />
+                                    <ComboBoxItem Content="奥波亚" />
+                                    <ComboBoxItem Content="埃斯佩里亚" />
+                                    <ComboBoxItem Content="盖塔克" />
                                 </ComboBox>
                                 <CheckBox x:Name="AutoThemeByShipCheck"
                                           Content="自动切换至当前飞船厂商风格"
@@ -4438,6 +4443,120 @@
                         Visibility="Collapsed"
                         Style="{StaticResource PrimaryButton}"
                         Click="SyncOverlayRetryButton_Click" />
+            </Grid>
+        </Border>
+
+        <Border x:Name="UpdateProgressOverlay"
+                Grid.RowSpan="2"
+                Panel.ZIndex="140"
+                Visibility="Collapsed"
+                Background="#D9040910">
+            <Grid>
+                <Rectangle Fill="{StaticResource GeometricBackgroundBrush}"
+                           Opacity="0.75"
+                           IsHitTestVisible="False" />
+                <Border Width="760"
+                        Padding="28"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Background="#F006101A"
+                        BorderBrush="{StaticResource AccentBrush}"
+                        BorderThickness="1">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel>
+                            <TextBlock x:Name="UpdateOverlayTitleText"
+                                       Text="发现新版本"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontSize="26"
+                                       FontWeight="SemiBold" />
+                            <TextBlock x:Name="UpdateOverlayVersionText"
+                                       Margin="0,8,0,0"
+                                       Foreground="{StaticResource PrimaryTextBrush}"
+                                       FontSize="15"
+                                       FontWeight="SemiBold" />
+                            <TextBlock x:Name="UpdateOverlayModeText"
+                                       Margin="0,4,0,0"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <Border Grid.Row="1"
+                                Margin="0,22,0,0"
+                                Padding="16"
+                                MinHeight="110"
+                                Background="{StaticResource FieldBackBrush}"
+                                BorderBrush="{StaticResource AccentDimBrush}"
+                                BorderThickness="1">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          MaxHeight="180">
+                                <TextBlock x:Name="UpdateOverlayNotesText"
+                                           Foreground="{StaticResource PrimaryTextBrush}"
+                                           TextWrapping="Wrap" />
+                            </ScrollViewer>
+                        </Border>
+
+                        <Grid Grid.Row="2"
+                              Margin="0,22,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="72" />
+                            </Grid.ColumnDefinitions>
+                            <ProgressBar x:Name="UpdateOverlayProgressBar"
+                                         Height="14"
+                                         Minimum="0"
+                                         Maximum="100"
+                                         Value="0" />
+                            <TextBlock x:Name="UpdateOverlayProgressText"
+                                       Grid.Column="1"
+                                       Text="0%"
+                                       Margin="14,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontWeight="SemiBold" />
+                        </Grid>
+
+                        <TextBlock x:Name="UpdateOverlayStatusText"
+                                   Grid.Row="3"
+                                   Margin="0,14,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   TextWrapping="Wrap" />
+
+                        <Grid Grid.Row="4"
+                              Margin="0,26,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="160" />
+                                <ColumnDefinition Width="160" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="更新期间应用会锁定操作。下载完成后可能自动关闭并重启，请不要手动结束更新进程。"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="Wrap" />
+                            <Button x:Name="UpdateOverlayCancelButton"
+                                    Grid.Column="1"
+                                    Content="稍后"
+                                    Height="40"
+                                    Margin="12,0,0,0"
+                                    Style="{StaticResource SecondaryButton}"
+                                    Click="UpdateOverlayCancelButton_Click" />
+                            <Button x:Name="UpdateOverlayPrimaryButton"
+                                    Grid.Column="2"
+                                    Content="立即更新"
+                                    Height="40"
+                                    Margin="12,0,0,0"
+                                    Style="{StaticResource PrimaryButton}"
+                                    Click="UpdateOverlayPrimaryButton_Click" />
+                        </Grid>
+                    </Grid>
+                </Border>
             </Grid>
         </Border>
         </Grid>

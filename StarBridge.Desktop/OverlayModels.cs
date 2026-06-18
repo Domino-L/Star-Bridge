@@ -21,7 +21,12 @@ public enum OverlayVisualTheme
     Mirai,
     Crusader,
     Aegis,
-    Rsi
+    Rsi,
+    Origin,
+    Aopoa,
+    Esperia,
+    Gatac,
+    Musashi
 }
 
 public enum OverlayCrosshairMode
@@ -218,6 +223,8 @@ public sealed class SquadRow : System.ComponentModel.INotifyPropertyChanged
             OnChanged(nameof(EmblemPath));
         }
     }
+
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public ObservableCollection<MemberAvatarRow> Members { get; } = [];
 

@@ -59,7 +59,8 @@ public sealed record LocalSquadState(
     string RallyPoint,
     string Description,
     string Type,
-    string? EmblemPath);
+    string? EmblemPath,
+    DateTimeOffset UpdatedAt = default);
 
 public sealed record LocalFleetActionPlan(
     string Id,

@@ -19,6 +19,7 @@ public sealed record PlayerRow(
     MediaBrush? NameBrush = null,
     string RawShip = "Unknown",
     string ShipConfidence = "None",
+    string LocationConfidence = "None",
     string RawLocation = "Unknown");
 
 public sealed record SquadMemberStatusRow(
