@@ -18,6 +18,30 @@ public sealed class FleetState
         .ThenBy(player => player.Name)
         .ToArray();
 
+    public void Clear()
+    {
+        _players.Clear();
+    }
+
+    public void RemovePlayersExcept(IEnumerable<string?> playerNames)
+    {
+        var keep = playerNames
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (keep.Count == 0)
+        {
+            _players.Clear();
+            return;
+        }
+
+        foreach (var name in _players.Keys.Where(name => !keep.Contains(name)).ToArray())
+        {
+            _players.Remove(name);
+        }
+    }
+
     public void Apply(FleetEvent fleetEvent)
     {
         var player = GetOrCreate(fleetEvent.Player);

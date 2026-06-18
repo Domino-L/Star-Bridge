@@ -187,18 +187,15 @@ public partial class MainWindow : Window, IAppUpdateUi
 
         _isLoadingSettings = true;
         var config = DesktopAppConfig.Load();
+        var hasSavedSession = !string.IsNullOrWhiteSpace(config.AuthToken);
         _logPath = config.LogPath;
-        _localPlayer = config.PlayerName;
-        _localPlayerId = config.PlayerId;
-        _accountName = config.AccountName;
-        _authToken = config.AuthToken;
-        _avatarPath = config.AvatarPath;
-        _callsign = config.Callsign;
-        _allowEmailNotifications = config.AllowEmailNotifications;
-        if (string.IsNullOrWhiteSpace(_authToken))
-        {
-            _callsign = null;
-        }
+        _localPlayer = hasSavedSession ? config.PlayerName : null;
+        _localPlayerId = hasSavedSession ? config.PlayerId : null;
+        _accountName = hasSavedSession ? config.AccountName : null;
+        _authToken = hasSavedSession ? config.AuthToken : null;
+        _avatarPath = hasSavedSession ? config.AvatarPath : null;
+        _callsign = hasSavedSession ? config.Callsign : null;
+        _allowEmailNotifications = hasSavedSession ? config.AllowEmailNotifications : true;
         _language = "zh";
         _activeOverlayPreset = NormalizeOverlayPreset(DesktopAppConfig.LoadActiveOverlayPreset());
         _overlaySettings = OverlayDisplaySettings.Parse(
@@ -217,7 +214,10 @@ public partial class MainWindow : Window, IAppUpdateUi
         NetworkServerUrlBox.Text = NormalizeNetworkServerUrl(config.NetworkServerUrl);
         NetworkServerKeyBox.Password = config.NetworkServerKey ?? "";
         CallsignBox.Text = _callsign ?? "";
-        LoadFleetState(config.FleetStateJson);
+        if (hasSavedSession)
+        {
+            LoadFleetState(config.FleetStateJson);
+        }
         RefreshAccountPanel();
         RenderCachedIdentity();
         LoadAvatarPreview();
@@ -486,6 +486,60 @@ public partial class MainWindow : Window, IAppUpdateUi
         SetActiveNav(PersonalNavButton);
         _ = ShowLoginDialogAsync();
         return false;
+    }
+
+    private void ApplyAuthResponse(AuthResponse auth)
+    {
+        _accountName = auth.Email ?? auth.UserName;
+        _authToken = auth.Token;
+        _callsign = auth.Callsign;
+        if (!string.IsNullOrWhiteSpace(auth.GameName))
+        {
+            _localPlayer = auth.GameName;
+        }
+
+        _allowEmailNotifications = auth.AllowEmailNotifications;
+        CallsignBox.Text = _callsign ?? "";
+        EmailNotificationsCheck.IsChecked = _allowEmailNotifications;
+    }
+
+    private static bool IsAuthorizationFailure(HttpStatusCode? statusCode)
+    {
+        return statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+    }
+
+    private bool HandleAuthorizationFailure(HttpStatusCode? statusCode, string context, bool silent = false)
+    {
+        if (!IsAuthorizationFailure(statusCode))
+        {
+            return false;
+        }
+
+        _networkSyncTimer.Stop();
+        if (NetworkAutoSyncCheck.IsChecked == true)
+        {
+            NetworkAutoSyncCheck.IsChecked = false;
+        }
+
+        ClearAuthenticatedLocalState();
+        SaveCurrentConfig();
+        RefreshAccountPanel();
+        RenderState();
+        LoginStatusText.Text = "登录已失效，请重新登录";
+        NetworkStatusText.Text = $"{context}失败：登录已失效，本地缓存已清理";
+        RefreshHeaderStatusBar();
+        if (!silent)
+        {
+            AppendOutput($"NETWORK | auth expired during {context}; local authenticated cache cleared");
+        }
+
+        return true;
+    }
+
+    private bool HandleAuthorizationFailure(Exception exception, string context, bool silent = false)
+    {
+        return exception is HttpRequestException httpException &&
+               HandleAuthorizationFailure(httpException.StatusCode, context, silent);
     }
 
     private void RefreshAccountPanel()
@@ -1687,16 +1741,35 @@ public partial class MainWindow : Window, IAppUpdateUi
         await ShowLoginDialogAsync();
     }
 
-    private void LogoutButton_Click(object sender, RoutedEventArgs e)
+    private void ClearAuthenticatedLocalState()
     {
         _authToken = null;
         _accountName = null;
         _callsign = null;
+        _avatarPath = null;
+        _localPlayer = null;
+        _localPlayerId = null;
         _allowEmailNotifications = true;
+        _ownedShips.Clear();
+        _players.Clear();
+        _mySquadMembers.Clear();
+        _networkSnapshots.Clear();
+        _networkFleets.Clear();
+        _allNetworkFleets.Clear();
+        _remoteFleetShips.Clear();
+        _fleetShipInventory.Clear();
+        _fleetState.Clear();
+        ClearFleetState();
+    }
+
+    private void LogoutButton_Click(object sender, RoutedEventArgs e)
+    {
         NetworkAutoSyncCheck.IsChecked = false;
         _networkSyncTimer.Stop();
+        ClearAuthenticatedLocalState();
         SaveCurrentConfig();
         RefreshAccountPanel();
+        RenderState();
         LoginStatusText.Text = "已退出登录，当前为浏览模式";
         NetworkStatusText.Text = "浏览模式：同步已关闭";
         RefreshHeaderStatusBar();
@@ -2064,6 +2137,12 @@ public partial class MainWindow : Window, IAppUpdateUi
         var pushedLocal = false;
         if (connected)
         {
+            if (IsLoggedIn && !await ValidateSavedSessionAsync())
+            {
+                HideSyncStatusOverlay();
+                return;
+            }
+
             pulledFleets = await PullNetworkFleetsAsync(silent: true);
             pulledPlayers = await PullNetworkSnapshotsAsync(silent: true);
             pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
@@ -2096,6 +2175,47 @@ public partial class MainWindow : Window, IAppUpdateUi
             "同步失败",
             "无法连接服务器，当前显示本地缓存。请检查网络后重试。",
             showRetry: true);
+    }
+
+    private async Task<bool> ValidateSavedSessionAsync()
+    {
+        if (!IsLoggedIn)
+        {
+            return true;
+        }
+
+        try
+        {
+            var response = await PostNetworkJsonAsync(
+                "api/auth/profile",
+                new ProfileUpdateRequest(_callsign, _allowEmailNotifications));
+            if (HandleAuthorizationFailure(response.StatusCode, "登录校验", silent: true))
+            {
+                return false;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return true;
+            }
+
+            var auth = await response.Content.ReadFromJsonAsync<AuthResponse>();
+            if (auth is not null && !string.IsNullOrWhiteSpace(auth.Token))
+            {
+                ApplyAuthResponse(auth);
+                SaveCurrentConfig();
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (HandleAuthorizationFailure(ex, "登录校验", silent: true))
+        {
+            return false;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private Task ShowLoginDialogAsync()
@@ -2213,12 +2333,7 @@ public partial class MainWindow : Window, IAppUpdateUi
                 return $"{actionName}失败：服务器响应无效。";
             }
 
-            _accountName = auth.Email ?? auth.UserName;
-            _authToken = auth.Token;
-            _callsign = auth.Callsign;
-            _allowEmailNotifications = auth.AllowEmailNotifications;
-            CallsignBox.Text = _callsign ?? "";
-            EmailNotificationsCheck.IsChecked = _allowEmailNotifications;
+            ApplyAuthResponse(auth);
             LoginStatusText.Text = $"{actionName}成功：{_accountName}";
             NetworkStatusText.Text = "已登录并连接服务器";
             SaveCurrentConfig();
@@ -2387,7 +2502,16 @@ public partial class MainWindow : Window, IAppUpdateUi
             var response = await PostNetworkJsonAsync(
                 "api/auth/profile",
                 new ProfileUpdateRequest(_callsign, _allowEmailNotifications));
+            if (HandleAuthorizationFailure(response.StatusCode, "个人资料同步", silent: true))
+            {
+                return;
+            }
+
             response.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex) when (HandleAuthorizationFailure(ex, "个人资料同步", silent: true))
+        {
+            // The handler clears stale authenticated state.
         }
         catch
         {
@@ -2490,6 +2614,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
         catch (Exception ex)
         {
+            if (HandleAuthorizationFailure(ex, "上传状态", silent))
+            {
+                return false;
+            }
+
             NetworkStatusText.Text = $"上传失败：{ex.Message}";
             RefreshHeaderStatusBar();
             if (!silent)
@@ -2556,6 +2685,23 @@ public partial class MainWindow : Window, IAppUpdateUi
         try
         {
             var snapshots = await _relayClient.GetFromJsonAsync<NetworkPlayerSnapshot[]>("api/players") ?? [];
+            var snapshotNames = snapshots
+                .Select(snapshot => snapshot.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!.Trim())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var name in _networkSnapshots.Keys.Where(name => !snapshotNames.Contains(name)).ToArray())
+            {
+                _networkSnapshots.Remove(name);
+            }
+
+            var retainedPlayerNames = snapshotNames.ToList();
+            if (!string.IsNullOrWhiteSpace(_localPlayer))
+            {
+                retainedPlayerNames.Add(_localPlayer);
+            }
+
+            _fleetState.RemovePlayersExcept(retainedPlayerNames);
             foreach (var snapshot in snapshots)
             {
                 if (IsLocalNetworkSnapshot(snapshot))
@@ -2579,6 +2725,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
         catch (Exception ex)
         {
+            if (HandleAuthorizationFailure(ex, "拉取玩家", silent))
+            {
+                return false;
+            }
+
             NetworkStatusText.Text = $"拉取失败：{ex.Message}";
             RefreshHeaderStatusBar();
             if (!silent)
@@ -2622,6 +2773,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
         catch (Exception ex)
         {
+            if (HandleAuthorizationFailure(ex, "发布舰队", silent))
+            {
+                return false;
+            }
+
             if (!silent)
             {
                 NetworkStatusText.Text = $"发布舰队失败：{ex.Message}";
@@ -2649,6 +2805,11 @@ public partial class MainWindow : Window, IAppUpdateUi
             var response = await PostNetworkJsonAsync(path, payload);
             if (!response.IsSuccessStatusCode)
             {
+                if (HandleAuthorizationFailure(response.StatusCode, failurePrefix, silent))
+                {
+                    return false;
+                }
+
                 var error = await ReadResponseErrorAsync(response);
                 if (!silent)
                 {
@@ -2675,6 +2836,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
         catch (Exception ex)
         {
+            if (HandleAuthorizationFailure(ex, failurePrefix, silent))
+            {
+                return false;
+            }
+
             if (!silent)
             {
                 NetworkStatusText.Text = $"{failurePrefix}：{ex.Message}";
@@ -2823,21 +2989,43 @@ public partial class MainWindow : Window, IAppUpdateUi
         {
             var snapshots = await _relayClient.GetFromJsonAsync<NetworkFleetSnapshot[]>("api/fleets") ?? [];
             _allNetworkFleets.Clear();
+            var currentFleetExistsOnRelay = false;
+            var clearedMissingFleet = false;
             foreach (var snapshot in snapshots)
             {
                 if (IsSameFleet(snapshot.Name) || IsSameFleet(snapshot.Code))
                 {
+                    currentFleetExistsOnRelay = true;
                     MergeNetworkFleetState(snapshot);
                 }
 
                 _allNetworkFleets.Add(NetworkFleetCard.FromSnapshot(snapshot, _fleetName, _fleetCode, _hasFleet));
             }
 
+            if (_hasFleet && !currentFleetExistsOnRelay)
+            {
+                clearedMissingFleet = true;
+                ClearFleetState();
+                _networkSnapshots.Clear();
+                var retainedPlayerNames = string.IsNullOrWhiteSpace(_localPlayer)
+                    ? Array.Empty<string?>()
+                    : new string?[] { _localPlayer };
+                _fleetState.RemovePlayersExcept(retainedPlayerNames);
+                SaveCurrentConfig();
+                if (!silent)
+                {
+                    NetworkStatusText.Text = "服务器中未找到当前舰队，本地舰队缓存已清理";
+                    AppendOutput("NETWORK | current fleet missing on relay; local fleet cache cleared");
+                }
+            }
+
             ApplyFleetSearchFilter();
 
             if (!silent)
             {
-                NetworkStatusText.Text = $"已拉取：{snapshots.Length} 个舰队";
+                NetworkStatusText.Text = clearedMissingFleet
+                    ? "服务器中未找到当前舰队，本地舰队缓存已清理"
+                    : $"已拉取：{snapshots.Length} 个舰队";
                 AppendOutput($"NETWORK | pulled fleets={snapshots.Length}");
             }
 
@@ -2845,6 +3033,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
         catch (Exception ex)
         {
+            if (HandleAuthorizationFailure(ex, "拉取舰队", silent))
+            {
+                return false;
+            }
+
             if (!silent)
             {
                 NetworkStatusText.Text = $"拉取舰队失败：{ex.Message}";
@@ -4382,6 +4575,9 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetApplications.Clear();
         _fleetMemberPermissions.Clear();
         _fleetMemberRows.Clear();
+        _mySquadMembers.Clear();
+        _remoteFleetShips.Clear();
+        _fleetShipInventory.Clear();
         _joinedSquad = null;
         _selectedSquad = null;
         LocalFleetText.Text = "未加入舰队";
@@ -4492,25 +4688,26 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private void SaveCurrentConfig()
     {
+        var isLoggedIn = IsLoggedIn;
         var overlaySettings = _overlaySettings.Serialize();
         var overlayLayout = SerializeOverlayLayout();
-        var fleetStateJson = SerializeFleetState();
+        var fleetStateJson = isLoggedIn ? SerializeFleetState() : null;
         DesktopAppConfig.Save(new DesktopAppConfig(
             _logPath,
-            _localPlayer,
-            _localPlayerId,
-            _avatarPath,
+            isLoggedIn ? _localPlayer : null,
+            isLoggedIn ? _localPlayerId : null,
+            isLoggedIn ? _avatarPath : null,
             OverlayHotkeyBox.Text,
             overlayLayout,
-            _callsign,
+            isLoggedIn ? _callsign : null,
             overlaySettings,
             _language,
             NormalizeNetworkServerUrl(NetworkServerUrlBox.Text),
             NetworkServerKeyBox.Password,
-            _accountName,
-            _authToken,
+            isLoggedIn ? _accountName : null,
+            isLoggedIn ? _authToken : null,
             fleetStateJson,
-            _allowEmailNotifications));
+            isLoggedIn && _allowEmailNotifications));
         DesktopAppConfig.SaveOverlaySettings(overlaySettings);
         DesktopAppConfig.SaveOverlayLayout(overlayLayout);
         DesktopAppConfig.SaveActiveOverlayPreset(_activeOverlayPreset);
@@ -6882,7 +7079,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.11";
+            : "0.3.12";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
