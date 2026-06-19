@@ -97,6 +97,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     private DateTime _cachedAvatarImageWriteTimeUtc;
     private string? _cachedAvatarImageData;
     private string? _fleetLogoPath;
+    private string? _createFleetLogoPath;
     private string _fleetName = "No Fleet";
     private string _fleetCode = "N/A";
     private string _fleetChiefCommander = "Unassigned";
@@ -628,6 +629,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         MainTabs.SelectedItem = FleetTab;
         SetActiveNav(MyFleetNavButton);
         UpdateFleetEntryPanels();
+        LoadCreateFleetLogoPreview();
         CreateFleetNameBox.Focus();
     }
 
@@ -659,6 +661,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetType = GetSelectedRadioContent("FleetType") ?? "Combat";
         _fleetJoinPolicy = GetSelectedRadioContent("FleetJoinPolicy") ?? "Open";
         _fleetActiveTime = $"{CreateFleetOnlineFromBox.Text.Trim()} - {CreateFleetOnlineToBox.Text.Trim()} UTC+8";
+        _fleetLogoPath = _createFleetLogoPath;
+        _createFleetLogoPath = null;
         LocalFleetText.Text = $"{CreateFleetNameBox.Text.Trim()} [{CreateFleetCodeBox.Text.Trim()}]";
         RefreshFleetHeader();
         UpdateFleetEntryPanels();
@@ -4548,6 +4552,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetJoinPolicy = "Open";
         _fleetActiveTime = "20:00 - 23:59 UTC+8";
         _fleetLogoPath = null;
+        _createFleetLogoPath = null;
         _fleetNoticeTitle = "";
         _fleetNoticeContent = "";
         _fleetCurrentTaskTitle = "";
@@ -4801,7 +4806,8 @@ public partial class MainWindow : Window, IAppUpdateUi
             _fleetType = string.IsNullOrWhiteSpace(cache.FleetType) ? "Combat" : cache.FleetType;
             _fleetJoinPolicy = string.IsNullOrWhiteSpace(cache.FleetJoinPolicy) ? "Open" : cache.FleetJoinPolicy;
             _fleetActiveTime = string.IsNullOrWhiteSpace(cache.FleetActiveTime) ? "20:00 - 23:59 UTC+8" : cache.FleetActiveTime;
-            _fleetLogoPath = cache.FleetLogoPath;
+            _fleetLogoPath = _hasFleet ? cache.FleetLogoPath : null;
+            _createFleetLogoPath = null;
             _fleetNoticeTitle = cache.FleetNoticeTitle ?? "";
             _fleetNoticeContent = cache.FleetNoticeContent ?? "";
             _fleetCurrentTaskTitle = cache.FleetCurrentTaskTitle ?? "";
@@ -7557,6 +7563,12 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private async void ChooseFleetLogo_Click(object sender, RoutedEventArgs e)
     {
+        if (!_hasFleet && !_isCreatingFleet)
+        {
+            AppendOutput("Open fleet creation before choosing a fleet logo.");
+            return;
+        }
+
         if (_hasFleet && !CanCurrentUserManageFleetInfo())
         {
             AppendOutput("Current account cannot update the fleet logo.");
@@ -7566,6 +7578,14 @@ public partial class MainWindow : Window, IAppUpdateUi
         var croppedPath = ChooseAndCropImage("Choose fleet logo", "fleet-logo.png");
         if (croppedPath is null)
         {
+            return;
+        }
+
+        if (!_hasFleet && _isCreatingFleet)
+        {
+            _createFleetLogoPath = croppedPath;
+            LoadCreateFleetLogoPreview();
+            AppendOutput("Fleet logo selected for new fleet.");
             return;
         }
 
@@ -8409,7 +8429,7 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(_fleetLogoPath) || !File.Exists(_fleetLogoPath))
+        if (string.IsNullOrWhiteSpace(_createFleetLogoPath) || !File.Exists(_createFleetLogoPath))
         {
             CreateFleetLogoImage.Source = null;
             CreateFleetLogoText.Visibility = Visibility.Visible;
@@ -8419,7 +8439,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         var image = new BitmapImage();
         image.BeginInit();
         image.CacheOption = BitmapCacheOption.OnLoad;
-        image.UriSource = new Uri(_fleetLogoPath);
+        image.UriSource = new Uri(_createFleetLogoPath);
         image.EndInit();
         image.Freeze();
 
