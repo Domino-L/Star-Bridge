@@ -3080,6 +3080,16 @@ public partial class MainWindow : Window, IAppUpdateUi
                 ? $"{_networkFleets.Count} 个舰队"
                 : $"匹配 {_networkFleets.Count}";
         }
+
+        if (FindFleetEmptyText is not null)
+        {
+            FindFleetEmptyText.Visibility = _networkFleets.Count == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            FindFleetEmptyText.Text = string.IsNullOrWhiteSpace(query)
+                ? "暂无公开舰队。你可以创建舰队，或稍后刷新目录。"
+                : "没有找到匹配的舰队。请尝试舰队全名或识别码。";
+        }
     }
 
     private static int CalculateFleetSearchScore(NetworkFleetCard card, string query)
@@ -8272,8 +8282,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         FindFleetTab.Header = zh ? "寻找舰队" : "Find Fleet";
         FindFleetTitleText.Text = zh ? "寻找舰队" : "Find Fleet";
         FindFleetPlaceholderText.Text = zh
-            ? "从 Relay Server 拉取舰队目录，选择一个舰队加入后即可进行第一阶段同步测试。"
-            : "Pull fleet directory from the relay server, then join a fleet for first-stage sync testing.";
+            ? "搜索公开舰队，确认加入方式后即可进入同一舰队同步。已加入的舰队会显示为当前舰队。"
+            : "Search public fleets, confirm the join policy, then join the same fleet for synchronization.";
         RefreshFleetDirectoryButton.Content = zh ? "刷新舰队" : "Refresh Fleets";
         SelectLogButton.Content = zh ? "选择日志" : "Select Log";
         ToggleOverlayButton.Content = zh ? "切换 Overlay" : "Toggle Overlay";

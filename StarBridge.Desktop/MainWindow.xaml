@@ -458,6 +458,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
                         <Grid>
@@ -467,12 +468,10 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <TextBlock x:Name="FindFleetTitleText"
-                                           Text="Find Fleet"
-                                           FontSize="24"
-                                           FontWeight="SemiBold"
-                                           Foreground="{StaticResource AccentBrush}" />
+                                           Text="寻找舰队"
+                                           Style="{StaticResource SectionTitleText}" />
                                 <TextBlock x:Name="FindFleetPlaceholderText"
-                                           Text="Pull fleet directory from the relay server, then join a fleet for first-stage sync testing."
+                                           Text="搜索公开舰队，确认加入方式后即可进入同一舰队同步。已加入的舰队会显示为当前舰队。"
                                            Margin="0,8,0,0"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            TextWrapping="Wrap" />
@@ -519,41 +518,101 @@
                                        TextAlignment="Right"
                                        VerticalAlignment="Center" />
                         </Grid>
-                        <ScrollViewer Grid.Row="2"
+                        <Grid Grid.Row="2"
+                              Margin="0,16,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0"
+                                    Style="{StaticResource GuidanceCardPanel}">
+                                <StackPanel>
+                                    <TextBlock Text="01 / SEARCH"
+                                               Style="{StaticResource SectionEyebrowText}" />
+                                    <TextBlock Text="搜索舰队全名或识别码"
+                                               Margin="0,6,0,0"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="先确认舰队、指挥官与加入规则。"
+                                               Margin="0,6,0,0"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="1"
+                                    Style="{StaticResource GuidanceCardPanel}">
+                                <StackPanel>
+                                    <TextBlock Text="02 / JOIN"
+                                               Style="{StaticResource SectionEyebrowText}" />
+                                    <TextBlock Text="加入或提交申请"
+                                               Margin="0,6,0,0"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="如果你已有舰队，系统会在切换前确认。"
+                                               Margin="0,6,0,0"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="2"
+                                    Style="{StaticResource GuidanceCardPanel}"
+                                    Margin="0,0,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="03 / SYNC"
+                                               Style="{StaticResource SectionEyebrowText}" />
+                                    <TextBlock Text="同步成员与任务状态"
+                                               Margin="0,6,0,0"
+                                               FontWeight="SemiBold" />
+                                    <TextBlock Text="加入后即可看到舰队、小队、任务与 Overlay 信息。"
+                                               Margin="0,6,0,0"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                        <ScrollViewer Grid.Row="3"
                                       Margin="0,22,0,0"
                                       VerticalScrollBarVisibility="Auto">
-                            <ItemsControl x:Name="FindFleetResults">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Style="{StaticResource SquadBannerPanel}"
-                                                Padding="14"
-                                                Margin="0,0,0,12">
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="124" />
-                                                    <ColumnDefinition Width="280" />
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="230" />
-                                                    <ColumnDefinition Width="130" />
-                                                </Grid.ColumnDefinitions>
+                            <Grid>
+                                <TextBlock x:Name="FindFleetEmptyText"
+                                           Text="暂无公开舰队。你可以创建舰队，或稍后刷新目录。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontSize="15"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Top"
+                                           Margin="0,80,0,0"
+                                           Visibility="Collapsed" />
+                                <ItemsControl x:Name="FindFleetResults">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Style="{StaticResource SquadBannerPanel}"
+                                                    Padding="14"
+                                                    Margin="0,0,0,12">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="124" />
+                                                        <ColumnDefinition Width="280" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="230" />
+                                                        <ColumnDefinition Width="130" />
+                                                    </Grid.ColumnDefinitions>
 
-                                                <Border Width="104"
-                                                        Height="104"
-                                                        BorderBrush="{StaticResource AccentBrush}"
-                                                        BorderThickness="1"
-                                                        Background="{StaticResource FieldBackBrush}">
-                                                    <Grid>
-                                                        <Image Source="{Binding LogoImageData, Converter={StaticResource ImageDataConverter}}"
-                                                               Stretch="UniformToFill"
-                                                               RenderOptions.BitmapScalingMode="HighQuality" />
-                                                        <TextBlock Text="{Binding LogoText}"
-                                                                   Visibility="{Binding LogoTextVisibility}"
-                                                                   Foreground="{StaticResource AccentBrush}"
-                                                                   FontWeight="SemiBold"
-                                                                   HorizontalAlignment="Center"
-                                                                   VerticalAlignment="Center" />
-                                                    </Grid>
-                                                </Border>
+                                                    <Border Width="104"
+                                                            Height="104"
+                                                            BorderBrush="{StaticResource AccentBrush}"
+                                                            BorderThickness="1"
+                                                            Background="{StaticResource FieldBackBrush}">
+                                                        <Grid>
+                                                            <Image Source="{Binding LogoImageData, Converter={StaticResource ImageDataConverter}}"
+                                                                   Stretch="UniformToFill"
+                                                                   RenderOptions.BitmapScalingMode="HighQuality" />
+                                                            <TextBlock Text="{Binding LogoText}"
+                                                                       Visibility="{Binding LogoTextVisibility}"
+                                                                       Foreground="{StaticResource AccentBrush}"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Center" />
+                                                        </Grid>
+                                                    </Border>
 
                                                 <StackPanel Grid.Column="1"
                                                             Margin="14,0,18,0"
@@ -601,19 +660,20 @@
                                                                TextAlignment="Right" />
                                                 </StackPanel>
 
-                                                <Button Grid.Column="4"
-                                                        Height="40"
-                                                        VerticalAlignment="Center"
-                                                        Style="{StaticResource PrimaryButton}"
-                                                        Content="{Binding JoinButtonText}"
-                                                        IsEnabled="{Binding CanJoin}"
-                                                        Tag="{Binding}"
-                                                        Click="JoinNetworkFleet_Click" />
-                                            </Grid>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                                                    <Button Grid.Column="4"
+                                                            Height="40"
+                                                            VerticalAlignment="Center"
+                                                            Style="{StaticResource PrimaryButton}"
+                                                            Content="{Binding JoinButtonText}"
+                                                            IsEnabled="{Binding CanJoin}"
+                                                            Tag="{Binding}"
+                                                            Click="JoinNetworkFleet_Click" />
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Grid>
                         </ScrollViewer>
                     </Grid>
                 </Border>
@@ -1177,130 +1237,95 @@
                                             <ColumnDefinition Width="340" />
                                             <ColumnDefinition Width="170" />
                                         </Grid.ColumnDefinitions>
-                                        <StackPanel>
+                                        <StackPanel VerticalAlignment="Center"
+                                                    Margin="0,0,10,0">
                                             <TextBlock Text="FLEET SHIP DATABASE"
-                                                       Style="{StaticResource HudCaptionText}" />
+                                                       Style="{StaticResource SectionEyebrowText}" />
                                             <TextBlock Text="全舰队舰船数据库"
                                                        Margin="0,8,0,0"
-                                                       Foreground="{StaticResource PrimaryTextBrush}"
-                                                       FontSize="20"
-                                                       FontWeight="SemiBold" />
+                                                       Style="{StaticResource SectionTitleText}" />
+                                            <TextBlock Text="根据成员上传的官网机库汇总，仅展示已同步舰船。"
+                                                       Margin="0,6,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="12"
+                                                       TextWrapping="Wrap" />
                                         </StackPanel>
                                         <Border Grid.Column="1"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="旗舰级"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseCapitalText"
                                                            Text="待分类"
-                                                           Foreground="{StaticResource PrimaryTextBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="15"
-                                                           Margin="0,6,0,0"
-                                                           TextTrimming="CharacterEllipsis" />
+                                                           Style="{StaticResource MetricValueText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="2"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="大型"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseLargeText"
                                                            Text="待分类"
-                                                           Foreground="{StaticResource PrimaryTextBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="15"
-                                                           Margin="0,6,0,0"
-                                                           TextTrimming="CharacterEllipsis" />
+                                                           Style="{StaticResource MetricValueText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="3"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="中型"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseMediumText"
                                                            Text="待分类"
-                                                           Foreground="{StaticResource PrimaryTextBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="15"
-                                                           Margin="0,6,0,0"
-                                                           TextTrimming="CharacterEllipsis" />
+                                                           Style="{StaticResource MetricValueText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="4"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="小型"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseSmallText"
                                                            Text="待分类"
-                                                           Foreground="{StaticResource PrimaryTextBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="15"
-                                                           Margin="0,6,0,0"
-                                                           TextTrimming="CharacterEllipsis" />
+                                                           Style="{StaticResource MetricValueText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="5"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="数量"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseCountText"
                                                            Text="0"
-                                                           Foreground="{StaticResource AccentBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="18"
-                                                           Margin="0,6,0,0" />
+                                                           Style="{StaticResource MetricAccentValueText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="6"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="舰船最多玩家"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseTopOwnerText"
                                                            Text="-"
-                                                           Foreground="{StaticResource PrimaryTextBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="15"
-                                                           Margin="0,6,0,0"
-                                                           TextTrimming="CharacterEllipsis" />
+                                                           Style="{StaticResource MetricValueText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border Grid.Column="7"
-                                                Style="{StaticResource HudPanel}"
-                                                Padding="12,8"
-                                                Margin="10,0,0,0">
+                                                Style="{StaticResource MetricCardPanel}">
                                             <StackPanel>
                                                 <TextBlock Text="舰队王牌"
                                                            Style="{StaticResource HudCaptionText}" />
                                                 <TextBlock x:Name="FleetShipDatabaseAceText"
                                                            Text="待评定"
-                                                           Foreground="{StaticResource PrimaryTextBrush}"
-                                                           FontWeight="SemiBold"
-                                                           FontSize="15"
-                                                           Margin="0,6,0,0"
-                                                           TextTrimming="CharacterEllipsis" />
+                                                           Style="{StaticResource MetricValueText}" />
                                             </StackPanel>
                                         </Border>
                                     </Grid>
 
                                     <Grid Grid.Row="1"
-                                          Margin="0,14,0,8">
+                                          Margin="0,16,0,8"
+                                          MinHeight="30"
+                                          Background="#6607101B">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="90" />
                                             <ColumnDefinition Width="300" />
@@ -1308,15 +1333,20 @@
                                             <ColumnDefinition Width="180" />
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Text="编号"
+                                                   Margin="14,0,0,0"
+                                                   VerticalAlignment="Center"
                                                    Style="{StaticResource HudCaptionText}" />
                                         <TextBlock Grid.Column="1"
                                                    Text="舰船名称"
+                                                   VerticalAlignment="Center"
                                                    Style="{StaticResource HudCaptionText}" />
                                         <TextBlock Grid.Column="2"
                                                    Text="持有玩家"
+                                                   VerticalAlignment="Center"
                                                    Style="{StaticResource HudCaptionText}" />
                                         <TextBlock Grid.Column="3"
                                                    Text="所属小队"
+                                                   VerticalAlignment="Center"
                                                    Style="{StaticResource HudCaptionText}" />
                                     </Grid>
 
@@ -2876,7 +2906,7 @@
                             BorderThickness="1"
                             Padding="28">
                         <Grid>
-                            <StackPanel Width="520"
+                            <StackPanel Width="760"
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Center">
                                 <TextBlock x:Name="FleetEmptyTitleText"
@@ -2886,11 +2916,62 @@
                                            Foreground="{StaticResource AccentBrush}"
                                            HorizontalAlignment="Center" />
                                 <TextBlock x:Name="FleetEmptyHintText"
-                                           Text="寻找或创建一个舰队"
+                                           Text="加入舰队后可以同步队员、小队、任务、舰船数据库与 Overlay 状态。"
                                            Foreground="{StaticResource MutedTextBrush}"
                                            FontSize="15"
                                            Margin="0,12,0,28"
-                                           HorizontalAlignment="Center" />
+                                           HorizontalAlignment="Center"
+                                           TextWrapping="Wrap" />
+                                <Grid Margin="0,0,0,28">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0"
+                                            Style="{StaticResource GuidanceCardPanel}">
+                                        <StackPanel>
+                                            <TextBlock Text="FIND"
+                                                       Style="{StaticResource SectionEyebrowText}" />
+                                            <TextBlock Text="寻找已有舰队"
+                                                       Margin="0,6,0,0"
+                                                       FontWeight="SemiBold" />
+                                            <TextBlock Text="通过舰队全名或识别码加入公开舰队。"
+                                                       Margin="0,6,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1"
+                                            Style="{StaticResource GuidanceCardPanel}">
+                                        <StackPanel>
+                                            <TextBlock Text="CREATE"
+                                                       Style="{StaticResource SectionEyebrowText}" />
+                                            <TextBlock Text="创建自己的舰队"
+                                                       Margin="0,6,0,0"
+                                                       FontWeight="SemiBold" />
+                                            <TextBlock Text="填写舰队资料、加入规则与基础运营信息。"
+                                                       Margin="0,6,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="2"
+                                            Style="{StaticResource GuidanceCardPanel}"
+                                            Margin="0">
+                                        <StackPanel>
+                                            <TextBlock Text="PROFILE"
+                                                       Style="{StaticResource SectionEyebrowText}" />
+                                            <TextBlock Text="完善个人资料"
+                                                       Margin="0,6,0,0"
+                                                       FontWeight="SemiBold" />
+                                            <TextBlock Text="呼号、头像、舰船库会参与舰队同步展示。"
+                                                       Margin="0,6,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
