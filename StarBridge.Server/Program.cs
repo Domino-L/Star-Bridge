@@ -512,6 +512,19 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                                       HasFleetPermission(existing, authorizedAccount, permission => permission.CanPublishPlans);
                 var canAppendFleetLogs = canOwnFleet || canManageFleetInfo || canPublishTasks || canPublishPlans;
                 var canJoinActionPlans = IsFleetMember(existing, authorizedAccount);
+                var mergedMembers = MergeFleetMembers(
+                    existing.Members,
+                    FilterFleetMemberUpdatesForAccount(
+                        normalized.Members,
+                        existing.Members,
+                        authorizedAccount,
+                        canUpdateAllMembers: false));
+                var mergedSquads = MergeAuthorizedSquads(
+                    existing.Squads,
+                    normalized.Squads,
+                    existing,
+                    authorizedAccount,
+                    canManageFleetInfo);
 
                 return normalized with
                 {
@@ -544,13 +557,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                     MemberPermissions = canOwnFleet
                         ? MergeFleetMemberPermissions(existing.MemberPermissions, normalized.MemberPermissions)
                         : existing.MemberPermissions,
-                    Members = MergeFleetMembers(
-                        existing.Members,
-                        FilterFleetMemberUpdatesForAccount(
-                            normalized.Members,
-                            existing.Members,
-                            authorizedAccount,
-                            canUpdateAllMembers: false)),
+                    Members = mergedMembers,
                     Ships = MergeFleetShips(existing.Ships, normalized.Ships, authorizedAccount),
                     TaskHistory = canPublishTasks
                         ? MergeFleetTaskHistory(existing.TaskHistory, normalized.TaskHistory)
@@ -562,12 +569,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                         ? MergeFleetEventLogs(existing.EventLog, normalized.EventLog)
                         : existing.EventLog,
                     OwnerAccount = canOwnFleet ? normalized.OwnerAccount : existing.OwnerAccount,
-                    Squads = MergeAuthorizedSquads(
-                        existing.Squads,
-                        normalized.Squads,
-                        existing,
-                        authorizedAccount,
-                        canManageFleetInfo)
+                    Squads = PruneEmptySquads(mergedSquads, mergedMembers, TimeSpan.FromMinutes(2))
                 };
             });
         await storage.SaveAsync(players, fleets, users, verificationCodes);
@@ -1159,14 +1161,15 @@ app.MapPost("/api/fleets/squads", async (HttpRequest request, FleetSquadsUpdateR
                                  HasFleetPermission(fleet, account, permission => permission.CanManageFleetInfo);
         var canAppendSquadLog = canManageAllSquads ||
                                 HasAuthorizedSquadWrite(fleet.Squads, update.Squads, fleet, account);
+        var mergedSquads = MergeAuthorizedSquads(
+            fleet.Squads,
+            update.Squads,
+            fleet,
+            account,
+            canManageAllSquads);
         var updated = fleet with
         {
-            Squads = MergeAuthorizedSquads(
-                fleet.Squads,
-                update.Squads,
-                fleet,
-                account,
-                canManageAllSquads),
+            Squads = PruneEmptySquads(mergedSquads, fleet.Members, TimeSpan.FromMinutes(2)),
             EventLog = canAppendSquadLog
                 ? MergeFleetEventLogs(fleet.EventLog, update.EventLog)
                 : fleet.EventLog,
@@ -1428,7 +1431,7 @@ app.MapPost("/api/players", async (HttpRequest request, NetworkPlayerSnapshot sn
                 fleets[fleetCode] = fleet with
                 {
                     Members = updatedMembers,
-                    Squads = PruneEmptySquads(fleet.Squads, updatedMembers),
+                    Squads = PruneEmptySquads(fleet.Squads, updatedMembers, TimeSpan.FromMinutes(2)),
                     Ships = updatedShips,
                     LastUpdated = DateTimeOffset.UtcNow
                 };
@@ -2260,7 +2263,8 @@ static bool IsSquadSnapshotOlder(NetworkSquadSnapshot current, NetworkSquadSnaps
 
 static NetworkSquadSnapshot[] PruneEmptySquads(
     NetworkSquadSnapshot[]? squads,
-    NetworkFleetMemberSnapshot[]? members)
+    NetworkFleetMemberSnapshot[]? members,
+    TimeSpan? emptySquadGracePeriod = null)
 {
     var normalizedSquads = NormalizeSquadRows(squads);
     if (normalizedSquads.Length == 0 || members is null)
@@ -2275,9 +2279,14 @@ static NetworkSquadSnapshot[] PruneEmptySquads(
             !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) &&
             !name.Equals("未加入小队", StringComparison.OrdinalIgnoreCase))
         .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var now = DateTimeOffset.UtcNow;
 
     return normalizedSquads
-        .Where(squad => activeSquads.Contains(squad.Name))
+        .Where(squad =>
+            activeSquads.Contains(squad.Name) ||
+            (emptySquadGracePeriod is { } gracePeriod &&
+             squad.UpdatedAt != default &&
+             now - squad.UpdatedAt <= gracePeriod))
         .OrderBy(squad => squad.Name)
         .ToArray();
 }
@@ -3091,23 +3100,47 @@ static string BuildPermissionKey(NetworkFleetMemberPermissionSnapshot permission
 
 static NetworkFleetEventLogSnapshot[] NormalizeFleetEventLogs(NetworkFleetEventLogSnapshot[]? logs)
 {
-    return (logs ?? [])
+    var normalizedLogs = (logs ?? [])
         .Where(log => !string.IsNullOrWhiteSpace(log.Id) ||
                       !string.IsNullOrWhiteSpace(log.Title) ||
                       !string.IsNullOrWhiteSpace(log.Detail))
         .Select(log => log with
         {
-            Id = string.IsNullOrWhiteSpace(log.Id) ? Guid.NewGuid().ToString("N") : log.Id.Trim(),
+            Id = string.IsNullOrWhiteSpace(log.Id) ? "" : log.Id.Trim(),
             Timestamp = log.Timestamp == default ? DateTimeOffset.UtcNow : log.Timestamp,
             Type = Normalize(log.Type, "舰队"),
             Title = Normalize(log.Title, ""),
             Detail = Normalize(log.Detail, "")
         })
-        .GroupBy(log => log.Id, StringComparer.OrdinalIgnoreCase)
-        .Select(group => group.OrderByDescending(log => log.Timestamp).First())
+        .ToArray();
+
+    var rows = new Dictionary<string, NetworkFleetEventLogSnapshot>(StringComparer.OrdinalIgnoreCase);
+    foreach (var log in normalizedLogs.OrderBy(log => log.Timestamp))
+    {
+        var key = BuildFleetEventLogSemanticKey(log);
+        var row = string.IsNullOrWhiteSpace(log.Id)
+            ? log with { Id = Guid.NewGuid().ToString("N") }
+            : log;
+
+        if (!rows.TryGetValue(key, out var existing) || row.Timestamp >= existing.Timestamp)
+        {
+            rows[key] = row;
+        }
+    }
+
+    return rows.Values
         .OrderByDescending(log => log.Timestamp)
         .Take(500)
         .ToArray();
+}
+
+static string BuildFleetEventLogSemanticKey(NetworkFleetEventLogSnapshot log)
+{
+    var minuteBucket = log.Timestamp.ToUniversalTime().Ticks / TimeSpan.TicksPerMinute;
+    var type = Normalize(log.Type, "舰队").Trim().ToUpperInvariant();
+    var title = Normalize(log.Title, "").Trim().ToUpperInvariant();
+    var detail = Normalize(log.Detail, "").Trim().ToUpperInvariant();
+    return $"{minuteBucket}|{type}|{title}|{detail}";
 }
 
 static NetworkFleetEventLogSnapshot[] MergeFleetEventLogs(

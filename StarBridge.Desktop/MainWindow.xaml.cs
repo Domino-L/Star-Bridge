@@ -50,6 +50,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     private const string OverlayPresetCommand = "command";
     private const string OverlayPresetCustom = "custom";
     private const string DefaultRelayUrl = "https://api.scstarbridge.com";
+    private static readonly TimeSpan LocalSquadEditProtectionWindow = TimeSpan.FromSeconds(45);
     private static readonly Regex JoinPuShardRegex = new(
         @"<Join PU>.*?\bshard\[(?<shard>[^\]]+)\]",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -72,6 +73,8 @@ public partial class MainWindow : Window, IAppUpdateUi
     private NetworkFleetApplicationSnapshot[] _fleetApplicationSnapshots = [];
     private readonly Dictionary<string, LocalFleetMemberPermission> _fleetMemberPermissions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, NetworkPlayerSnapshot> _networkSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _localSquadEditTimes = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _localFleetLogoEditTime;
     private readonly HashSet<string> _joinedActionPlanIds = new(StringComparer.OrdinalIgnoreCase);
     private SquadRow? _selectedSquad;
     private SquadRow? _joinedSquad;
@@ -3150,7 +3153,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetType = string.IsNullOrWhiteSpace(snapshot.Type) ? _fleetType : snapshot.Type!;
         _fleetActiveTime = string.IsNullOrWhiteSpace(snapshot.ActiveTime) ? _fleetActiveTime : snapshot.ActiveTime!;
         _fleetJoinPolicy = string.IsNullOrWhiteSpace(snapshot.JoinPolicy) ? _fleetJoinPolicy : snapshot.JoinPolicy!;
-        _fleetLogoPath = SaveNetworkFleetLogo(snapshot) ?? _fleetLogoPath;
+        ApplyNetworkFleetLogo(snapshot);
         MergeFleetMemberPermissions(snapshot.MemberPermissions);
         MergeFleetMembers(snapshot.Members);
         MergeFleetEventLogs(snapshot.EventLog);
@@ -3599,7 +3602,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         if (snapshot.Squads is not null)
         {
             var removedSquadNames = _squads
-                .Where(squad => !remoteSquadNames.Contains(squad.Name))
+                .Where(squad => !remoteSquadNames.Contains(squad.Name) &&
+                                !HasRecentLocalSquadEdit(squad.Name))
                 .Select(squad => squad.Name)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -3654,6 +3658,11 @@ public partial class MainWindow : Window, IAppUpdateUi
                 continue;
             }
 
+            if (ShouldPreserveLocalSquad(existing, squadSnapshot))
+            {
+                continue;
+            }
+
             var nextCommander = string.IsNullOrWhiteSpace(squadSnapshot.Commander) ? existing.Commander : squadSnapshot.Commander!;
             var nextMission = string.IsNullOrWhiteSpace(squadSnapshot.Mission) ? existing.Mission : squadSnapshot.Mission!;
             var nextRallyPoint = string.IsNullOrWhiteSpace(squadSnapshot.RallyPoint) ? existing.RallyPoint : squadSnapshot.RallyPoint!;
@@ -3668,9 +3677,11 @@ public partial class MainWindow : Window, IAppUpdateUi
                 continue;
             }
 
-            var nextEmblemPath = !remoteHasTimestamp && !string.IsNullOrWhiteSpace(existing.EmblemPath)
-                ? existing.EmblemPath
-                : SaveNetworkSquadEmblem(snapshot, squadSnapshot) ?? existing.EmblemPath;
+            var nextEmblemPath = SaveNetworkSquadEmblem(snapshot, squadSnapshot);
+            if (nextEmblemPath is null && !string.IsNullOrWhiteSpace(squadSnapshot.EmblemImageData))
+            {
+                nextEmblemPath = existing.EmblemPath;
+            }
             if (existing.Commander != nextCommander ||
                 existing.Mission != nextMission ||
                 existing.RallyPoint != nextRallyPoint ||
@@ -3698,6 +3709,88 @@ public partial class MainWindow : Window, IAppUpdateUi
             RefreshOverlayWindow();
             SaveCurrentConfig();
         }
+    }
+
+    private void MarkLocalSquadEdit(SquadRow squad)
+    {
+        if (string.IsNullOrWhiteSpace(squad.Name))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        squad.UpdatedAt = now;
+        _localSquadEditTimes[squad.Name.Trim()] = now;
+    }
+
+    private bool ShouldPreserveLocalSquad(SquadRow existing, NetworkSquadSnapshot remote)
+    {
+        if (!HasRecentLocalSquadEdit(existing.Name))
+        {
+            return false;
+        }
+
+        if (remote.UpdatedAt == default || existing.UpdatedAt >= remote.UpdatedAt)
+        {
+            return true;
+        }
+
+        _localSquadEditTimes.Remove(existing.Name.Trim());
+        return false;
+    }
+
+    private bool HasRecentLocalSquadEdit(string? squadName)
+    {
+        if (string.IsNullOrWhiteSpace(squadName) ||
+            !_localSquadEditTimes.TryGetValue(squadName.Trim(), out var editedAt))
+        {
+            return false;
+        }
+
+        if (DateTimeOffset.UtcNow - editedAt <= LocalSquadEditProtectionWindow)
+        {
+            return true;
+        }
+
+        _localSquadEditTimes.Remove(squadName.Trim());
+        return false;
+    }
+
+    private void MarkLocalFleetLogoEdit()
+    {
+        _localFleetLogoEditTime = DateTimeOffset.UtcNow;
+    }
+
+    private bool ShouldPreserveLocalFleetLogo(NetworkFleetSnapshot snapshot)
+    {
+        if (_localFleetLogoEditTime == default)
+        {
+            return false;
+        }
+
+        if (DateTimeOffset.UtcNow - _localFleetLogoEditTime > LocalSquadEditProtectionWindow)
+        {
+            _localFleetLogoEditTime = default;
+            return false;
+        }
+
+        if (snapshot.LastUpdated == default || snapshot.LastUpdated <= _localFleetLogoEditTime)
+        {
+            return true;
+        }
+
+        _localFleetLogoEditTime = default;
+        return false;
+    }
+
+    private void ApplyNetworkFleetLogo(NetworkFleetSnapshot snapshot)
+    {
+        if (ShouldPreserveLocalFleetLogo(snapshot))
+        {
+            return;
+        }
+
+        _fleetLogoPath = SaveNetworkFleetLogo(snapshot);
     }
 
     private Uri BuildNetworkUri(string path)
@@ -4168,28 +4261,19 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private string? SaveNetworkFleetLogo(NetworkFleetSnapshot snapshot)
     {
-        var path = BuildNetworkFleetLogoPath(snapshot.Code);
-        if (string.IsNullOrWhiteSpace(snapshot.LogoImageData))
+        var prefix = BuildNetworkFleetLogoPrefix(snapshot.Code);
+        if (!TryDecodeImageData(snapshot.LogoImageData, 768 * 1024, out var bytes))
         {
-            return File.Exists(path) ? path : null;
+            CleanupImageVariants(prefix, null);
+            return null;
         }
 
         try
         {
-            var payload = snapshot.LogoImageData;
-            var commaIndex = payload.IndexOf(',');
-            if (payload.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase) && commaIndex >= 0)
-            {
-                payload = payload[(commaIndex + 1)..];
-            }
-
-            var bytes = Convert.FromBase64String(payload);
-            if (bytes.Length == 0 || bytes.Length > 768 * 1024)
-            {
-                return null;
-            }
-
+            var hash = Convert.ToHexString(SHA256.HashData(bytes))[..12].ToLowerInvariant();
+            var path = BuildImagePath(prefix, hash);
             WriteImageFileIfChanged(path, bytes);
+            CleanupImageVariants(prefix, path);
             return path;
         }
         catch
@@ -4200,29 +4284,19 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private string? SaveNetworkSquadEmblem(NetworkFleetSnapshot fleetSnapshot, NetworkSquadSnapshot squadSnapshot)
     {
-        if (string.IsNullOrWhiteSpace(squadSnapshot.EmblemImageData))
+        var prefix = BuildNetworkSquadEmblemPrefix(fleetSnapshot.Code, squadSnapshot.Name);
+        if (!TryDecodeImageData(squadSnapshot.EmblemImageData, 512 * 1024, out var bytes))
         {
+            CleanupImageVariants(prefix, null);
             return null;
         }
 
         try
         {
-            var payload = squadSnapshot.EmblemImageData;
-            var commaIndex = payload.IndexOf(',');
-            if (payload.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase) && commaIndex >= 0)
-            {
-                payload = payload[(commaIndex + 1)..];
-            }
-
-            var bytes = Convert.FromBase64String(payload);
-            if (bytes.Length == 0 || bytes.Length > 512 * 1024)
-            {
-                return null;
-            }
-
             var hash = Convert.ToHexString(SHA256.HashData(bytes))[..12].ToLowerInvariant();
-            var path = BuildNetworkSquadEmblemPath(fleetSnapshot.Code, squadSnapshot.Name, hash);
+            var path = BuildImagePath(prefix, hash);
             WriteImageFileIfChanged(path, bytes);
+            CleanupImageVariants(prefix, path);
             return path;
         }
         catch
@@ -4231,37 +4305,90 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
     }
 
-    private static string BuildNetworkFleetLogoPath(string? fleetCode)
+    private static bool TryDecodeImageData(string? imageData, int maxBytes, out byte[] bytes)
     {
-        var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
-        Directory.CreateDirectory(directory);
-        var safeCode = new string((fleetCode ?? "fleet").Where(char.IsLetterOrDigit).ToArray());
-        if (string.IsNullOrWhiteSpace(safeCode))
+        bytes = [];
+        if (string.IsNullOrWhiteSpace(imageData))
         {
-            safeCode = "fleet";
+            return false;
         }
 
-        return Path.Combine(directory, $"fleet-{safeCode}-logo.png");
+        try
+        {
+            var payload = imageData;
+            var commaIndex = payload.IndexOf(',');
+            if (payload.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase) && commaIndex >= 0)
+            {
+                payload = payload[(commaIndex + 1)..];
+            }
+
+            bytes = Convert.FromBase64String(payload);
+            return bytes.Length > 0 && bytes.Length <= maxBytes;
+        }
+        catch
+        {
+            bytes = [];
+            return false;
+        }
     }
 
-    private static string BuildNetworkSquadEmblemPath(string? fleetCode, string? squadName, string? contentHash = null)
+    private static string BuildNetworkFleetLogoPrefix(string? fleetCode)
+    {
+        return $"fleet-{BuildSafeImageToken(fleetCode, "fleet")}-logo";
+    }
+
+    private static string BuildNetworkSquadEmblemPrefix(string? fleetCode, string? squadName)
+    {
+        return $"squad-{BuildSafeImageToken(fleetCode, "fleet")}-{BuildSafeImageToken(squadName, "squad")}-emblem";
+    }
+
+    private static string BuildSafeImageToken(string? value, string fallback)
+    {
+        var safeValue = new string((value ?? fallback).Where(char.IsLetterOrDigit).ToArray());
+        return string.IsNullOrWhiteSpace(safeValue) ? fallback : safeValue;
+    }
+
+    private static string BuildImagePath(string prefix, string? contentHash = null)
     {
         var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
         Directory.CreateDirectory(directory);
-        var safeFleetCode = new string((fleetCode ?? "fleet").Where(char.IsLetterOrDigit).ToArray());
-        var safeSquadName = new string((squadName ?? "squad").Where(char.IsLetterOrDigit).ToArray());
-        if (string.IsNullOrWhiteSpace(safeFleetCode))
-        {
-            safeFleetCode = "fleet";
-        }
-
-        if (string.IsNullOrWhiteSpace(safeSquadName))
-        {
-            safeSquadName = "squad";
-        }
-
         var suffix = string.IsNullOrWhiteSpace(contentHash) ? "" : $"-{contentHash}";
-        return Path.Combine(directory, $"squad-{safeFleetCode}-{safeSquadName}-emblem{suffix}.png");
+        return Path.Combine(directory, $"{prefix}{suffix}.png");
+    }
+
+    private static void CleanupImageVariants(string prefix, string? keepPath)
+    {
+        try
+        {
+            var directory = Path.Combine(DesktopAppConfig.ConfigDirectory, "Images");
+            if (!Directory.Exists(directory))
+            {
+                return;
+            }
+
+            var fullKeepPath = string.IsNullOrWhiteSpace(keepPath) ? null : Path.GetFullPath(keepPath);
+            foreach (var file in Directory.EnumerateFiles(directory, $"{prefix}*.png"))
+            {
+                try
+                {
+                    if (fullKeepPath is not null &&
+                        string.Equals(Path.GetFullPath(file), fullKeepPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    File.Delete(file);
+                }
+                catch
+                {
+                    // Cache cleanup is best-effort. A locked image should not break sync.
+                }
+            }
+        }
+        catch
+        {
+            // Cache cleanup is best-effort. A locked image should not break sync.
+        }
     }
 
     private static void WriteImageFileIfChanged(string path, byte[] bytes)
@@ -6133,7 +6260,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
 
         squad.Description = MySquadDescriptionBox.Text.Trim();
-        squad.UpdatedAt = DateTimeOffset.UtcNow;
+        MarkLocalSquadEdit(squad);
         squad.RefreshComputed();
         RefreshOverlayWindow();
         _ = PushFleetSquadsAsync(silent: true);
@@ -6228,9 +6355,9 @@ public partial class MainWindow : Window, IAppUpdateUi
             Type = squadType,
             Description = string.IsNullOrWhiteSpace(CreateSquadDescriptionBox.Text)
                 ? "No squad briefing yet."
-                : CreateSquadDescriptionBox.Text.Trim(),
-            UpdatedAt = DateTimeOffset.UtcNow
+                : CreateSquadDescriptionBox.Text.Trim()
         };
+        MarkLocalSquadEdit(squad);
 
         _squads.Add(squad);
         _selectedSquad = squad;
@@ -7600,6 +7727,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
 
         _fleetLogoPath = croppedPath;
+        MarkLocalFleetLogoEdit();
         LoadCreateFleetLogoPreview();
         LoadFleetHeaderLogoPreview();
         SaveCurrentConfig();
@@ -7663,7 +7791,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
 
         squad.EmblemPath = croppedPath;
-        squad.UpdatedAt = DateTimeOffset.UtcNow;
+        MarkLocalSquadEdit(squad);
         squad.RefreshComputed();
         RenderSquads();
         RenderMySquad();
@@ -7697,18 +7825,26 @@ public partial class MainWindow : Window, IAppUpdateUi
             return null;
         }
 
-        var directory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "StarBridge",
-            "Images");
-        Directory.CreateDirectory(directory);
-
-        var outputPath = Path.Combine(directory, fileName);
-        using var stream = File.Create(outputPath);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(cropWindow.CroppedImage));
-        encoder.Save(stream);
+
+        using var memoryStream = new MemoryStream();
+        encoder.Save(memoryStream);
+        var bytes = memoryStream.ToArray();
+        var prefix = BuildLocalImagePrefix(fileName);
+        var hash = Convert.ToHexString(SHA256.HashData(bytes))[..12].ToLowerInvariant();
+        var outputPath = BuildImagePath(prefix, hash);
+        WriteImageFileIfChanged(outputPath, bytes);
+        CleanupImageVariants(prefix, outputPath);
         return outputPath;
+    }
+
+    private static string BuildLocalImagePrefix(string fileName)
+    {
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        var safeName = new string((name ?? "image").Where(character =>
+            char.IsLetterOrDigit(character) || character is '-' or '_').ToArray());
+        return string.IsNullOrWhiteSpace(safeName) ? "image" : safeName;
     }
 
     private static T? FindVisualParent<T>(DependencyObject? source)
