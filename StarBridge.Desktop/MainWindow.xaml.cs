@@ -67,6 +67,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     private readonly ObservableCollection<FleetTaskHistoryRow> _fleetTaskHistory = [];
     private readonly ObservableCollection<FleetActionPlanRow> _fleetActionPlans = [];
     private readonly ObservableCollection<FleetEventLogRow> _fleetEventLogs = [];
+    private readonly ObservableCollection<FleetNotificationCenterItemRow> _fleetNotificationCenterItems = [];
     private readonly ObservableCollection<FleetMemberManagementRow> _fleetMemberRows = [];
     private readonly ObservableCollection<FleetApplicationRow> _fleetApplications = [];
     private readonly List<FleetEventLogRow> _allFleetEventLogs = [];
@@ -186,6 +187,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         FleetTaskHistoryList.ItemsSource = _fleetTaskHistory;
         FleetActionPlanList.ItemsSource = _fleetActionPlans;
         FleetEventLogList.ItemsSource = _fleetEventLogs;
+        FleetNotificationCenterList.ItemsSource = _fleetNotificationCenterItems;
         FleetMemberManagementList.ItemsSource = _fleetMemberRows;
         FleetApplicationList.ItemsSource = _fleetApplications;
 
@@ -3937,6 +3939,8 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private NetworkSquadSnapshot[] BuildSquadSnapshots()
     {
+        RepairLocalSquadLifecycle();
+
         return _squads
             .Select(squad => new NetworkSquadSnapshot(
                 squad.Name,
@@ -4748,6 +4752,7 @@ public partial class MainWindow : Window, IAppUpdateUi
             detail);
         _allFleetEventLogs.Insert(0, row);
         ApplyFleetEventLogFilter();
+        RefreshFleetNotificationCenter();
         SaveCurrentConfig();
     }
 
@@ -6006,6 +6011,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         FleetApplicationEmptyText.Visibility = _fleetApplications.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+        RefreshFleetNotificationCenter();
     }
 
     private async void ApproveFleetApplication_Click(object sender, RoutedEventArgs e)
@@ -6279,8 +6285,8 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
-        if (_joinedSquad is not null &&
-            _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
+        RepairLocalSquadLifecycle();
+        if (CurrentUserCommandsAnySquad())
         {
             JoinSquadHintText.Text = "每人只能创建一个小队";
             return;
@@ -6314,8 +6320,8 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
-        if (_joinedSquad is not null &&
-            _joinedSquad.Commander.Equals(FormatCommanderName(_callsign, _localPlayer), StringComparison.OrdinalIgnoreCase))
+        RepairLocalSquadLifecycle();
+        if (CurrentUserCommandsAnySquad())
         {
             CreateSquadValidationText.Text = "每人只能创建一个小队。";
             return;
@@ -6483,6 +6489,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         return commanderGameName.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase) ||
                (!string.IsNullOrWhiteSpace(_callsign) &&
                 commanderCallsign.Equals(_callsign, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool CurrentUserCommandsAnySquad()
+    {
+        return _squads.Any(IsCurrentUserSquadCommander);
     }
 
     private static PlayerRow? PickRecommendedSquadSuccessor(IEnumerable<PlayerRow> members)
@@ -7249,6 +7260,80 @@ public partial class MainWindow : Window, IAppUpdateUi
         {
             OpenFleetNoticeEditor();
         }
+    }
+
+    private void FleetNotificationCenterAction_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not FleetNotificationCenterItemRow row ||
+            string.IsNullOrWhiteSpace(row.ActionKey))
+        {
+            return;
+        }
+
+        switch (row.ActionKey)
+        {
+            case "find-fleet":
+                MainTabs.SelectedItem = FindFleetTab;
+                SetActiveNav(FindFleetNavButton);
+                _ = PullNetworkFleetsAsync(silent: true);
+                break;
+            case "applications":
+                OpenManageFleetSection(FleetApplicationsTab);
+                break;
+            case "task-detail":
+                _selectedFleetInfoPanel = FleetInfoPanelKind.CurrentTask;
+                RefreshFleetInfoPanel();
+                OpenCurrentTaskDetail();
+                break;
+            case "task-manage":
+                OpenManageFleetSection(ManageFleetTaskTab);
+                break;
+            case "plan-detail":
+                _selectedFleetInfoPanel = FleetInfoPanelKind.ActionPlan;
+                RefreshFleetInfoPanel();
+                if (CanCurrentUserPublishPlans())
+                {
+                    OpenManageFleetSection(ManageFleetPlanTab);
+                }
+                break;
+            case "plan-manage":
+                OpenManageFleetSection(ManageFleetPlanTab);
+                break;
+            case "notice-detail":
+                _selectedFleetInfoPanel = FleetInfoPanelKind.Notice;
+                RefreshFleetInfoPanel();
+                if (CanCurrentUserManageFleetInfo())
+                {
+                    OpenFleetNoticeEditor();
+                }
+                break;
+            case "notice-edit":
+                OpenManageFleetSection(ManageFleetNoticeTab);
+                OpenFleetNoticeEditor();
+                break;
+            case "logs":
+                OpenManageFleetSection(ManageFleetLogTab);
+                break;
+        }
+    }
+
+    private void OpenManageFleetSection(TabItem? manageTab)
+    {
+        if (!_hasFleet || manageTab is null)
+        {
+            return;
+        }
+
+        RefreshFleetManagementPermissions();
+        MainTabs.SelectedItem = FleetTab;
+        FleetSubTabs.SelectedItem = ManageFleetTab;
+        if (ManageFleetTab.Visibility == Visibility.Visible &&
+            manageTab.Visibility == Visibility.Visible)
+        {
+            ManageFleetTabs.SelectedItem = manageTab;
+        }
+
+        SetActiveNav(MyFleetNavButton);
     }
 
     private void OpenFleetNoticeEditor()
@@ -8678,6 +8763,212 @@ public partial class MainWindow : Window, IAppUpdateUi
                 RefreshActionPlanPanel();
                 break;
         }
+
+        RefreshFleetNotificationCenter();
+    }
+
+    private void RefreshFleetNotificationCenter()
+    {
+        if (FleetNotificationCenterSummaryText is null)
+        {
+            return;
+        }
+
+        _fleetNotificationCenterItems.Clear();
+
+        if (!_hasFleet)
+        {
+            FleetNotificationCenterSummaryText.Text = "加入或创建舰队后显示任务、计划和舰队动态。";
+            _fleetNotificationCenterItems.Add(new FleetNotificationCenterItemRow(
+                "入门",
+                "尚未加入舰队",
+                "寻找已有舰队，或创建自己的舰队。",
+                "",
+                "前往",
+                "find-fleet",
+                Brushes.DeepSkyBlue));
+            return;
+        }
+
+        var added = 0;
+        void AddItem(
+            string kind,
+            string title,
+            string detail,
+            string timeText,
+            string actionText,
+            string actionKey,
+            System.Windows.Media.Brush accentBrush)
+        {
+            if (added >= 5)
+            {
+                return;
+            }
+
+            _fleetNotificationCenterItems.Add(new FleetNotificationCenterItemRow(
+                kind,
+                TruncateNotificationText(title, 34),
+                TruncateNotificationText(detail, 52),
+                timeText,
+                actionText,
+                actionKey,
+                accentBrush));
+            added++;
+        }
+
+        var pendingApplications = CountPendingFleetApplications();
+        if (pendingApplications > 0 && CanCurrentUserManageFleetInfo())
+        {
+            AddItem(
+                "待处理",
+                $"{pendingApplications} 个加入申请",
+                "前往管理舰队审核新成员。",
+                "",
+                "处理",
+                "applications",
+                Brushes.Orange);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_fleetCurrentTaskTitle))
+        {
+            AddItem(
+                "当前任务",
+                _fleetCurrentTaskTitle,
+                BuildCurrentTaskNotificationDetail(),
+                _fleetCurrentTaskTime is null ? "" : _fleetCurrentTaskTime.Value.ToString("MM-dd HH:mm"),
+                "详情",
+                "task-detail",
+                Brushes.DeepSkyBlue);
+        }
+        else if (CanCurrentUserPublishTasks())
+        {
+            AddItem(
+                "当前任务",
+                "暂无当前任务",
+                "前往管理舰队发布任务或集结点。",
+                "",
+                "发布",
+                "task-manage",
+                Brushes.DeepSkyBlue);
+        }
+
+        var nextPlan = GetVisibleActionPlans()
+            .Where(plan => plan.StartTime >= DateTime.Now)
+            .OrderBy(plan => plan.StartTime)
+            .FirstOrDefault();
+        if (nextPlan is not null)
+        {
+            AddItem(
+                "行动计划",
+                nextPlan.Title,
+                $"开始时间 {nextPlan.StartTime:MM-dd HH:mm}，{nextPlan.ParticipantCountText}",
+                nextPlan.StartTime.ToString("MM-dd HH:mm"),
+                _joinedActionPlanIds.Contains(nextPlan.Id) ? "已预约" : "查看",
+                "plan-detail",
+                Brushes.MediumSpringGreen);
+        }
+        else if (CanCurrentUserPublishPlans())
+        {
+            AddItem(
+                "行动计划",
+                "未来 7 天暂无计划",
+                "前往管理舰队创建行动计划。",
+                "",
+                "创建",
+                "plan-manage",
+                Brushes.MediumSpringGreen);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_fleetNoticeTitle))
+        {
+            AddItem(
+                "舰队公告",
+                _fleetNoticeTitle,
+                string.IsNullOrWhiteSpace(_fleetNoticeContent) ? "点击查看公告。" : _fleetNoticeContent,
+                "",
+                CanCurrentUserManageFleetInfo() ? "编辑" : "查看",
+                "notice-detail",
+                Brushes.Cyan);
+        }
+        else if (CanCurrentUserManageFleetInfo())
+        {
+            AddItem(
+                "舰队公告",
+                "暂无舰队公告",
+                "发布公告后会同步给舰队成员与 Overlay。",
+                "",
+                "发布",
+                "notice-edit",
+                Brushes.Cyan);
+        }
+
+        var canOpenManagement = CanCurrentUserOpenFleetManagement();
+        foreach (var log in _allFleetEventLogs
+                     .OrderByDescending(log => log.Timestamp)
+                     .Take(2))
+        {
+            AddItem(
+                $"日志 / {log.Type}",
+                log.Title,
+                log.Detail,
+                log.Timestamp.ToLocalTime().ToString("MM-dd HH:mm"),
+                canOpenManagement ? "查看" : "",
+                canOpenManagement ? "logs" : "",
+                Brushes.LightSkyBlue);
+        }
+
+        if (_fleetNotificationCenterItems.Count == 0)
+        {
+            AddItem(
+                "舰队状态",
+                "暂无新的舰队动态",
+                "任务、公告、计划、申请和日志会在这里聚合。",
+                "",
+                "",
+                "",
+                Brushes.DeepSkyBlue);
+        }
+
+        var activeCount = _fleetNotificationCenterItems.Count;
+        FleetNotificationCenterSummaryText.Text = activeCount == 0
+            ? "暂无待处理事项。"
+            : $"{activeCount} 条舰队动态，点击卡片可跳转处理。";
+    }
+
+    private int CountPendingFleetApplications()
+    {
+        return (_fleetApplicationSnapshots ?? [])
+            .Count(application =>
+                string.IsNullOrWhiteSpace(application.Status) ||
+                application.Status.Equals("Pending", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private string BuildCurrentTaskNotificationDetail()
+    {
+        var detail = string.IsNullOrWhiteSpace(_fleetCurrentTaskBrief)
+            ? _fleetCurrentTaskParticipants
+            : _fleetCurrentTaskBrief;
+        if (!string.IsNullOrWhiteSpace(_fleetCurrentTaskRally))
+        {
+            detail = string.IsNullOrWhiteSpace(detail)
+                ? $"集结点：{_fleetCurrentTaskRally}"
+                : $"{detail} / 集结点：{_fleetCurrentTaskRally}";
+        }
+
+        return string.IsNullOrWhiteSpace(detail) ? "点击查看任务详情。" : detail;
+    }
+
+    private static string TruncateNotificationText(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var normalized = value.ReplaceLineEndings(" ").Trim();
+        return normalized.Length <= maxLength
+            ? normalized
+            : normalized[..Math.Max(0, maxLength - 1)] + "…";
     }
 
     private void RefreshNoticePanel()
@@ -8894,6 +9185,8 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private void RenderSquads()
     {
+        RepairLocalSquadLifecycle();
+
         foreach (var squad in _squads)
         {
             squad.Members.Clear();
@@ -8921,6 +9214,66 @@ public partial class MainWindow : Window, IAppUpdateUi
 
         NoSquadsPanel.Visibility = _squads.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         SquadSelectionList.Visibility = _squads.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void RepairLocalSquadLifecycle()
+    {
+        var now = DateTimeOffset.UtcNow;
+        for (var index = _squads.Count - 1; index >= 0; index--)
+        {
+            var squad = _squads[index];
+            var members = _players
+                .Where(player => player.SquadName.Equals(squad.Name, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (members.Count == 0)
+            {
+                if (squad.UpdatedAt != default &&
+                    now - squad.UpdatedAt <= TimeSpan.FromMinutes(2))
+                {
+                    continue;
+                }
+
+                var removedName = squad.Name;
+                _squads.RemoveAt(index);
+                _localSquadEditTimes.Remove(removedName.Trim());
+
+                if (_joinedSquad is not null &&
+                    _joinedSquad.Name.Equals(removedName, StringComparison.OrdinalIgnoreCase))
+                {
+                    _joinedSquad = null;
+                }
+
+                if (_selectedSquad is not null &&
+                    _selectedSquad.Name.Equals(removedName, StringComparison.OrdinalIgnoreCase))
+                {
+                    _selectedSquad = _joinedSquad ?? _squads.FirstOrDefault();
+                }
+
+                continue;
+            }
+
+            if (members.Any(member => IsSquadCommander(squad, member)))
+            {
+                continue;
+            }
+
+            var successor = PickRecommendedSquadSuccessor(members);
+            if (successor is null)
+            {
+                continue;
+            }
+
+            squad.Commander = FormatCommanderName(successor.Callsign, successor.Name);
+            squad.UpdatedAt = now;
+            squad.RefreshComputed();
+        }
+
+        if (SquadSelectionList is not null &&
+            !ReferenceEquals(SquadSelectionList.SelectedItem, _selectedSquad))
+        {
+            SquadSelectionList.SelectedItem = _selectedSquad;
+        }
     }
 
     private MemberAvatarRow CreateSquadAvatarRow(SquadRow squad, PlayerRow player)

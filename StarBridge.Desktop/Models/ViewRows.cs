@@ -69,6 +69,15 @@ public sealed record FleetEventLogRow(
     public string TimestampText => Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
 }
 
+public sealed record FleetNotificationCenterItemRow(
+    string Kind,
+    string Title,
+    string Detail,
+    string TimeText,
+    string ActionText,
+    string ActionKey,
+    MediaBrush? AccentBrush);
+
 public sealed class FleetMemberManagementRow : INotifyPropertyChanged
 {
     private string _roleTitle = "成员";

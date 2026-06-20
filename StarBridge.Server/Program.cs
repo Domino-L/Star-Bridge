@@ -2272,23 +2272,62 @@ static NetworkSquadSnapshot[] PruneEmptySquads(
         return normalizedSquads;
     }
 
-    var activeSquads = NormalizeFleetMembers(members, null)
-        .Select(member => Normalize(member.SquadName, "Unassigned"))
-        .Where(name =>
-            !string.IsNullOrWhiteSpace(name) &&
-            !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) &&
-            !name.Equals("未加入小队", StringComparison.OrdinalIgnoreCase))
-        .ToHashSet(StringComparer.OrdinalIgnoreCase);
     var now = DateTimeOffset.UtcNow;
+    var membersBySquad = NormalizeFleetMembers(members, null)
+        .Where(member => !IsUnassignedSquadName(member.SquadName))
+        .GroupBy(member => Normalize(member.SquadName, "Unassigned"), StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
 
-    return normalizedSquads
-        .Where(squad =>
-            activeSquads.Contains(squad.Name) ||
-            (emptySquadGracePeriod is { } gracePeriod &&
-             squad.UpdatedAt != default &&
-             now - squad.UpdatedAt <= gracePeriod))
+    var repairedSquads = new List<NetworkSquadSnapshot>();
+    foreach (var squad in normalizedSquads)
+    {
+        if (!membersBySquad.TryGetValue(squad.Name, out var squadMembers) || squadMembers.Length == 0)
+        {
+            if (emptySquadGracePeriod is { } gracePeriod &&
+                squad.UpdatedAt != default &&
+                now - squad.UpdatedAt <= gracePeriod)
+            {
+                repairedSquads.Add(squad);
+            }
+
+            continue;
+        }
+
+        if (!squadMembers.Any(member => SquadCommanderMatchesMember(squad, member)) &&
+            PickRecommendedSquadSuccessor(squadMembers) is { } successor)
+        {
+            repairedSquads.Add(squad with
+            {
+                Commander = DisplayMember(successor),
+                UpdatedAt = now
+            });
+            continue;
+        }
+
+        repairedSquads.Add(squad);
+    }
+
+    return repairedSquads
         .OrderBy(squad => squad.Name)
         .ToArray();
+}
+
+static bool IsUnassignedSquadName(string? squadName)
+{
+    var normalized = Normalize(squadName, "Unassigned");
+    return string.IsNullOrWhiteSpace(normalized) ||
+           normalized.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) ||
+           normalized.Equals("未加入小队", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool SquadCommanderMatchesMember(NetworkSquadSnapshot squad, NetworkFleetMemberSnapshot member)
+{
+    var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    AddIdentityAliases(aliases, member.GameName);
+    AddIdentityAliases(aliases, member.Callsign);
+    AddIdentityAliases(aliases, DisplayMember(member));
+
+    return IdentityContainsAny(squad.Commander, aliases);
 }
 
 static NetworkFleetTaskHistorySnapshot[] NormalizeFleetTaskHistory(NetworkFleetTaskHistorySnapshot[]? history)

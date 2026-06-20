@@ -680,20 +680,21 @@
             </TabItem>
             <TabItem x:Name="FleetTab" Header="Fleet">
                 <Grid Margin="0,14,0,0">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="190" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
 
                             <Border Grid.Row="0"
                                     Style="{StaticResource HudPanel}"
                                     Padding="18,16">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="560" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="300" />
-                            </Grid.ColumnDefinitions>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="560" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="300" />
+                                    </Grid.ColumnDefinitions>
 
                             <Grid Grid.Column="0">
                                 <Grid.ColumnDefinitions>
@@ -895,10 +896,123 @@
                                         Visibility="Collapsed"
                                         Click="LeaveFleetButton_Click" />
                             </Grid>
+
                         </Grid>
                     </Border>
 
-                    <TabControl x:Name="FleetSubTabs" Grid.Row="1">
+                    <Border Grid.Row="1"
+                            Margin="0,10,0,0"
+                            Padding="12,10"
+                            BorderBrush="{StaticResource AccentDimBrush}"
+                            BorderThickness="1"
+                            Background="{StaticResource FieldBackBrush}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="148" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="通知中心"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="16"
+                                           FontWeight="SemiBold" />
+                                <TextBlock x:Name="FleetNotificationCenterSummaryText"
+                                           Text="舰队动态会显示在这里。"
+                                           Margin="0,6,14,0"
+                                           Style="{StaticResource HudCaptionText}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ItemsControl Grid.Column="1"
+                                          x:Name="FleetNotificationCenterList">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <UniformGrid Rows="1" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button Tag="{Binding}"
+                                                Click="FleetNotificationCenterAction_Click"
+                                                Cursor="Hand"
+                                                Margin="0,0,10,0"
+                                                Height="76"
+                                                Padding="0"
+                                                BorderThickness="0"
+                                                Background="Transparent">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="Root"
+                                                            BorderBrush="{StaticResource AccentDimBrush}"
+                                                            BorderThickness="1"
+                                                            Background="#CC07111D"
+                                                            Padding="10,8">
+                                                        <ContentPresenter />
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="Root" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                                            <Setter TargetName="Root" Property="Background" Value="#E0102436" />
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter TargetName="Root" Property="Opacity" Value="0.7" />
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                            <Grid>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="*" />
+                                                </Grid.RowDefinitions>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Kind}"
+                                                               Foreground="{Binding AccentBrush}"
+                                                               FontSize="10"
+                                                               FontWeight="SemiBold"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Grid.Column="1"
+                                                               Text="{Binding ActionText}"
+                                                               Foreground="{Binding AccentBrush}"
+                                                               FontSize="10"
+                                                               FontWeight="SemiBold"
+                                                               Margin="10,0,0,0" />
+                                                </Grid>
+                                                <TextBlock Grid.Row="1"
+                                                           Text="{Binding Title}"
+                                                           Margin="0,5,0,0"
+                                                           Foreground="{StaticResource PrimaryTextBrush}"
+                                                           FontSize="13"
+                                                           FontWeight="SemiBold"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <Grid Grid.Row="2" Margin="0,5,0,0">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Detail}"
+                                                               Foreground="{StaticResource MutedTextBrush}"
+                                                               FontSize="11"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Grid.Column="1"
+                                                               Text="{Binding TimeText}"
+                                                               Foreground="{StaticResource MutedTextBrush}"
+                                                               FontSize="10"
+                                                               Margin="12,0,0,0" />
+                                                </Grid>
+                                            </Grid>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Grid>
+                    </Border>
+
+                    <TabControl x:Name="FleetSubTabs" Grid.Row="2">
                         <TabItem x:Name="AllPlayersTab" Header="All Players">
                             <ScrollViewer Margin="0,14,0,0"
                                           VerticalScrollBarVisibility="Auto"
