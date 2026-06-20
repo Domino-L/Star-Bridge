@@ -3333,13 +3333,6 @@ static string BuildFleetEventLogSemanticKey(NetworkFleetEventLogSnapshot log)
     return $"{minuteBucket}|{type}|{title}|{detail}";
 }
 
-static NetworkFleetEventLogSnapshot[] MergeFleetEventLogs(
-    NetworkFleetEventLogSnapshot[]? existingLogs,
-    NetworkFleetEventLogSnapshot[]? incomingLogs)
-{
-    return NormalizeFleetEventLogs((existingLogs ?? []).Concat(incomingLogs ?? []).ToArray());
-}
-
 static NetworkFleetEventLogSnapshot[] AddFleetLog(
     NetworkFleetEventLogSnapshot[]? existingLogs,
     string type,
