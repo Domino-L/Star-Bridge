@@ -483,7 +483,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
         ActionPlans = snapshot.ActionPlans ?? [],
         MemberPermissions = NormalizeFleetMemberPermissions(snapshot.MemberPermissions),
         Members = NormalizeFleetMembers(snapshot.Members, snapshot.MemberPermissions),
-        EventLog = NormalizeFleetEventLogs(snapshot.EventLog),
+        EventLog = [],
         Ships = NormalizeFleetShips(snapshot.Ships),
         TaskHistory = NormalizeFleetTaskHistory(snapshot.TaskHistory),
         Applications = NormalizeFleetApplications(snapshot.Applications),
@@ -496,9 +496,17 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
     users.TryGetValue(authorizedUser, out var authorizedAccount);
     return await WithFleetWriteLockAsync(fleetWriteLocks, normalized.Code, async () =>
     {
+        var normalizedCreate = normalized with
+        {
+            EventLog = AddFleetLog(
+                [],
+                "舰队",
+                "创建舰队",
+                $"{normalized.Name} ({normalized.Code}) 已创建")
+        };
         var merged = fleets.AddOrUpdate(
             normalized.Code,
-            normalized,
+            normalizedCreate,
             (_, existing) =>
             {
                 var canOwnFleet =
@@ -510,7 +518,6 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                                       HasFleetPermission(existing, authorizedAccount, permission => permission.CanPublishTasks);
                 var canPublishPlans = canOwnFleet ||
                                       HasFleetPermission(existing, authorizedAccount, permission => permission.CanPublishPlans);
-                var canAppendFleetLogs = canOwnFleet || canManageFleetInfo || canPublishTasks || canPublishPlans;
                 var canJoinActionPlans = IsFleetMember(existing, authorizedAccount);
                 var mergedMembers = MergeFleetMembers(
                     existing.Members,
@@ -565,9 +572,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                     Applications = canManageFleetInfo
                         ? NormalizeFleetApplications(normalized.Applications)
                         : existing.Applications,
-                    EventLog = canAppendFleetLogs
-                        ? MergeFleetEventLogs(existing.EventLog, normalized.EventLog)
-                        : existing.EventLog,
+                    EventLog = existing.EventLog,
                     OwnerAccount = canOwnFleet ? normalized.OwnerAccount : existing.OwnerAccount,
                     Squads = PruneEmptySquads(mergedSquads, mergedMembers, TimeSpan.FromMinutes(2))
                 };
@@ -604,11 +609,26 @@ app.MapPost("/api/fleets/notice", async (HttpRequest request, FleetNoticeUpdateR
             return Results.Unauthorized();
         }
 
+        var noticeTitle = Normalize(update.Title, "");
+        var noticeContent = Normalize(update.Content, "");
+        var eventLog = fleet.EventLog;
+        if (!TextEquals(fleet.NoticeTitle, noticeTitle) ||
+            !TextEquals(fleet.NoticeContent, noticeContent))
+        {
+            eventLog = AddFleetLog(
+                eventLog,
+                "公告",
+                string.IsNullOrWhiteSpace(noticeTitle) && string.IsNullOrWhiteSpace(noticeContent)
+                    ? "清空舰队公告"
+                    : "更新舰队公告",
+                string.IsNullOrWhiteSpace(noticeTitle) ? "舰队公告已更新" : noticeTitle);
+        }
+
         var updated = fleet with
         {
-            NoticeTitle = Normalize(update.Title, ""),
-            NoticeContent = Normalize(update.Content, ""),
-            EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+            NoticeTitle = noticeTitle,
+            NoticeContent = noticeContent,
+            EventLog = eventLog,
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -644,19 +664,63 @@ app.MapPost("/api/fleets/task", async (HttpRequest request, FleetTaskUpdateReque
             return Results.Unauthorized();
         }
 
+        var taskTitle = Normalize(update.Title, "");
+        var taskBrief = Normalize(update.Brief, "");
+        var taskParticipants = Normalize(update.Participants, "");
+        var taskRally = Normalize(update.Rally, "");
+        var taskShip = Normalize(update.Ship, "");
+        var noticeRevision = Math.Max(
+            Math.Max(0, update.NoticeRevision),
+            Math.Max(0, fleet.CurrentTaskNoticeRevision));
+        var taskHistory = MergeFleetTaskHistory(fleet.TaskHistory, update.TaskHistory);
+        var eventLog = AddFleetTaskHistoryChangeLogs(fleet.EventLog, fleet.TaskHistory, taskHistory);
+        var oldTaskActive = IsTaskActive(
+            fleet.CurrentTaskTitle,
+            fleet.CurrentTaskBrief,
+            fleet.CurrentTaskRally,
+            fleet.CurrentTaskShip);
+        var newTaskActive = IsTaskActive(taskTitle, taskBrief, taskRally, taskShip);
+        var taskChanged = !TaskEquals(
+            fleet.CurrentTaskTitle,
+            fleet.CurrentTaskBrief,
+            fleet.CurrentTaskParticipants,
+            fleet.CurrentTaskRally,
+            fleet.CurrentTaskShip,
+            fleet.CurrentTaskTime,
+            taskTitle,
+            taskBrief,
+            taskParticipants,
+            taskRally,
+            taskShip,
+            update.Time);
+        if (newTaskActive && !oldTaskActive)
+        {
+            eventLog = AddFleetLog(eventLog, "任务", "发布任务", FormatTaskLogDetail(taskTitle, taskParticipants, taskRally, taskShip, update.Time));
+        }
+        else if (newTaskActive && taskChanged)
+        {
+            eventLog = AddFleetLog(eventLog, "任务", "更新任务", FormatTaskLogDetail(taskTitle, taskParticipants, taskRally, taskShip, update.Time));
+        }
+        else if (!newTaskActive && oldTaskActive)
+        {
+            eventLog = AddFleetLog(eventLog, "任务", "清除当前任务", "当前任务已清除");
+        }
+        else if (newTaskActive && update.NoticeRevision > fleet.CurrentTaskNoticeRevision)
+        {
+            eventLog = AddFleetLog(eventLog, "任务", "再次通知任务", FormatTaskLogDetail(taskTitle, taskParticipants, taskRally, taskShip, update.Time));
+        }
+
         var updated = fleet with
         {
-            CurrentTaskTitle = Normalize(update.Title, ""),
-            CurrentTaskBrief = Normalize(update.Brief, ""),
-            CurrentTaskParticipants = Normalize(update.Participants, ""),
-            CurrentTaskRally = Normalize(update.Rally, ""),
-            CurrentTaskShip = Normalize(update.Ship, ""),
+            CurrentTaskTitle = taskTitle,
+            CurrentTaskBrief = taskBrief,
+            CurrentTaskParticipants = taskParticipants,
+            CurrentTaskRally = taskRally,
+            CurrentTaskShip = taskShip,
             CurrentTaskTime = update.Time,
-            CurrentTaskNoticeRevision = Math.Max(
-                Math.Max(0, update.NoticeRevision),
-                Math.Max(0, fleet.CurrentTaskNoticeRevision)),
-            TaskHistory = MergeFleetTaskHistory(fleet.TaskHistory, update.TaskHistory),
-            EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+            CurrentTaskNoticeRevision = noticeRevision,
+            TaskHistory = taskHistory,
+            EventLog = eventLog,
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -692,10 +756,12 @@ app.MapPost("/api/fleets/action-plans", async (HttpRequest request, FleetActionP
             return Results.Unauthorized();
         }
 
+        var actionPlans = NormalizeActionPlans(update.ActionPlans);
+        var eventLog = AddActionPlanChangeLogs(fleet.EventLog, fleet.ActionPlans, actionPlans);
         var updated = fleet with
         {
-            ActionPlans = NormalizeActionPlans(update.ActionPlans),
-            EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+            ActionPlans = actionPlans,
+            EventLog = eventLog,
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -1094,10 +1160,29 @@ app.MapPost("/api/fleets/permissions", async (HttpRequest request, FleetMemberPe
             return Results.Unauthorized();
         }
 
+        var permission = NormalizeFleetMemberPermissions([update.Permission]).FirstOrDefault();
+        if (permission is null)
+        {
+            return Results.BadRequest(new { error = "Member permission is invalid." });
+        }
+
+        var permissions = MergeFleetMemberPermissions(fleet.MemberPermissions, [permission]);
+        var previousPermission = FindPermissionForIdentity(fleet.MemberPermissions, permission);
+        var effectivePermission = FindPermissionForIdentity(permissions, permission) ?? permission;
+        var eventLog = fleet.EventLog;
+        if (previousPermission is null || !PermissionEquals(previousPermission, effectivePermission))
+        {
+            eventLog = AddFleetLog(
+                eventLog,
+                "权限",
+                effectivePermission.PermissionEnabled ? "更新成员权限" : "撤销成员权限",
+                FormatPermissionLogDetail(effectivePermission));
+        }
+
         var updated = fleet with
         {
-            MemberPermissions = MergeFleetMemberPermissions(fleet.MemberPermissions, [update.Permission]),
-            EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+            MemberPermissions = permissions,
+            EventLog = eventLog,
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -1133,16 +1218,39 @@ app.MapPost("/api/fleets/info", async (HttpRequest request, FleetInfoUpdateReque
             return Results.Unauthorized();
         }
 
+        var description = Normalize(update.Description, "No fleet description.");
+        var type = Normalize(update.Type, "Combat");
+        var activeTime = Normalize(update.ActiveTime, "20:00 - 23:59 UTC+8");
+        var joinPolicy = Normalize(update.JoinPolicy, "Open");
+        var logoText = Normalize(update.LogoText, Normalize(fleet.LogoText, "LOGO"));
         var logoImageData = NormalizeImageData(update.LogoImageData, 512 * 1024);
+        var fleetInfoChanges = BuildFleetInfoChangeList(
+            fleet,
+            description,
+            type,
+            activeTime,
+            joinPolicy,
+            logoText,
+            logoImageData);
+        var eventLog = fleet.EventLog;
+        if (fleetInfoChanges.Length > 0)
+        {
+            eventLog = AddFleetLog(
+                eventLog,
+                "舰队",
+                "更新舰队资料",
+                string.Join("、", fleetInfoChanges));
+        }
+
         var updated = fleet with
         {
-            Description = Normalize(update.Description, "No fleet description."),
-            Type = Normalize(update.Type, "Combat"),
-            ActiveTime = Normalize(update.ActiveTime, "20:00 - 23:59 UTC+8"),
-            JoinPolicy = Normalize(update.JoinPolicy, "Open"),
-            LogoText = Normalize(update.LogoText, Normalize(fleet.LogoText, "LOGO")),
+            Description = description,
+            Type = type,
+            ActiveTime = activeTime,
+            JoinPolicy = joinPolicy,
+            LogoText = logoText,
             LogoImageData = logoImageData ?? fleet.LogoImageData,
-            EventLog = MergeFleetEventLogs(fleet.EventLog, update.EventLog),
+            EventLog = eventLog,
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -1187,12 +1295,14 @@ app.MapPost("/api/fleets/squads", async (HttpRequest request, FleetSquadsUpdateR
             fleet,
             account,
             canManageAllSquads);
+        var prunedSquads = PruneEmptySquads(mergedSquads, fleet.Members, TimeSpan.FromMinutes(2));
+        var eventLog = canAppendSquadLog
+            ? AddSquadChangeLogs(fleet.EventLog, fleet.Squads, prunedSquads)
+            : fleet.EventLog;
         var updated = fleet with
         {
-            Squads = PruneEmptySquads(mergedSquads, fleet.Members, TimeSpan.FromMinutes(2)),
-            EventLog = canAppendSquadLog
-                ? MergeFleetEventLogs(fleet.EventLog, update.EventLog)
-                : fleet.EventLog,
+            Squads = prunedSquads,
+            EventLog = eventLog,
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -3243,6 +3353,290 @@ static NetworkFleetEventLogSnapshot[] AddFleetLog(
         title,
         detail);
     return NormalizeFleetEventLogs((existingLogs ?? []).Prepend(row).ToArray());
+}
+
+static bool TextEquals(string? left, string? right)
+{
+    return Normalize(left, "").Equals(Normalize(right, ""), StringComparison.Ordinal);
+}
+
+static bool IsTaskActive(string? title, string? brief, string? rally, string? ship)
+{
+    return !string.IsNullOrWhiteSpace(Normalize(title, "")) ||
+           !string.IsNullOrWhiteSpace(Normalize(brief, "")) ||
+           !string.IsNullOrWhiteSpace(Normalize(rally, "")) ||
+           !string.IsNullOrWhiteSpace(Normalize(ship, ""));
+}
+
+static bool TaskEquals(
+    string? leftTitle,
+    string? leftBrief,
+    string? leftParticipants,
+    string? leftRally,
+    string? leftShip,
+    DateTime? leftTime,
+    string? rightTitle,
+    string? rightBrief,
+    string? rightParticipants,
+    string? rightRally,
+    string? rightShip,
+    DateTime? rightTime)
+{
+    return TextEquals(leftTitle, rightTitle) &&
+           TextEquals(leftBrief, rightBrief) &&
+           TextEquals(leftParticipants, rightParticipants) &&
+           TextEquals(leftRally, rightRally) &&
+           TextEquals(leftShip, rightShip) &&
+           Nullable.Equals(leftTime, rightTime);
+}
+
+static string FormatTaskLogDetail(
+    string? title,
+    string? participants,
+    string? rally,
+    string? ship,
+    DateTime? time)
+{
+    var rows = new List<string>
+    {
+        Normalize(title, "未命名任务")
+    };
+    if (!string.IsNullOrWhiteSpace(participants))
+    {
+        rows.Add($"参与范围：{participants}");
+    }
+
+    if (!string.IsNullOrWhiteSpace(rally))
+    {
+        rows.Add($"集结点：{rally}");
+    }
+
+    if (!string.IsNullOrWhiteSpace(ship))
+    {
+        rows.Add($"指定舰船：{ship}");
+    }
+
+    if (time is not null)
+    {
+        rows.Add($"时间：{time:yyyy-MM-dd HH:mm}");
+    }
+
+    return string.Join(" / ", rows);
+}
+
+static NetworkFleetEventLogSnapshot[] AddFleetTaskHistoryChangeLogs(
+    NetworkFleetEventLogSnapshot[]? logs,
+    NetworkFleetTaskHistorySnapshot[]? existingHistory,
+    NetworkFleetTaskHistorySnapshot[]? incomingHistory)
+{
+    var eventLog = logs ?? [];
+    var existingRows = NormalizeFleetTaskHistory(existingHistory)
+        .ToDictionary(task => task.Key, StringComparer.OrdinalIgnoreCase);
+    foreach (var task in NormalizeFleetTaskHistory(incomingHistory))
+    {
+        if (!existingRows.TryGetValue(task.Key, out var existing))
+        {
+            eventLog = AddFleetLog(eventLog, "任务", "记录任务", FormatTaskHistoryLogDetail(task));
+            continue;
+        }
+
+        if (!TextEquals(existing.Status, task.Status))
+        {
+            eventLog = AddFleetLog(eventLog, "任务", "更新任务状态", FormatTaskHistoryLogDetail(task));
+        }
+    }
+
+    return eventLog;
+}
+
+static string FormatTaskHistoryLogDetail(NetworkFleetTaskHistorySnapshot task)
+{
+    var title = Normalize(task.Title, "未命名任务");
+    var status = Normalize(task.Status, "未知状态");
+    return $"{title} / {status}";
+}
+
+static NetworkFleetEventLogSnapshot[] AddActionPlanChangeLogs(
+    NetworkFleetEventLogSnapshot[]? logs,
+    NetworkActionPlanSnapshot[]? existingPlans,
+    NetworkActionPlanSnapshot[]? incomingPlans)
+{
+    var eventLog = logs ?? [];
+    var existingRows = NormalizeActionPlans(existingPlans)
+        .ToDictionary(plan => plan.Id, StringComparer.OrdinalIgnoreCase);
+    var incomingRows = NormalizeActionPlans(incomingPlans)
+        .ToDictionary(plan => plan.Id, StringComparer.OrdinalIgnoreCase);
+
+    foreach (var plan in incomingRows.Values.OrderBy(plan => plan.StartTime))
+    {
+        if (!existingRows.TryGetValue(plan.Id, out var existing))
+        {
+            eventLog = AddFleetLog(eventLog, "计划", "发布行动计划", FormatActionPlanLogDetail(plan));
+            continue;
+        }
+
+        if (!ActionPlanEquals(existing, plan))
+        {
+            eventLog = AddFleetLog(eventLog, "计划", "更新行动计划", FormatActionPlanLogDetail(plan));
+        }
+    }
+
+    foreach (var plan in existingRows.Values.OrderBy(plan => plan.StartTime))
+    {
+        if (!incomingRows.ContainsKey(plan.Id))
+        {
+            eventLog = AddFleetLog(eventLog, "计划", "取消行动计划", FormatActionPlanLogDetail(plan));
+        }
+    }
+
+    return eventLog;
+}
+
+static bool ActionPlanEquals(NetworkActionPlanSnapshot left, NetworkActionPlanSnapshot right)
+{
+    return TextEquals(left.Title, right.Title) &&
+           TextEquals(left.Content, right.Content) &&
+           left.StartTime.Equals(right.StartTime) &&
+           left.NotifyMembers == right.NotifyMembers;
+}
+
+static string FormatActionPlanLogDetail(NetworkActionPlanSnapshot plan)
+{
+    var time = plan.StartTime == default
+        ? "时间未定"
+        : plan.StartTime.ToString("yyyy-MM-dd HH:mm");
+    return $"{Normalize(plan.Title, "未命名行动")} / {time}";
+}
+
+static NetworkFleetMemberPermissionSnapshot? FindPermissionForIdentity(
+    NetworkFleetMemberPermissionSnapshot[]? permissions,
+    NetworkFleetMemberPermissionSnapshot target)
+{
+    var aliases = ExpandIdentityAliases(target.GameName)
+        .Concat(ExpandIdentityAliases(target.Callsign))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    return NormalizeFleetMemberPermissions(permissions)
+        .FirstOrDefault(permission =>
+            IdentityContainsAny(permission.GameName, aliases) ||
+            IdentityContainsAny(permission.Callsign, aliases));
+}
+
+static bool PermissionEquals(
+    NetworkFleetMemberPermissionSnapshot left,
+    NetworkFleetMemberPermissionSnapshot right)
+{
+    return TextEquals(left.GameName, right.GameName) &&
+           TextEquals(left.Callsign, right.Callsign) &&
+           TextEquals(left.RoleTitle, right.RoleTitle) &&
+           left.PermissionEnabled == right.PermissionEnabled &&
+           left.CanRemoveMembers == right.CanRemoveMembers &&
+           left.CanPublishTasks == right.CanPublishTasks &&
+           left.CanPublishPlans == right.CanPublishPlans &&
+           left.CanManageFleetInfo == right.CanManageFleetInfo;
+}
+
+static string FormatPermissionLogDetail(NetworkFleetMemberPermissionSnapshot permission)
+{
+    var display = string.IsNullOrWhiteSpace(permission.Callsign)
+        ? permission.GameName
+        : $"{permission.Callsign} ({permission.GameName})";
+    var enabled = permission.PermissionEnabled ? "已启用" : "已关闭";
+    return $"{display} / {Normalize(permission.RoleTitle, "成员")} / {enabled}";
+}
+
+static string[] BuildFleetInfoChangeList(
+    NetworkFleetSnapshot fleet,
+    string description,
+    string type,
+    string activeTime,
+    string joinPolicy,
+    string logoText,
+    string? logoImageData)
+{
+    var changes = new List<string>();
+    if (!TextEquals(fleet.Description, description))
+    {
+        changes.Add("简介");
+    }
+
+    if (!TextEquals(fleet.Type, type))
+    {
+        changes.Add("类型");
+    }
+
+    if (!TextEquals(fleet.ActiveTime, activeTime))
+    {
+        changes.Add("活动时间");
+    }
+
+    if (!TextEquals(fleet.JoinPolicy, joinPolicy))
+    {
+        changes.Add("加入方式");
+    }
+
+    if (!TextEquals(fleet.LogoText, logoText))
+    {
+        changes.Add("队标文字");
+    }
+
+    if (!string.IsNullOrWhiteSpace(logoImageData) && !TextEquals(fleet.LogoImageData, logoImageData))
+    {
+        changes.Add("舰队队标");
+    }
+
+    return changes.ToArray();
+}
+
+static NetworkFleetEventLogSnapshot[] AddSquadChangeLogs(
+    NetworkFleetEventLogSnapshot[]? logs,
+    NetworkSquadSnapshot[]? existingSquads,
+    NetworkSquadSnapshot[]? incomingSquads)
+{
+    var eventLog = logs ?? [];
+    var existingRows = NormalizeSquadRows(existingSquads)
+        .ToDictionary(squad => squad.Name, StringComparer.OrdinalIgnoreCase);
+    var incomingRows = NormalizeSquadRows(incomingSquads)
+        .ToDictionary(squad => squad.Name, StringComparer.OrdinalIgnoreCase);
+
+    foreach (var squad in incomingRows.Values.OrderBy(squad => squad.Name))
+    {
+        if (!existingRows.TryGetValue(squad.Name, out var existing))
+        {
+            eventLog = AddFleetLog(eventLog, "小队", "创建小队", FormatSquadLogDetail(squad));
+            continue;
+        }
+
+        if (!SquadCoreEquals(existing, squad))
+        {
+            eventLog = AddFleetLog(eventLog, "小队", "更新小队", FormatSquadLogDetail(squad));
+        }
+    }
+
+    foreach (var squad in existingRows.Values.OrderBy(squad => squad.Name))
+    {
+        if (!incomingRows.ContainsKey(squad.Name))
+        {
+            eventLog = AddFleetLog(eventLog, "小队", "解散小队", FormatSquadLogDetail(squad));
+        }
+    }
+
+    return eventLog;
+}
+
+static bool SquadCoreEquals(NetworkSquadSnapshot left, NetworkSquadSnapshot right)
+{
+    return TextEquals(left.Name, right.Name) &&
+           TextEquals(left.Commander, right.Commander) &&
+           TextEquals(left.Type, right.Type) &&
+           TextEquals(left.Description, right.Description) &&
+           TextEquals(left.Mission, right.Mission) &&
+           TextEquals(left.RallyPoint, right.RallyPoint) &&
+           TextEquals(left.EmblemImageData, right.EmblemImageData);
+}
+
+static string FormatSquadLogDetail(NetworkSquadSnapshot squad)
+{
+    return $"{Normalize(squad.Name, "未命名小队")} / 指挥官：{Normalize(squad.Commander, "Unassigned")}";
 }
 
 static NetworkActionPlanSnapshot[] NormalizeActionPlans(NetworkActionPlanSnapshot[]? plans)
