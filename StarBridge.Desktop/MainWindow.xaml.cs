@@ -7256,7 +7256,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.12";
+            : "0.3.13";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

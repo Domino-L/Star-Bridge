@@ -53,7 +53,7 @@ var playerOnlineTimeout = TimeSpan.FromSeconds(120);
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.12",
+    version = "0.3.13",
     mode = GetRelayMode(serverKey, allowOpenTest),
     accounts = users.Count,
     players = players.Count,
@@ -73,7 +73,7 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
-    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.12",
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.13",
     Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_PACKAGE_URL"),
     DecodeEnvironmentBase64("STARBRIDGE_RELEASE_NOTES_B64") ??

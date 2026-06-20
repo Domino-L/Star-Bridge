@@ -60,7 +60,7 @@
                             VerticalAlignment="Center"
                             Margin="18,0,0,0">
                     <TextBlock x:Name="WindowTitleText"
-                               Text="星海舰桥 V0.3.12"
+                               Text="星海舰桥 V0.3.13"
                                VerticalAlignment="Center"
                                FontSize="14"
                                FontWeight="SemiBold"
