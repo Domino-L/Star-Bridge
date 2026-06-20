@@ -3190,33 +3190,30 @@ public partial class MainWindow : Window, IAppUpdateUi
 
         MergeFleetShips(snapshot.Ships);
 
-        var remotePlans = snapshot.ActionPlans ?? [];
-        if (remotePlans.Length > 0 || _fleetActionPlans.Count == 0 || !isCommander)
+        _fleetActionPlans.Clear();
+        foreach (var actionPlan in snapshot.ActionPlans ?? [])
         {
-            _fleetActionPlans.Clear();
-            foreach (var actionPlan in remotePlans)
+            var row = new FleetActionPlanRow(
+                actionPlan.Id,
+                actionPlan.Title,
+                actionPlan.Content,
+                actionPlan.StartTime,
+                actionPlan.NotifyMembers);
+
+            foreach (var participant in actionPlan.Participants ?? [])
             {
-                var row = new FleetActionPlanRow(
-                    actionPlan.Id,
-                    actionPlan.Title,
-                    actionPlan.Content,
-                    actionPlan.StartTime,
-                    actionPlan.NotifyMembers);
-
-                foreach (var participant in actionPlan.Participants ?? [])
-                {
-                    row.Participants.Add(new ActionPlanParticipantRow(
-                        participant.Callsign,
-                        participant.GameName,
-                        participant.AvatarImageData ?? participant.AvatarPath,
-                        participant.Initials));
-                }
-
-                row.RefreshParticipantSummary();
-                _fleetActionPlans.Add(row);
+                row.Participants.Add(new ActionPlanParticipantRow(
+                    participant.Callsign,
+                    participant.GameName,
+                    participant.AvatarImageData ?? participant.AvatarPath,
+                    participant.Initials));
             }
+
+            row.RefreshParticipantSummary();
+            _fleetActionPlans.Add(row);
         }
 
+        RebuildJoinedActionPlanIdsFromParticipants();
         SaveCurrentConfig();
         RefreshOverlayWindow();
         RenderState();
@@ -3226,6 +3223,32 @@ public partial class MainWindow : Window, IAppUpdateUi
         RefreshFleetApplications();
         RefreshSquadActionButtons();
         SelectFeaturedActionPlan();
+    }
+
+    private void RebuildJoinedActionPlanIdsFromParticipants()
+    {
+        var identities = EnumerateLocalIdentities()
+            .Where(identity => !string.IsNullOrWhiteSpace(identity))
+            .Select(identity => identity.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (identities.Count == 0)
+        {
+            return;
+        }
+
+        _joinedActionPlanIds.Clear();
+        foreach (var plan in _fleetActionPlans)
+        {
+            var joined = plan.Participants.Any(participant =>
+                IsLocalPlayerIdentity(participant.GameName, participant.Callsign) ||
+                (!string.IsNullOrWhiteSpace(participant.GameName) && identities.Contains(participant.GameName)) ||
+                (!string.IsNullOrWhiteSpace(participant.Callsign) && identities.Contains(participant.Callsign)));
+
+            if (joined)
+            {
+                _joinedActionPlanIds.Add(plan.Id);
+            }
+        }
     }
 
     private void MergeFleetMemberPermissions(NetworkFleetMemberPermissionSnapshot[]? permissions)

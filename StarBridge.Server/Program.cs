@@ -739,9 +739,19 @@ app.MapPost("/api/fleets/action-plans/join", async (HttpRequest request, FleetAc
             DateTime.MinValue,
             false,
             [join.Participant]);
+        var planTitle = ResolveActionPlanTitle(fleet.ActionPlans, join.PlanId.Trim());
+        var participantDisplay = FormatActionPlanParticipant(
+            join.Participant,
+            account,
+            FindPlayerForAccount(players, account));
         var updated = fleet with
         {
             ActionPlans = MergeActionPlanParticipants(fleet.ActionPlans, [incoming]),
+            EventLog = AddFleetLog(
+                fleet.EventLog,
+                "计划",
+                "预约行动",
+                $"{participantDisplay} 预约 {planTitle}"),
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -778,9 +788,19 @@ app.MapPost("/api/fleets/action-plans/leave", async (HttpRequest request, FleetA
         }
 
         var aliases = BuildAccountAliases(account);
+        var planTitle = ResolveActionPlanTitle(fleet.ActionPlans, leave.PlanId.Trim());
+        var participantDisplay = FormatActionPlanParticipant(
+            null,
+            account,
+            FindPlayerForAccount(players, account));
         var updated = fleet with
         {
             ActionPlans = RemoveActionPlanParticipants(fleet.ActionPlans, leave.PlanId.Trim(), aliases),
+            EventLog = AddFleetLog(
+                fleet.EventLog,
+                "计划",
+                "取消预约",
+                $"{participantDisplay} 取消预约 {planTitle}"),
             LastUpdated = DateTimeOffset.UtcNow
         };
         fleets[fleetCode] = updated;
@@ -2505,6 +2525,27 @@ static string FormatApplicationIdentity(NetworkFleetApplicationSnapshot applicat
     return string.IsNullOrWhiteSpace(application.ApplicantCallsign)
         ? application.ApplicantGameName
         : $"{application.ApplicantCallsign} ({application.ApplicantGameName})";
+}
+
+static string ResolveActionPlanTitle(NetworkActionPlanSnapshot[]? actionPlans, string planId)
+{
+    var plan = (actionPlans ?? [])
+        .FirstOrDefault(item => item.Id.Equals(planId, StringComparison.OrdinalIgnoreCase));
+    return string.IsNullOrWhiteSpace(plan?.Title)
+        ? "行动计划"
+        : plan.Title.Trim();
+}
+
+static string FormatActionPlanParticipant(
+    NetworkActionPlanParticipantSnapshot? participant,
+    UserAccount account,
+    NetworkPlayerSnapshot? player)
+{
+    var gameName = Normalize(participant?.GameName, Normalize(player?.Name, Normalize(account.GameName, account.UserName)));
+    var callsign = Normalize(participant?.Callsign, Normalize(player?.Callsign, Normalize(account.Callsign, "")));
+    return string.IsNullOrWhiteSpace(callsign) || callsign.Equals(gameName, StringComparison.OrdinalIgnoreCase)
+        ? gameName
+        : $"{callsign} ({gameName})";
 }
 
 static NetworkFleetMemberSnapshot BuildFleetMemberFromAccount(UserAccount account, NetworkPlayerSnapshot? player)
