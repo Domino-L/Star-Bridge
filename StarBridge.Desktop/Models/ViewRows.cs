@@ -2,6 +2,8 @@
 using System.ComponentModel;
 using System.Windows;
 using MediaBrush = System.Windows.Media.Brush;
+using MediaColor = System.Windows.Media.Color;
+using MediaSolidBrush = System.Windows.Media.SolidColorBrush;
 
 namespace StarBridge.Desktop;
 
@@ -47,7 +49,125 @@ public sealed record FleetShipInventoryRow(
     string OwnerSquad,
     string? OwnerAvatarPath,
     string OwnerInitials,
-    string ImportedAtText);
+    string ImportedAtText,
+    string ShipSpec,
+    string ShipRole,
+    string ShipStatus,
+    string ShipPrice)
+{
+    public string ShipMetaLine => $"{ShipSpec} / {ShipStatus} / {ShipPrice}";
+    public string ShipRoleLine => string.IsNullOrWhiteSpace(ShipRole) ? "定位待补充" : $"定位 / {ShipRole}";
+    public string ShipRoleTag => string.IsNullOrWhiteSpace(ShipRole) ? "待补充" : ShipRole;
+    public string ShipPriceTag => string.IsNullOrWhiteSpace(ShipPrice) ? "未公布" : ShipPrice;
+    public decimal? ShipPriceValue => TryReadPrice(ShipPrice, out var price) ? price : null;
+    public MediaBrush ShipSpecBrush => ShipSpec switch
+    {
+        "旗舰级" => CapitalShipBrush,
+        "大型" => LargeShipBrush,
+        "中型" => MediumShipBrush,
+        "小型" => SmallShipBrush,
+        _ => NeutralShipBrush
+    };
+
+    public MediaBrush ShipStatusBrush => ShipStatus == "可飞" ? FlyableShipBrush : ConceptShipBrush;
+
+    public MediaBrush ShipPriceBrush
+    {
+        get
+        {
+            if (!TryReadPrice(ShipPrice, out var price))
+            {
+                return NeutralShipBrush;
+            }
+
+            return price switch
+            {
+                >= 700 => PremiumShipBrush,
+                >= 300 => ExpensiveShipBrush,
+                >= 120 => MidPriceShipBrush,
+                _ => EntryPriceShipBrush
+            };
+        }
+    }
+
+    public MediaBrush ShipRoleBrush
+    {
+        get
+        {
+            var role = ShipRole.ToLowerInvariant();
+            if (role.Contains("combat") || role.Contains("fighter") || role.Contains("gunship") || role.Contains("bomber") || role.Contains("attack") ||
+                role.Contains("战斗", StringComparison.Ordinal) || role.Contains("炮艇", StringComparison.Ordinal) ||
+                role.Contains("轰炸", StringComparison.Ordinal) || role.Contains("攻击", StringComparison.Ordinal) ||
+                role.Contains("拦截", StringComparison.Ordinal))
+            {
+                return CombatShipBrush;
+            }
+
+            if (role.Contains("cargo") || role.Contains("freight") || role.Contains("transport") || role.Contains("hauler") ||
+                role.Contains("货运", StringComparison.Ordinal) || role.Contains("运输", StringComparison.Ordinal) ||
+                role.Contains("客运", StringComparison.Ordinal) || role.Contains("快递", StringComparison.Ordinal))
+            {
+                return CargoShipBrush;
+            }
+
+            if (role.Contains("exploration") || role.Contains("scanning") || role.Contains("pathfinder") ||
+                role.Contains("探索", StringComparison.Ordinal) || role.Contains("扫描", StringComparison.Ordinal) ||
+                role.Contains("探路", StringComparison.Ordinal) || role.Contains("远征", StringComparison.Ordinal) ||
+                role.Contains("侦察", StringComparison.Ordinal))
+            {
+                return ExplorationShipBrush;
+            }
+
+            if (role.Contains("medical") || role.Contains("rescue") || role.Contains("repair") || role.Contains("refuel") ||
+                role.Contains("医疗", StringComparison.Ordinal) || role.Contains("救援", StringComparison.Ordinal) ||
+                role.Contains("维修", StringComparison.Ordinal) || role.Contains("加油", StringComparison.Ordinal) ||
+                role.Contains("支援", StringComparison.Ordinal))
+            {
+                return SupportShipBrush;
+            }
+
+            if (role.Contains("mining") || role.Contains("industrial") || role.Contains("salvage") ||
+                role.Contains("采矿", StringComparison.Ordinal) || role.Contains("工业", StringComparison.Ordinal) ||
+                role.Contains("打捞", StringComparison.Ordinal) || role.Contains("建造", StringComparison.Ordinal))
+            {
+                return IndustrialShipBrush;
+            }
+
+            return UtilityShipBrush;
+        }
+    }
+
+    private static bool TryReadPrice(string value, out decimal price)
+    {
+        var normalized = value.Replace("$", "", StringComparison.Ordinal).Replace(",", "", StringComparison.Ordinal).Trim();
+        return decimal.TryParse(normalized, out price);
+    }
+
+    private static MediaBrush Brush(byte red, byte green, byte blue)
+    {
+        var brush = new MediaSolidBrush(MediaColor.FromRgb(red, green, blue));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static readonly MediaBrush CapitalShipBrush = Brush(170, 110, 255);
+    private static readonly MediaBrush LargeShipBrush = Brush(77, 190, 255);
+    private static readonly MediaBrush MediumShipBrush = Brush(77, 255, 213);
+    private static readonly MediaBrush SmallShipBrush = Brush(141, 220, 105);
+    private static readonly MediaBrush FlyableShipBrush = Brush(103, 255, 164);
+    private static readonly MediaBrush ConceptShipBrush = Brush(255, 196, 87);
+    private static readonly MediaBrush PremiumShipBrush = Brush(255, 117, 163);
+    private static readonly MediaBrush ExpensiveShipBrush = Brush(255, 184, 83);
+    private static readonly MediaBrush MidPriceShipBrush = Brush(87, 206, 255);
+    private static readonly MediaBrush EntryPriceShipBrush = Brush(132, 227, 255);
+    private static readonly MediaBrush CombatShipBrush = Brush(255, 112, 112);
+    private static readonly MediaBrush CargoShipBrush = Brush(255, 180, 74);
+    private static readonly MediaBrush ExplorationShipBrush = Brush(96, 192, 255);
+    private static readonly MediaBrush SupportShipBrush = Brush(116, 255, 203);
+    private static readonly MediaBrush IndustrialShipBrush = Brush(219, 206, 91);
+    private static readonly MediaBrush UtilityShipBrush = Brush(188, 208, 232);
+    private static readonly MediaBrush NeutralShipBrush = Brush(156, 183, 208);
+}
 
 public sealed record FleetTaskHistoryRow(
     string Key,

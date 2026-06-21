@@ -1,0 +1,259 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111a"/>
+      <stop offset="0.45" stop-color="#061824"/>
+      <stop offset="1" stop-color="#03080d"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b2233" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#050d16" stop-opacity="0.96"/>
+    </linearGradient>
+    <linearGradient id="panelSoft" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#102b3e" stop-opacity="0.82"/>
+      <stop offset="1" stop-color="#06101a" stop-opacity="0.88"/>
+    </linearGradient>
+    <linearGradient id="button" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4ec9ff"/>
+      <stop offset="0.52" stop-color="#1f86c2"/>
+      <stop offset="1" stop-color="#0d3f63"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#13445c" stroke-width="1" opacity="0.28"/>
+    </pattern>
+    <pattern id="scanline" width="8" height="8" patternUnits="userSpaceOnUse">
+      <path d="M 0 7.5 L 8 7.5" stroke="#1aaee5" stroke-width="0.8" opacity="0.12"/>
+    </pattern>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .title { font: 700 24px "Microsoft YaHei UI", "Segoe UI", sans-serif; fill: #f4fbff; }
+      .logo { font: 800 54px "Segoe UI", "Microsoft YaHei UI", sans-serif; fill: #eaf5ff; letter-spacing: 1px; }
+      .logo2 { font: 800 54px "Segoe UI", "Microsoft YaHei UI", sans-serif; fill: #79b8ff; letter-spacing: 1px; }
+      .h1 { font: 800 36px "Microsoft YaHei UI", "Segoe UI", sans-serif; fill: #56c7ff; }
+      .h2 { font: 700 22px "Microsoft YaHei UI", "Segoe UI", sans-serif; fill: #eaf7ff; }
+      .h3 { font: 700 16px "Microsoft YaHei UI", "Segoe UI", sans-serif; fill: #9fdfff; letter-spacing: 1px; }
+      .body { font: 500 16px "Microsoft YaHei UI", "Segoe UI", sans-serif; fill: #c6d9e8; }
+      .small { font: 500 13px "Microsoft YaHei UI", "Segoe UI", sans-serif; fill: #8fb4c8; }
+      .tiny { font: 600 11px "Segoe UI", "Microsoft YaHei UI", sans-serif; fill: #6fa5bd; letter-spacing: 1px; }
+      .cyan { fill: #4fc8ff; }
+      .green { fill: #61f2b5; }
+      .warn { fill: #ffd66b; }
+      .muted { fill: #6e8da0; }
+      .line { stroke: #2fbdf6; stroke-width: 1.4; opacity: 0.95; }
+      .lineSoft { stroke: #1c7fa8; stroke-width: 1; opacity: 0.62; }
+      .panelRect { fill: url(#panel); stroke: #2fbdf6; stroke-width: 1.4; }
+      .panelSoft { fill: url(#panelSoft); stroke: #1c7fa8; stroke-width: 1.1; }
+      .buttonRect { fill: url(#button); stroke: #6ed6ff; stroke-width: 1.2; }
+      .ghostButton { fill: #061827; stroke: #2fbdf6; stroke-width: 1.1; }
+      .tabActive { fill: #102f46; stroke: #4fc8ff; stroke-width: 1.4; }
+      .tab { fill: #061827; stroke: #1c7fa8; stroke-width: 1.1; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#grid)"/>
+  <rect width="1920" height="1080" fill="url(#scanline)"/>
+
+  <path d="M0 1010 C420 960 760 1060 1160 1005 C1460 964 1730 1008 1920 966 L1920 1080 L0 1080 Z" fill="#03131d" opacity="0.72"/>
+  <path d="M0 78 L410 78 L440 110 L820 110 L850 78 L1920 78" stroke="#0e5e84" stroke-width="1" opacity="0.55"/>
+  <path d="M0 1040 L1920 1040" stroke="#0f6b91" stroke-width="1" opacity="0.5"/>
+
+  <rect x="0" y="0" width="1920" height="54" fill="#142332"/>
+  <text x="24" y="34" class="title">星海舰桥 V0.4 布局预览</text>
+  <rect x="1760" y="0" width="54" height="54" fill="#142332"/>
+  <rect x="1814" y="0" width="54" height="54" fill="#142332"/>
+  <rect x="1868" y="0" width="52" height="54" fill="#142332"/>
+  <path d="M1778 27 L1796 27" stroke="#d7edf8" stroke-width="2"/>
+  <rect x="1834" y="18" width="14" height="14" fill="none" stroke="#d7edf8" stroke-width="2"/>
+  <path d="M1886 18 L1900 32 M1900 18 L1886 32" stroke="#d7edf8" stroke-width="2"/>
+
+  <g transform="translate(24 74)">
+    <rect x="0" y="0" width="410" height="110" fill="#06111b" stroke="#1c7fa8" stroke-width="1"/>
+    <text x="20" y="65" class="logo">Star</text>
+    <path d="M154 66 C192 40 224 40 263 66" fill="none" stroke="#8fbfff" stroke-width="2"/>
+    <text x="246" y="65" class="logo2">Bridge</text>
+    <path d="M18 82 L390 82" stroke="#416a84" stroke-width="1" stroke-dasharray="4 6"/>
+  </g>
+
+  <g transform="translate(454 74)">
+    <rect class="tab" x="0" y="0" width="275" height="88"/>
+    <circle cx="70" cy="44" r="29" fill="#082032" stroke="#3bbdf4"/>
+    <path d="M52 44 H88 M70 26 V62 M58 32 A26 26 0 0 0 46 48 M82 32 A26 26 0 0 1 94 48" fill="none" stroke="#9ce7ff" stroke-width="2"/>
+    <text x="112" y="42" class="h2">寻找舰队</text>
+    <text x="112" y="66" class="small">Find Fleet</text>
+  </g>
+  <g transform="translate(744 74)">
+    <rect class="tabActive" x="0" y="0" width="275" height="88"/>
+    <rect x="42" y="16" width="58" height="58" rx="10" fill="#0a2233" stroke="#3bbdf4"/>
+    <path d="M51 58 L70 34 L90 58 M58 58 H84" fill="none" stroke="#b9d9ec" stroke-width="3"/>
+    <text x="116" y="42" class="h2">我的舰队</text>
+    <text x="116" y="66" class="small">Fleet Command</text>
+  </g>
+  <g transform="translate(1034 74)">
+    <rect class="tab" x="0" y="0" width="275" height="88"/>
+    <rect x="42" y="16" width="58" height="58" rx="10" fill="#0a2233" stroke="#3bbdf4"/>
+    <circle cx="58" cy="43" r="9" fill="none" stroke="#9ce7ff" stroke-width="2"/>
+    <circle cx="72" cy="34" r="10" fill="none" stroke="#9ce7ff" stroke-width="2"/>
+    <circle cx="84" cy="45" r="9" fill="none" stroke="#9ce7ff" stroke-width="2"/>
+    <text x="116" y="42" class="h2">我的小队</text>
+    <text x="116" y="66" class="small">Squad</text>
+  </g>
+  <g transform="translate(1324 74)">
+    <rect class="tab" x="0" y="0" width="275" height="88"/>
+    <rect x="42" y="16" width="58" height="58" rx="10" fill="#0a2233" stroke="#3bbdf4"/>
+    <rect x="54" y="28" width="34" height="34" fill="none" stroke="#9ce7ff" stroke-width="2"/>
+    <path d="M71 21 V35 M71 55 V69 M48 45 H62 M80 45 H94" stroke="#9ce7ff" stroke-width="2"/>
+    <text x="116" y="42" class="h2">Overlay</text>
+    <text x="116" y="66" class="small">HUD</text>
+  </g>
+  <g transform="translate(1614 74)">
+    <rect class="tab" x="0" y="0" width="282" height="88"/>
+    <rect x="48" y="16" width="58" height="58" rx="10" fill="#0a2233" stroke="#3bbdf4"/>
+    <path d="M77 30 a14 14 0 0 1 0 28 M77 30 a14 14 0 0 0 0 28 M58 66 C62 55 92 55 96 66" fill="none" stroke="#9ce7ff" stroke-width="2"/>
+    <text x="128" y="42" class="h2">个人</text>
+    <text x="128" y="66" class="small">Identity</text>
+  </g>
+
+  <g transform="translate(24 194)">
+    <rect x="0" y="0" width="1328" height="68" class="panelSoft"/>
+    <text x="20" y="31" class="tiny">GAME LOG</text>
+    <text x="20" y="52" class="body">C:\StarCitizen\LIVE\Game.log</text>
+    <rect x="1348" y="0" width="150" height="68" class="buttonRect"/>
+    <text x="1392" y="42" class="body" fill="#fff">快速扫描</text>
+    <rect x="1514" y="0" width="150" height="68" class="ghostButton"/>
+    <text x="1558" y="42" class="body" fill="#d8f6ff">手动选择</text>
+    <rect x="1680" y="0" width="104" height="68" class="ghostButton"/>
+    <text x="1708" y="42" class="body">Alt+O</text>
+    <rect x="1800" y="0" width="92" height="68" class="buttonRect"/>
+    <text x="1825" y="42" class="body" fill="#fff">Overlay</text>
+  </g>
+
+  <g transform="translate(24 284)">
+    <rect x="0" y="0" width="1872" height="96" class="panelRect"/>
+    <path d="M16 18 L16 78 M16 18 L78 18" class="line"/>
+    <text x="42" y="36" class="h3">身份初始化</text>
+    <text x="42" y="66" class="body">已识别玩家身份后，才开放加入舰队、创建小队、同步状态和 Overlay 联动。</text>
+
+    <g transform="translate(520 20)">
+      <circle cx="0" cy="28" r="12" fill="#61f2b5"/>
+      <text x="24" y="24" class="small">登录账号</text>
+      <text x="24" y="46" class="tiny">ruiyanglyu0217@gmail.com</text>
+      <path d="M142 28 H230" stroke="#2fbdf6" opacity="0.45"/>
+      <circle cx="256" cy="28" r="12" fill="#61f2b5"/>
+      <text x="280" y="24" class="small">读取 Game.log</text>
+      <text x="280" y="46" class="tiny">LIVE 路径已连接</text>
+      <path d="M424 28 H512" stroke="#2fbdf6" opacity="0.45"/>
+      <circle cx="540" cy="28" r="12" fill="#ffd66b"/>
+      <text x="564" y="24" class="small">玩家 ID</text>
+      <text x="564" y="46" class="tiny">204721330404</text>
+      <path d="M680 28 H768" stroke="#2fbdf6" opacity="0.45"/>
+      <circle cx="796" cy="28" r="12" fill="#61f2b5"/>
+      <text x="820" y="24" class="small">服务器同步</text>
+      <text x="820" y="46" class="tiny">api.scstarbridge.com</text>
+    </g>
+
+    <rect x="1688" y="24" width="150" height="48" class="buttonRect"/>
+    <text x="1736" y="55" class="body" fill="#fff">重新扫描</text>
+  </g>
+
+  <g transform="translate(24 404)">
+    <rect x="0" y="0" width="1872" height="620" class="panelRect"/>
+    <path d="M0 74 H1872" class="lineSoft"/>
+    <text x="34" y="54" class="h1">首页 · 作战准备</text>
+    <text x="334" y="52" class="body">把首次启动、身份初始化、舰队加入和 Overlay 配置放在同一个入口。</text>
+
+    <g transform="translate(34 104)">
+      <rect x="0" y="0" width="1180" height="222" class="panelSoft"/>
+      <text x="28" y="42" class="h2">首次启动引导</text>
+      <text x="28" y="72" class="body">未完成的步骤会固定显示在首页，完成后自动收起为状态摘要。</text>
+
+      <g transform="translate(28 106)">
+        <rect x="0" y="0" width="206" height="86" rx="4" fill="#06131f" stroke="#1c7fa8"/>
+        <text x="18" y="30" class="h3">1 登录或注册</text>
+        <text x="18" y="58" class="small">用于同步舰队数据</text>
+        <rect x="150" y="20" width="38" height="22" rx="11" fill="#61f2b5"/>
+        <text x="161" y="36" class="tiny" fill="#02130d">完成</text>
+      </g>
+      <g transform="translate(254 106)">
+        <rect x="0" y="0" width="206" height="86" rx="4" fill="#06131f" stroke="#1c7fa8"/>
+        <text x="18" y="30" class="h3">2 选择日志</text>
+        <text x="18" y="58" class="small">扫描 Game.log</text>
+        <rect x="150" y="20" width="38" height="22" rx="11" fill="#61f2b5"/>
+        <text x="161" y="36" class="tiny" fill="#02130d">完成</text>
+      </g>
+      <g transform="translate(480 106)">
+        <rect x="0" y="0" width="206" height="86" rx="4" fill="#06131f" stroke="#2fbdf6"/>
+        <text x="18" y="30" class="h3">3 初始化身份</text>
+        <text x="18" y="58" class="small">读取玩家 ID</text>
+        <rect x="150" y="20" width="38" height="22" rx="11" fill="#ffd66b"/>
+        <text x="161" y="36" class="tiny" fill="#2b2100">进行</text>
+      </g>
+      <g transform="translate(706 106)">
+        <rect x="0" y="0" width="206" height="86" rx="4" fill="#06131f" stroke="#1c7fa8"/>
+        <text x="18" y="30" class="h3">4 加入舰队</text>
+        <text x="18" y="58" class="small">寻找或创建舰队</text>
+        <rect x="150" y="20" width="38" height="22" rx="11" fill="#19344a"/>
+        <text x="161" y="36" class="tiny">待办</text>
+      </g>
+      <g transform="translate(932 106)">
+        <rect x="0" y="0" width="206" height="86" rx="4" fill="#06131f" stroke="#1c7fa8"/>
+        <text x="18" y="30" class="h3">5 Overlay</text>
+        <text x="18" y="58" class="small">配置战术界面</text>
+        <rect x="150" y="20" width="38" height="22" rx="11" fill="#19344a"/>
+        <text x="161" y="36" class="tiny">待办</text>
+      </g>
+    </g>
+
+    <g transform="translate(1244 104)">
+      <rect x="0" y="0" width="594" height="222" class="panelSoft"/>
+      <text x="28" y="42" class="h2">当前状态</text>
+      <line x1="28" y1="62" x2="566" y2="62" class="lineSoft"/>
+      <text x="28" y="100" class="tiny">玩家</text>
+      <text x="130" y="100" class="body">多米诺 / domino_CN</text>
+      <text x="28" y="134" class="tiny">在线</text>
+      <text x="130" y="134" class="green">Online</text>
+      <text x="28" y="168" class="tiny">地点</text>
+      <text x="130" y="168" class="body">可能在：New Babbage</text>
+      <text x="28" y="202" class="tiny">飞船</text>
+      <text x="130" y="202" class="body">MISC Starfarer Gemini · 可信度中</text>
+    </g>
+
+    <g transform="translate(34 356)">
+      <rect x="0" y="0" width="570" height="210" class="panelSoft"/>
+      <text x="28" y="42" class="h2">安装器更新</text>
+      <text x="28" y="74" class="body">当前版本已是最新。更新时会显示应用内进度，并在完成后自动重启。</text>
+      <rect x="356" y="134" width="170" height="44" class="buttonRect"/>
+      <text x="410" y="162" class="body" fill="#fff">检查更新</text>
+    </g>
+    <g transform="translate(634 356)">
+      <rect x="0" y="0" width="580" height="210" class="panelSoft"/>
+      <text x="28" y="42" class="h2">反馈</text>
+      <text x="28" y="74" class="body">反馈会发送给 StarBridge 开发邮箱，并带上版本号与基础环境信息。</text>
+      <rect x="28" y="106" width="520" height="38" fill="#06131f" stroke="#1c7fa8"/>
+      <text x="44" y="130" class="small">标题：Overlay 热键说明不够清楚</text>
+      <rect x="378" y="158" width="170" height="36" class="buttonRect"/>
+      <text x="432" y="181" class="small" fill="#fff">发送反馈</text>
+    </g>
+    <g transform="translate(1244 356)">
+      <rect x="0" y="0" width="594" height="210" class="panelSoft"/>
+      <text x="28" y="42" class="h2">下一步建议</text>
+      <text x="28" y="76" class="body">1. 把日志选择与身份初始化合并成独立流程。</text>
+      <text x="28" y="110" class="body">2. 首页只显示用户下一步该做什么。</text>
+      <text x="28" y="144" class="body">3. 舰队、小队、Overlay 分别进入专门工作区。</text>
+      <text x="28" y="178" class="body">4. 所有错误改为应用内提示，不使用系统警告框。</text>
+    </g>
+  </g>
+
+  <g opacity="0.9" filter="url(#glow)">
+    <path d="M36 1036 L148 1036" class="line"/>
+    <path d="M1772 1036 L1884 1036" class="line"/>
+    <path d="M36 1036 L36 1008" class="line"/>
+    <path d="M1884 1036 L1884 1008" class="line"/>
+  </g>
+</svg>

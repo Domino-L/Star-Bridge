@@ -55,6 +55,17 @@ public partial class MainWindow : Window, IAppUpdateUi
         @"<Join PU>.*?\bshard\[(?<shard>[^\]]+)\]",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    private enum FleetShipSortColumn
+    {
+        Spec,
+        Name,
+        Status,
+        Price,
+        Owner,
+        Squad,
+        Role
+    }
+
     private readonly RegexLogEventParser _parser = new();
     private readonly FleetState _fleetState = new();
     private readonly ObservableCollection<PlayerRow> _players = [];
@@ -64,6 +75,8 @@ public partial class MainWindow : Window, IAppUpdateUi
     private readonly List<NetworkFleetCard> _allNetworkFleets = [];
     private readonly ObservableCollection<OwnedShipRecord> _ownedShips = [];
     private readonly ObservableCollection<FleetShipInventoryRow> _fleetShipInventory = [];
+    private FleetShipSortColumn _fleetShipSortColumn = FleetShipSortColumn.Spec;
+    private bool _fleetShipSortDescending = true;
     private readonly ObservableCollection<FleetTaskHistoryRow> _fleetTaskHistory = [];
     private readonly ObservableCollection<FleetActionPlanRow> _fleetActionPlans = [];
     private readonly ObservableCollection<FleetEventLogRow> _fleetEventLogs = [];
@@ -184,6 +197,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         OwnedShipsList.ItemsSource = _ownedShips;
         FleetShipInventoryList.ItemsSource = _fleetShipInventory;
         FleetShipDatabaseList.ItemsSource = _fleetShipInventory;
+        UpdateFleetShipSortHeaderIndicators();
         FleetTaskHistoryList.ItemsSource = _fleetTaskHistory;
         FleetActionPlanList.ItemsSource = _fleetActionPlans;
         FleetEventLogList.ItemsSource = _fleetEventLogs;
@@ -195,8 +209,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         var config = DesktopAppConfig.Load();
         var hasSavedSession = !string.IsNullOrWhiteSpace(config.AuthToken);
         _logPath = config.LogPath;
-        _localPlayer = hasSavedSession ? config.PlayerName : null;
-        _localPlayerId = hasSavedSession ? config.PlayerId : null;
+        _localPlayer = config.PlayerName;
+        _localPlayerId = config.PlayerId;
         _accountName = hasSavedSession ? config.AccountName : null;
         _authToken = hasSavedSession ? config.AuthToken : null;
         _avatarPath = hasSavedSession ? config.AvatarPath : null;
@@ -494,6 +508,36 @@ public partial class MainWindow : Window, IAppUpdateUi
         return false;
     }
 
+    private IdentityInitializationStatus GetIdentityInitializationStatus()
+    {
+        return IdentityInitialization.GetStatus(_logPath, _localPlayer, _localPlayerId);
+    }
+
+    private bool EnsureIdentityInitialized(string action)
+    {
+        var status = GetIdentityInitializationStatus();
+        if (status.IsComplete)
+        {
+            return true;
+        }
+
+        LoginStatusText.Text = $"需要先完成身份初始化，才能{action}。";
+        NetworkStatusText.Text = "请先选择 Game.log，并进入游戏读取玩家 ID";
+        RefreshOnboardingSupportPanel();
+        RefreshHeaderStatusBar();
+        MainTabs.SelectedItem = SupportTab;
+        SetActiveNav(null);
+
+        var dialog = new GuideHintWindow(
+            "需要身份初始化",
+            $"{status.DetailText}\n\n完成后即可{action}。")
+        {
+            Owner = this
+        };
+        dialog.ShowDialog();
+        return false;
+    }
+
     private void ApplyAuthResponse(AuthResponse auth)
     {
         _accountName = auth.Email ?? auth.UserName;
@@ -630,6 +674,11 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        if (!EnsureIdentityInitialized("创建舰队"))
+        {
+            return;
+        }
+
         _isCreatingFleet = true;
         MainTabs.SelectedItem = FleetTab;
         SetActiveNav(MyFleetNavButton);
@@ -647,6 +696,11 @@ public partial class MainWindow : Window, IAppUpdateUi
     private async void CreateFleetSubmit_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("创建舰队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (!EnsureIdentityInitialized("创建舰队"))
         {
             return;
         }
@@ -856,6 +910,36 @@ public partial class MainWindow : Window, IAppUpdateUi
         StartWatching(dialog.FileName);
     }
 
+    private void QuickScanLog_Click(object sender, RoutedEventArgs e)
+    {
+        QuickScanLogAndStart();
+    }
+
+    private bool QuickScanLogAndStart()
+    {
+        var logPath = IdentityInitialization.FindDefaultGameLog();
+        if (string.IsNullOrWhiteSpace(logPath))
+        {
+            NetworkStatusText.Text = "快速扫描未找到 Game.log";
+            RefreshOnboardingSupportPanel();
+
+            var dialog = new GuideHintWindow(
+                "未找到 Game.log",
+                "没有在各磁盘的 StarCitizen\\LIVE\\Game.log 找到日志。请确认游戏安装位置，或点击“选择日志”手动选择。")
+            {
+                Owner = this
+            };
+            dialog.ShowDialog();
+            return false;
+        }
+
+        StartWatching(logPath);
+        NetworkStatusText.Text = $"已扫描到 Game.log：{logPath}";
+        RefreshOnboardingSupportPanel();
+        RefreshHeaderStatusBar();
+        return true;
+    }
+
     private void StartWatching(string logPath)
     {
         _watcher?.Dispose();
@@ -870,6 +954,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
 
         RenderState();
+        RefreshOnboardingSupportPanel();
+        RefreshHeaderStatusBar();
 
         _watcher = new GameLogWatcher(logPath, replayExistingLines: false, line =>
         {
@@ -918,6 +1004,8 @@ public partial class MainWindow : Window, IAppUpdateUi
             }
             SaveCurrentConfig();
             LoadOwnedShips();
+            RefreshOnboardingSupportPanel();
+            RefreshHeaderStatusBar();
         }
 
         _fleetState.Apply(fleetEvent);
@@ -1567,26 +1655,100 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private void RefreshOnboardingSupportPanel()
     {
+        var identityStatus = GetIdentityInitializationStatus();
+
+        if (HomeIdentityStatusText is not null)
+        {
+            HomeIdentityStatusText.Text = identityStatus.StatusText;
+            HomeIdentityStatusText.ToolTip = identityStatus.DetailText;
+        }
+
+        if (HomeLoginButton is not null)
+        {
+            HomeLoginButton.Visibility = IsLoggedIn ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        var local = string.IsNullOrWhiteSpace(_localPlayer)
+            ? null
+            : _players.FirstOrDefault(player => player.Name.Equals(_localPlayer, StringComparison.OrdinalIgnoreCase));
+
+        if (HomeAccountStatusText is not null)
+        {
+            HomeAccountStatusText.Text = IsLoggedIn
+                ? $"{(_callsign ?? _accountName ?? "星海舰桥账号")}"
+                : "未登录";
+        }
+
+        if (HomeConnectionStatusText is not null)
+        {
+            HomeConnectionStatusText.Text = GetHeaderConnectionStatus();
+        }
+
+        if (HomeFleetStatusText is not null)
+        {
+            HomeFleetStatusText.Text = _hasFleet
+                ? string.IsNullOrWhiteSpace(_fleetCode) ? _fleetName : $"{_fleetName} / {_fleetCode}"
+                : "未加入舰队";
+        }
+
+        if (HomeSquadStatusText is not null)
+        {
+            HomeSquadStatusText.Text = _joinedSquad is not null
+                ? _joinedSquad.Name
+                : _hasFleet
+                    ? "未加入小队"
+                    : "需要先加入舰队";
+        }
+
+        if (HomeOnlineStatusText is not null)
+        {
+            HomeOnlineStatusText.Text = _isGameProcessRunning ? "游戏运行中" : "游戏未运行";
+        }
+
+        if (HomeShipStatusText is not null)
+        {
+            HomeShipStatusText.Text = string.IsNullOrWhiteSpace(local?.RawShip) ? "Unknown" : local.RawShip;
+        }
+
+        if (HomeLocationStatusText is not null)
+        {
+            HomeLocationStatusText.Text = string.IsNullOrWhiteSpace(local?.RawLocation) ? "Unknown" : local.RawLocation;
+        }
+
+        if (HomeOverlayStatusText is not null)
+        {
+            HomeOverlayStatusText.Text = _overlayWindow?.IsVisible == true
+                ? "正在显示"
+                : _overlayLayout.Count > 0
+                    ? "已配置"
+                    : "未配置";
+        }
+
         if (GuideProgressPanel is null)
         {
             return;
         }
 
-        if (OnboardingState.IsCompleted())
+        var showGuideProgress = !OnboardingState.IsCompleted() || !identityStatus.IsComplete;
+        GuideProgressPanel.Visibility = showGuideProgress ? Visibility.Visible : Visibility.Collapsed;
+
+        if (HomeStatusPanel is not null)
         {
-            GuideProgressPanel.Visibility = Visibility.Collapsed;
+            Grid.SetColumn(HomeStatusPanel, showGuideProgress ? 1 : 0);
+            Grid.SetColumnSpan(HomeStatusPanel, showGuideProgress ? 1 : 2);
+            HomeStatusPanel.Margin = showGuideProgress ? new Thickness(9, 0, 0, 0) : new Thickness(0);
+        }
+
+        if (!showGuideProgress)
+        {
             return;
         }
 
-        GuideProgressPanel.Visibility = Visibility.Visible;
-
-        var hasLog = !string.IsNullOrWhiteSpace(_logPath) && File.Exists(_logPath);
         GuideAccountStatusText.Text = IsLoggedIn
             ? $"已登录：{(_callsign ?? _accountName ?? "星海舰桥账号")}"
             : "未登录";
-        GuideLogStatusText.Text = hasLog
-            ? $"已选择：{Path.GetFileName(_logPath)}"
-            : "未选择 Game.log";
+        GuideLogStatusText.Text = identityStatus.StatusText;
+        GuideLogStatusText.ToolTip = identityStatus.DetailText;
         GuideFleetStatusText.Text = _hasFleet
             ? $"已加入：{_fleetName}"
             : "尚未加入舰队";
@@ -1756,8 +1918,6 @@ public partial class MainWindow : Window, IAppUpdateUi
         _accountName = null;
         _callsign = null;
         _avatarPath = null;
-        _localPlayer = null;
-        _localPlayerId = null;
         _allowEmailNotifications = true;
         _ownedShips.Clear();
         _players.Clear();
@@ -2085,6 +2245,15 @@ public partial class MainWindow : Window, IAppUpdateUi
     private async void GuideSelectLogButton_Click(object sender, RoutedEventArgs e)
     {
         await HandleOnboardingActionAsync(OnboardingNextAction.SelectLog);
+    }
+
+    private async void GuideQuickScanLogButton_Click(object sender, RoutedEventArgs e)
+    {
+        QuickScanLogAndStart();
+        if (IsLoggedIn)
+        {
+            await AutoConnectNetworkAsync();
+        }
     }
 
     private async void GuideFindFleetButton_Click(object sender, RoutedEventArgs e)
@@ -4452,6 +4621,11 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        if (!EnsureIdentityInitialized("加入舰队"))
+        {
+            return;
+        }
+
         if ((sender as FrameworkElement)?.Tag is not NetworkFleetCard card)
         {
             return;
@@ -4864,8 +5038,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         var fleetStateJson = isLoggedIn ? SerializeFleetState() : null;
         DesktopAppConfig.Save(new DesktopAppConfig(
             _logPath,
-            isLoggedIn ? _localPlayer : null,
-            isLoggedIn ? _localPlayerId : null,
+            _localPlayer,
+            _localPlayerId,
             isLoggedIn ? _avatarPath : null,
             OverlayHotkeyBox.Text,
             overlayLayout,
@@ -5211,18 +5385,24 @@ public partial class MainWindow : Window, IAppUpdateUi
             rows[BuildFleetShipKey(ship.OwnerGameName, ship.Code)] = ship;
         }
 
-        var index = 1;
+        var shipRows = new List<FleetShipInventoryRow>();
         foreach (var ship in rows.Values
                      .OrderBy(ship => ship.ImportedAt)
                      .ThenBy(ship => ship.DisplayName, StringComparer.OrdinalIgnoreCase))
         {
+            var catalog = ShipCatalog.Find(ship.Code, ship.DisplayName);
+            var shipDisplayName = catalog?.DisplayName(_language) ?? ship.DisplayName;
+            var shipSpec = string.IsNullOrWhiteSpace(catalog?.Spec) ? "待分类" : catalog!.Spec;
+            var shipRole = catalog?.RoleDisplay(_language) ?? "";
+            var shipStatus = string.IsNullOrWhiteSpace(catalog?.Status) ? "概念" : catalog!.Status;
+            var shipPrice = catalog?.PriceDisplay ?? "未公布";
             var ownerDisplay = FormatCommanderName(
                 ship.OwnerCallsign,
                 ship.OwnerGameName,
                 ship.OwnerGameName);
-            _fleetShipInventory.Add(new FleetShipInventoryRow(
-                index++,
-                ship.DisplayName,
+            shipRows.Add(new FleetShipInventoryRow(
+                0,
+                shipDisplayName,
                 ship.Code,
                 ownerDisplay,
                 string.IsNullOrWhiteSpace(ship.OwnerCallsign) ? ship.OwnerGameName : ship.OwnerCallsign!,
@@ -5230,7 +5410,17 @@ public partial class MainWindow : Window, IAppUpdateUi
                 string.IsNullOrWhiteSpace(ship.OwnerSquad) ? "未加入小队" : ship.OwnerSquad!,
                 ship.OwnerAvatarImageData,
                 GetInitials(ship.OwnerCallsign ?? ship.OwnerGameName),
-                ship.ImportedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")));
+                ship.ImportedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"),
+                shipSpec,
+                shipRole,
+                shipStatus,
+                shipPrice));
+        }
+
+        var sortedRows = SortFleetShipRows(shipRows).ToArray();
+        for (var index = 0; index < sortedRows.Length; index++)
+        {
+            _fleetShipInventory.Add(sortedRows[index] with { Number = index + 1 });
         }
 
         if (FleetShipCountText is not null)
@@ -5243,10 +5433,16 @@ public partial class MainWindow : Window, IAppUpdateUi
             ? Visibility.Visible
             : Visibility.Collapsed;
         FleetShipDatabaseCountText.Text = _fleetShipInventory.Count.ToString();
-        FleetShipDatabaseCapitalText.Text = "待分类";
-        FleetShipDatabaseLargeText.Text = "待分类";
-        FleetShipDatabaseMediumText.Text = "待分类";
-        FleetShipDatabaseSmallText.Text = "待分类";
+        FleetShipDatabaseCapitalText.Text = CountFleetShipSpec("旗舰级").ToString();
+        FleetShipDatabaseLargeText.Text = CountFleetShipSpec("大型").ToString();
+        FleetShipDatabaseMediumText.Text = CountFleetShipSpec("中型").ToString();
+        FleetShipDatabaseSmallText.Text = CountFleetShipSpec("小型").ToString();
+        var pricedShips = _fleetShipInventory
+            .Where(ship => ship.ShipPriceValue.HasValue)
+            .ToArray();
+        FleetShipDatabaseTotalValueText.Text = pricedShips.Length == 0
+            ? "未公布"
+            : FormatFleetShipValue(pricedShips.Sum(ship => ship.ShipPriceValue!.Value));
         FleetShipDatabaseTopOwnerText.Text = _fleetShipInventory.Count == 0
             ? "-"
             : _fleetShipInventory
@@ -5254,10 +5450,168 @@ public partial class MainWindow : Window, IAppUpdateUi
                 .OrderByDescending(group => group.Count())
                 .Select(group => group.First().OwnerDisplay)
                 .FirstOrDefault() ?? "-";
-        FleetShipDatabaseAceText.Text = "待评定";
+        FleetShipDatabaseAceText.Text = pricedShips
+            .OrderByDescending(ship => ship.ShipPriceValue!.Value)
+            .Select(ship => ship.ShipName)
+            .FirstOrDefault() ?? "待评定";
         FleetShipDatabaseEmptyText.Visibility = _fleetShipInventory.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+    }
+
+    private IEnumerable<FleetShipInventoryRow> SortFleetShipRows(IEnumerable<FleetShipInventoryRow> rows)
+    {
+        var sorted = _fleetShipSortColumn switch
+        {
+            FleetShipSortColumn.Name => OrderFleetShipRowsByText(rows, ship => ship.ShipName, _fleetShipSortDescending),
+            FleetShipSortColumn.Status => rows.OrderBy(ship => GetFleetShipStatusSortRank(ship.ShipStatus, conceptFirst: _fleetShipSortDescending)),
+            FleetShipSortColumn.Price => _fleetShipSortDescending
+                ? rows.OrderByDescending(ship => ship.ShipPriceValue ?? -1m)
+                : rows.OrderBy(ship => ship.ShipPriceValue ?? decimal.MaxValue),
+            FleetShipSortColumn.Role => OrderFleetShipRowsByText(rows, ship => ship.ShipRole, _fleetShipSortDescending),
+            FleetShipSortColumn.Owner => OrderFleetShipRowsByText(rows, ship => ship.OwnerDisplay, _fleetShipSortDescending),
+            FleetShipSortColumn.Squad => OrderFleetShipRowsByText(rows, ship => ship.OwnerSquad, _fleetShipSortDescending),
+            _ => rows.OrderBy(ship => GetFleetShipSpecSortRank(ship.ShipSpec, largeFirst: _fleetShipSortDescending))
+        };
+
+        return sorted.ThenBy(ship => ship.ShipName, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(ship => ship.ShipCode, StringComparer.CurrentCultureIgnoreCase);
+    }
+
+    private static IOrderedEnumerable<FleetShipInventoryRow> OrderFleetShipRowsByText(
+        IEnumerable<FleetShipInventoryRow> rows,
+        Func<FleetShipInventoryRow, string> selector,
+        bool descending)
+    {
+        return descending
+            ? rows.OrderBy(ship => string.IsNullOrWhiteSpace(selector(ship)))
+                .ThenByDescending(selector, StringComparer.CurrentCultureIgnoreCase)
+            : rows.OrderBy(ship => string.IsNullOrWhiteSpace(selector(ship)))
+                .ThenBy(selector, StringComparer.CurrentCultureIgnoreCase);
+    }
+
+    private static int GetFleetShipSpecSortRank(string spec, bool largeFirst)
+    {
+        var rank = spec.Trim() switch
+        {
+            "旗舰级" => 0,
+            "大型" => 1,
+            "中型" => 2,
+            "小型" => 3,
+            _ => 4
+        };
+
+        if (largeFirst)
+        {
+            return rank;
+        }
+
+        return rank switch
+        {
+            3 => 0,
+            2 => 1,
+            1 => 2,
+            0 => 3,
+            _ => 4
+        };
+    }
+
+    private static int GetFleetShipStatusSortRank(string status, bool conceptFirst)
+    {
+        var normalized = status.Trim();
+        var isConcept = normalized.Equals("概念", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("Concept", StringComparison.OrdinalIgnoreCase);
+        var isFlyable = normalized.Equals("可飞", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("Flyable", StringComparison.OrdinalIgnoreCase);
+
+        if (isConcept)
+        {
+            return conceptFirst ? 0 : 1;
+        }
+
+        if (isFlyable)
+        {
+            return conceptFirst ? 1 : 0;
+        }
+
+        return 2;
+    }
+
+    private void FleetShipDatabaseSortHeader_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string tag } ||
+            !TryParseFleetShipSortColumn(tag, out var column))
+        {
+            return;
+        }
+
+        if (_fleetShipSortColumn == column)
+        {
+            _fleetShipSortDescending = !_fleetShipSortDescending;
+        }
+        else
+        {
+            _fleetShipSortColumn = column;
+            _fleetShipSortDescending = GetDefaultDescendingForFleetShipSortColumn(column);
+        }
+
+        UpdateFleetShipSortHeaderIndicators();
+        if (FleetShipInventoryCountText is not null)
+        {
+            RefreshFleetShipInventory();
+        }
+    }
+
+    private static bool TryParseFleetShipSortColumn(string tag, out FleetShipSortColumn column)
+    {
+        column = tag switch
+        {
+            "name" => FleetShipSortColumn.Name,
+            "spec" => FleetShipSortColumn.Spec,
+            "status" => FleetShipSortColumn.Status,
+            "price" => FleetShipSortColumn.Price,
+            "role" => FleetShipSortColumn.Role,
+            "owner" => FleetShipSortColumn.Owner,
+            "squad" => FleetShipSortColumn.Squad,
+            _ => FleetShipSortColumn.Spec
+        };
+
+        return tag is "name" or "spec" or "status" or "price" or "role" or "owner" or "squad";
+    }
+
+    private static bool GetDefaultDescendingForFleetShipSortColumn(FleetShipSortColumn column)
+    {
+        return column is FleetShipSortColumn.Spec or FleetShipSortColumn.Status or FleetShipSortColumn.Price;
+    }
+
+    private void UpdateFleetShipSortHeaderIndicators()
+    {
+        SetFleetShipSortArrow(FleetShipSortNameArrow, FleetShipSortColumn.Name);
+        SetFleetShipSortArrow(FleetShipSortSpecArrow, FleetShipSortColumn.Spec);
+        SetFleetShipSortArrow(FleetShipSortStatusArrow, FleetShipSortColumn.Status);
+        SetFleetShipSortArrow(FleetShipSortPriceArrow, FleetShipSortColumn.Price);
+        SetFleetShipSortArrow(FleetShipSortRoleArrow, FleetShipSortColumn.Role);
+        SetFleetShipSortArrow(FleetShipSortOwnerArrow, FleetShipSortColumn.Owner);
+        SetFleetShipSortArrow(FleetShipSortSquadArrow, FleetShipSortColumn.Squad);
+    }
+
+    private void SetFleetShipSortArrow(TextBlock arrowText, FleetShipSortColumn column)
+    {
+        arrowText.Text = _fleetShipSortColumn == column
+            ? _fleetShipSortDescending ? "↓" : "↑"
+            : string.Empty;
+    }
+
+    private int CountFleetShipSpec(string spec)
+    {
+        return _fleetShipInventory.Count(ship => ship.ShipSpec.Equals(spec, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string FormatFleetShipValue(decimal value)
+    {
+        return value <= 0
+            ? "未公布"
+            : string.Format(CultureInfo.InvariantCulture, "${0:N0}", value);
     }
 
     private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -6302,6 +6656,11 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        if (!EnsureIdentityInitialized("创建小队"))
+        {
+            return;
+        }
+
         if (!_hasFleet)
         {
             JoinSquadHintText.Text = "请先加入舰队";
@@ -6333,6 +6692,11 @@ public partial class MainWindow : Window, IAppUpdateUi
     private async void CreateSquadConfirm_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("创建小队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (!EnsureIdentityInitialized("创建小队"))
         {
             return;
         }
@@ -6444,6 +6808,11 @@ public partial class MainWindow : Window, IAppUpdateUi
     private async void JoinSquad_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("加入小队需要先登录星海舰桥账号。"))
+        {
+            return;
+        }
+
+        if (!EnsureIdentityInitialized("加入小队"))
         {
             return;
         }
@@ -7256,7 +7625,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.13";
+            : "0.3.14";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

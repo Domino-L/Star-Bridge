@@ -4,7 +4,7 @@
 
 制作本应用的目标为补齐游戏内暂时缺少的舰队管理能力：舰队、成员、小队、任务、集结点、Overlay 状态显示，以及基于 `Game.log` 的本地状态辅助识别。
 
-当前测试版本：`0.3.13`
+当前测试版本：`0.3.14`
 
 ## 现阶段定位
 
@@ -38,7 +38,7 @@
 当前用户安装包：
 
 ```text
-dist/StarBridge-0.3.13-win-x64-setup.exe
+dist/StarBridge-0.3.14-win-x64-setup.exe
 ```
 
 这是完整 Windows 安装包，不要求用户额外安装 .NET Desktop Runtime。
@@ -104,7 +104,7 @@ scripts/Build Star Bridge Inno Installer.cmd
 生成结果：
 
 ```text
-dist/StarBridge-0.3.13-win-x64-setup.exe
+dist/StarBridge-0.3.14-win-x64-setup.exe
 ```
 
 构建完整安装包需要：
