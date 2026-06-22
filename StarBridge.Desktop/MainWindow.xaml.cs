@@ -759,6 +759,13 @@ public partial class MainWindow : Window, IAppUpdateUi
             ? Visibility.Visible
             : Visibility.Collapsed;
 
+        if (FleetSubTabs is not null)
+        {
+            FleetSubTabs.Visibility = _hasFleet
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+
         if (SquadRequiresFleetPanel is not null)
         {
             SquadRequiresFleetPanel.Visibility = _hasFleet
