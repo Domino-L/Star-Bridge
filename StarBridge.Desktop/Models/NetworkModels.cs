@@ -241,7 +241,9 @@ public sealed record FleetApplicationDecisionRequest(
     bool Approve);
 
 public sealed record FleetLeaveRequest(
-    string FleetCode);
+    string FleetCode,
+    string? TransferCommanderTo = null,
+    bool ConfirmDisbandIfOwnerAlone = false);
 
 public sealed record FleetMemberPermissionUpdateRequest(
     string FleetCode,

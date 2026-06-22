@@ -2873,7 +2873,14 @@ public partial class MainWindow : Window, IAppUpdateUi
                 _networkSnapshots.Remove(name);
             }
 
-            var retainedPlayerNames = snapshotNames.ToList();
+            var retainedPlayerNames = _hasFleet
+                ? snapshotNames.ToList()
+                : new List<string>();
+            if (!_hasFleet)
+            {
+                _networkSnapshots.Clear();
+            }
+
             if (!string.IsNullOrWhiteSpace(_localPlayer))
             {
                 retainedPlayerNames.Add(_localPlayer);
@@ -3644,6 +3651,12 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        if (!_hasFleet)
+        {
+            _networkSnapshots.Remove(snapshot.Name);
+            return;
+        }
+
         _networkSnapshots.TryGetValue(snapshot.Name, out var previousSnapshot);
         var wasInFleet = previousSnapshot is not null && IsSameFleet(previousSnapshot.Fleet);
         var isInFleet = IsSameFleet(snapshot.Fleet);
@@ -3725,6 +3738,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
 
         var changed = false;
+        var joinedDifferentFleetFromSnapshot = false;
         if (string.IsNullOrWhiteSpace(_callsign) && !string.IsNullOrWhiteSpace(snapshot.Callsign))
         {
             _callsign = snapshot.Callsign!;
@@ -3732,33 +3746,70 @@ public partial class MainWindow : Window, IAppUpdateUi
             changed = true;
         }
 
-        if (!string.IsNullOrWhiteSpace(snapshot.Fleet) &&
-            !snapshot.Fleet.Equals("No Fleet", StringComparison.OrdinalIgnoreCase) &&
-            !IsSameFleet(snapshot.Fleet))
+        var snapshotFleet = snapshot.Fleet?.Trim();
+        var snapshotHasFleet = !string.IsNullOrWhiteSpace(snapshotFleet) &&
+                               !snapshotFleet.Equals("No Fleet", StringComparison.OrdinalIgnoreCase);
+        if (!snapshotHasFleet)
         {
+            if (_hasFleet)
+            {
+                ClearFleetState();
+                changed = true;
+            }
+        }
+        else if (_hasFleet && !IsSameFleet(snapshotFleet))
+        {
+            var resolvedSnapshotFleet = snapshotFleet!;
             var fleetCard = _allNetworkFleets.FirstOrDefault(card =>
-                snapshot.Fleet.Equals(card.Snapshot.Name, StringComparison.OrdinalIgnoreCase) ||
-                snapshot.Fleet.Equals(card.Snapshot.Code, StringComparison.OrdinalIgnoreCase));
+                resolvedSnapshotFleet.Equals(card.Snapshot.Name, StringComparison.OrdinalIgnoreCase) ||
+                resolvedSnapshotFleet.Equals(card.Snapshot.Code, StringComparison.OrdinalIgnoreCase));
             if (fleetCard is not null)
             {
                 JoinNetworkFleet(fleetCard.Snapshot);
                 changed = true;
+                joinedDifferentFleetFromSnapshot = true;
             }
         }
 
-        if (_hasFleet &&
-            !string.IsNullOrWhiteSpace(snapshot.Squad) &&
-            !snapshot.Squad.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+        if (_hasFleet)
         {
-            var squad = _squads.FirstOrDefault(item =>
-                item.Name.Equals(snapshot.Squad, StringComparison.OrdinalIgnoreCase));
-            if (squad is not null && !ReferenceEquals(_joinedSquad, squad))
+            var snapshotSquad = joinedDifferentFleetFromSnapshot ? "Unassigned" : snapshot.Squad?.Trim();
+            if (string.IsNullOrWhiteSpace(snapshotSquad) ||
+                snapshotSquad.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
             {
-                _joinedSquad = squad;
-                _selectedSquad ??= squad;
-                SquadSelectionList.SelectedItem = _selectedSquad;
-                changed = true;
+                if (_joinedSquad is not null)
+                {
+                    var previousJoinedSquad = _joinedSquad;
+                    _joinedSquad = null;
+                    if (_selectedSquad is not null &&
+                        _selectedSquad.Name.Equals(previousJoinedSquad.Name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _selectedSquad = null;
+                    }
+
+                    SquadSelectionList.SelectedItem = _selectedSquad;
+                    changed = true;
+                }
             }
+            else
+            {
+                var squad = _squads.FirstOrDefault(item =>
+                    item.Name.Equals(snapshotSquad, StringComparison.OrdinalIgnoreCase));
+                if (squad is not null && !ReferenceEquals(_joinedSquad, squad))
+                {
+                    _joinedSquad = squad;
+                    _selectedSquad = squad;
+                    SquadSelectionList.SelectedItem = _selectedSquad;
+                    changed = true;
+                }
+            }
+        }
+
+        if (_hasFleet && _joinedSquad is not null && _selectedSquad is null)
+        {
+            _selectedSquad = _joinedSquad;
+            SquadSelectionList.SelectedItem = _selectedSquad;
+            changed = true;
         }
 
         if (!changed)
@@ -3819,7 +3870,7 @@ public partial class MainWindow : Window, IAppUpdateUi
 
                 if (_selectedSquad is not null && removedSquadNames.Contains(_selectedSquad.Name))
                 {
-                    _selectedSquad = _joinedSquad ?? _squads.FirstOrDefault();
+                    _selectedSquad = _joinedSquad;
                     SquadSelectionList.SelectedItem = _selectedSquad;
                 }
             }
@@ -4637,6 +4688,12 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        if (_hasFleet && IsCurrentUserFleetCommander())
+        {
+            NetworkStatusText.Text = "舰队指挥官需要先转移指挥权或解散当前舰队，才能加入其他舰队。";
+            return;
+        }
+
         if (card.RequiresApplication)
         {
             var applyResult = System.Windows.MessageBox.Show(
@@ -4732,6 +4789,7 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private void JoinNetworkFleet(NetworkFleetSnapshot snapshot)
     {
+        ClearFleetScopedCollectionsForJoin();
         _hasFleet = true;
         _isCreatingFleet = false;
         _fleetName = snapshot.Name;
@@ -4745,7 +4803,6 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetLogoPath = SaveNetworkFleetLogo(snapshot);
         LocalFleetText.Text = $"{_fleetName} [{_fleetCode}]";
 
-        _squads.Clear();
         foreach (var squad in snapshot.Squads ?? [])
         {
             if (string.IsNullOrWhiteSpace(squad.Name))
@@ -4767,8 +4824,8 @@ public partial class MainWindow : Window, IAppUpdateUi
             });
         }
 
-        _selectedSquad = _squads.FirstOrDefault();
         _joinedSquad = null;
+        _selectedSquad = null;
         SquadSelectionList.SelectedItem = _selectedSquad;
         MergeNetworkFleetState(snapshot);
         UpdateFleetEntryPanels();
@@ -4798,18 +4855,49 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        string? transferCommanderTo = null;
+        var confirmDisbandIfOwnerAlone = false;
         if (IsCurrentUserFleetCommander())
         {
-            NetworkStatusText.Text = "舰队指挥官需要先转移指挥权或解散舰队。";
-            return;
-        }
+            var candidates = GetFleetCommanderTransferCandidates();
+            if (candidates.Count == 0)
+            {
+                if (System.Windows.MessageBox.Show(
+                        this,
+                        $"离开后舰队 {_fleetName} 将解散。确认解散并离开？",
+                        "解散舰队",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                {
+                    return;
+                }
 
-        if (System.Windows.MessageBox.Show(
-                this,
-                $"确认离开舰队 {_fleetName}？",
-                "离开舰队",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                confirmDisbandIfOwnerAlone = true;
+            }
+            else
+            {
+                var recommended = PickRecommendedSquadSuccessor(candidates);
+                if (recommended is null)
+                {
+                    NetworkStatusText.Text = "没有可移交的舰队成员。";
+                    return;
+                }
+
+                var selection = PromptFleetSuccessor(candidates, recommended);
+                if (selection is null)
+                {
+                    return;
+                }
+
+                transferCommanderTo = selection.Player.Name;
+            }
+        }
+        else if (System.Windows.MessageBox.Show(
+                     this,
+                     $"确认离开舰队 {_fleetName}？",
+                     "离开舰队",
+                     MessageBoxButton.YesNo,
+                     MessageBoxImage.Warning) != MessageBoxResult.Yes)
         {
             return;
         }
@@ -4818,7 +4906,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         {
             var response = await PostNetworkJsonAsync(
                 "api/fleets/leave",
-                new FleetLeaveRequest(_fleetCode));
+                new FleetLeaveRequest(_fleetCode, transferCommanderTo, confirmDisbandIfOwnerAlone));
             if (!response.IsSuccessStatusCode)
             {
                 NetworkStatusText.Text = $"离开舰队失败：{await ReadResponseErrorAsync(response)}";
@@ -4827,6 +4915,7 @@ public partial class MainWindow : Window, IAppUpdateUi
 
             ClearFleetState();
             SaveCurrentConfig();
+            await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
             await PullNetworkFleetsAsync(silent: true);
             await PullNetworkSnapshotsAsync(silent: true);
             NetworkStatusText.Text = "已离开舰队。";
@@ -4877,20 +4966,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
     }
 
-    private void ClearFleetState()
+    private void ClearFleetScopedCollectionsForJoin()
     {
-        _hasFleet = false;
-        _isCreatingFleet = false;
-        _fleetName = "No Fleet";
-        _fleetCode = "N/A";
-        _fleetChiefCommander = "Unassigned";
-        _fleetDeputyCommander = "Unassigned";
-        _fleetDescription = "No fleet description.";
-        _fleetType = "Combat";
-        _fleetJoinPolicy = "Open";
-        _fleetActiveTime = "20:00 - 23:59 UTC+8";
-        _fleetLogoPath = null;
-        _createFleetLogoPath = null;
         _fleetNoticeTitle = "";
         _fleetNoticeContent = "";
         _fleetCurrentTaskTitle = "";
@@ -4921,8 +4998,34 @@ public partial class MainWindow : Window, IAppUpdateUi
         _mySquadMembers.Clear();
         _remoteFleetShips.Clear();
         _fleetShipInventory.Clear();
+        _networkSnapshots.Clear();
+        var retainedPlayerNames = string.IsNullOrWhiteSpace(_localPlayer)
+            ? Array.Empty<string?>()
+            : new string?[] { _localPlayer };
+        _fleetState.RemovePlayersExcept(retainedPlayerNames);
         _joinedSquad = null;
         _selectedSquad = null;
+        if (SquadSelectionList is not null)
+        {
+            SquadSelectionList.SelectedItem = null;
+        }
+    }
+
+    private void ClearFleetState()
+    {
+        _hasFleet = false;
+        _isCreatingFleet = false;
+        _fleetName = "No Fleet";
+        _fleetCode = "N/A";
+        _fleetChiefCommander = "Unassigned";
+        _fleetDeputyCommander = "Unassigned";
+        _fleetDescription = "No fleet description.";
+        _fleetType = "Combat";
+        _fleetJoinPolicy = "Open";
+        _fleetActiveTime = "20:00 - 23:59 UTC+8";
+        _fleetLogoPath = null;
+        _createFleetLogoPath = null;
+        ClearFleetScopedCollectionsForJoin();
         LocalFleetText.Text = "未加入舰队";
         LeaveFleetButton.Visibility = Visibility.Collapsed;
         RefreshFleetHeader();
@@ -4931,6 +5034,9 @@ public partial class MainWindow : Window, IAppUpdateUi
         RenderMySquad();
         RefreshFleetApplications();
         RefreshSquadActionButtons();
+        RefreshFleetInfoPanel();
+        RefreshFleetMemberManagement();
+        RenderState();
         RefreshOverlayWindow();
     }
 
@@ -5192,7 +5298,7 @@ public partial class MainWindow : Window, IAppUpdateUi
 
             _joinedSquad = _squads.FirstOrDefault(squad =>
                 squad.Name.Equals(cache.JoinedSquadName, StringComparison.OrdinalIgnoreCase));
-            _selectedSquad = _joinedSquad ?? _squads.FirstOrDefault();
+            _selectedSquad = _joinedSquad;
             if (SquadSelectionList is not null)
             {
                 SquadSelectionList.SelectedItem = _selectedSquad;
@@ -6997,6 +7103,119 @@ public partial class MainWindow : Window, IAppUpdateUi
         return dialog.ShowDialog() == true ? result : null;
     }
 
+    private List<PlayerRow> GetFleetCommanderTransferCandidates()
+    {
+        return _players
+            .Where(player => !IsLocalPlayerIdentity(player.Name, player.Callsign))
+            .GroupBy(
+                player => $"{NormalizeOptionalField(player.Name)}|{NormalizeOptionalField(player.Callsign)}",
+                StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderByDescending(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(player => player.Callsign ?? player.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private SquadSuccessorOption? PromptFleetSuccessor(
+        IReadOnlyList<PlayerRow> candidates,
+        PlayerRow recommended)
+    {
+        var options = candidates
+            .OrderByDescending(member => member.Name.Equals(recommended.Name, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(member => member.Status.Equals("Online", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(member => member.Callsign ?? member.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(member => new SquadSuccessorOption(member))
+            .ToList();
+        var selected = options.FirstOrDefault(option =>
+                           option.Player.Name.Equals(recommended.Name, StringComparison.OrdinalIgnoreCase)) ??
+                       options.FirstOrDefault();
+        if (selected is null)
+        {
+            return null;
+        }
+
+        var dialog = new Window
+        {
+            Owner = this,
+            Title = "移交舰队指挥权",
+            Width = 500,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Background = FindBrush("PanelBackgroundBrush", new SolidColorBrush(Color.FromRgb(3, 12, 20))),
+            Foreground = Brushes.White
+        };
+
+        var comboBox = new System.Windows.Controls.ComboBox
+        {
+            ItemsSource = options,
+            SelectedItem = selected,
+            DisplayMemberPath = nameof(SquadSuccessorOption.DisplayText),
+            Margin = new Thickness(0, 12, 0, 0),
+            MinHeight = 34
+        };
+
+        var confirmButton = new System.Windows.Controls.Button
+        {
+            Content = "确认移交并离开",
+            Width = 150,
+            MinHeight = 34,
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        var cancelButton = new System.Windows.Controls.Button
+        {
+            Content = "取消",
+            Width = 100,
+            MinHeight = 34
+        };
+
+        SquadSuccessorOption? result = null;
+        confirmButton.Click += (_, _) =>
+        {
+            result = comboBox.SelectedItem as SquadSuccessorOption;
+            dialog.DialogResult = result is not null;
+            dialog.Close();
+        };
+        cancelButton.Click += (_, _) =>
+        {
+            dialog.DialogResult = false;
+            dialog.Close();
+        };
+
+        var buttonRow = new StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 18, 0, 0)
+        };
+        buttonRow.Children.Add(cancelButton);
+        buttonRow.Children.Add(confirmButton);
+
+        var panel = new StackPanel
+        {
+            Margin = new Thickness(24)
+        };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "离开前需要移交舰队指挥权",
+            FontSize = 20,
+            FontWeight = FontWeights.Bold,
+            Foreground = FindBrush("AccentBrush", Brushes.DeepSkyBlue)
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "舰队仍有其他成员。请选择新的舰队指挥官，默认已选择推荐接任者。如果你同时是小队指挥官，离开后该小队会自动解散。",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 10, 0, 0),
+            Foreground = FindBrush("MutedTextBrush", Brushes.LightSteelBlue)
+        });
+        panel.Children.Add(comboBox);
+        panel.Children.Add(buttonRow);
+        dialog.Content = panel;
+
+        return dialog.ShowDialog() == true ? result : null;
+    }
+
     private async void LeaveSquad_Click(object sender, RoutedEventArgs e)
     {
         if (!EnsureLoggedIn("离开小队需要先登录星海舰桥账号。"))
@@ -7625,7 +7844,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.14";
+            : "0.3.15";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -9639,7 +9858,7 @@ public partial class MainWindow : Window, IAppUpdateUi
                 if (_selectedSquad is not null &&
                     _selectedSquad.Name.Equals(removedName, StringComparison.OrdinalIgnoreCase))
                 {
-                    _selectedSquad = _joinedSquad ?? _squads.FirstOrDefault();
+                    _selectedSquad = _joinedSquad;
                 }
 
                 continue;
