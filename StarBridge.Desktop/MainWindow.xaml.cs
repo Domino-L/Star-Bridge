@@ -171,8 +171,11 @@ public partial class MainWindow : Window, IAppUpdateUi
     private bool _hotkeyRegistered;
     private bool _hasFleet;
     private bool _isCreatingFleet;
+    private bool _fleetDirectorySyncPending;
     private DateTimeOffset _fleetMembershipChangedAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastFleetDirectorySyncAttemptAtUtc = DateTimeOffset.MinValue;
     private const int FleetMembershipSyncGraceSeconds = 45;
+    private const int FleetDirectoryRetrySeconds = 20;
 
     public MainWindow()
     {
@@ -712,33 +715,77 @@ public partial class MainWindow : Window, IAppUpdateUi
             return;
         }
 
+        var selectedLogoPath = _createFleetLogoPath;
         _hasFleet = true;
-        _isCreatingFleet = false;
+        _isCreatingFleet = true;
         _fleetName = CreateFleetNameBox.Text.Trim();
         _fleetCode = CreateFleetCodeBox.Text.Trim();
         MarkFleetMembershipChanged();
+        MarkFleetDirectorySyncPending();
         _fleetChiefCommander = FormatCommanderName(_callsign, _localPlayer);
         _fleetDeputyCommander = "Unassigned";
         _fleetDescription = NormalizeOptionalField(CreateFleetIntroBox.Text);
         _fleetType = GetSelectedRadioContent("FleetType") ?? "Combat";
         _fleetJoinPolicy = GetSelectedRadioContent("FleetJoinPolicy") ?? "Open";
         _fleetActiveTime = $"{CreateFleetOnlineFromBox.Text.Trim()} - {CreateFleetOnlineToBox.Text.Trim()} UTC+8";
-        _fleetLogoPath = _createFleetLogoPath;
+        _fleetLogoPath = selectedLogoPath;
+
+        NetworkStatusText.Text = "正在创建舰队并等待服务器确认...";
+        CreateFleetValidationText.Text = "";
+        var pushedFleet = await PushFleetDirectoryAsync(silent: false);
+        if (!pushedFleet)
+        {
+            RollBackFailedFleetCreate(selectedLogoPath, NetworkStatusText.Text);
+            return;
+        }
+
+        _isCreatingFleet = false;
         _createFleetLogoPath = null;
-        LocalFleetText.Text = $"{CreateFleetNameBox.Text.Trim()} [{CreateFleetCodeBox.Text.Trim()}]";
+        LocalFleetText.Text = $"{_fleetName} [{_fleetCode}]";
         RefreshFleetHeader();
         UpdateFleetEntryPanels();
-        AddFleetLog("舰队", "创建舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 创建 {_fleetName}");
         SaveCurrentConfig();
+
         var pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        var pushedFleet = await PushFleetDirectoryAsync(silent: true);
-        NetworkStatusText.Text = pushedLocal && pushedFleet
+        await PullNetworkFleetsAsync(silent: true);
+
+        NetworkStatusText.Text = pushedFleet && pushedLocal
             ? "舰队已创建并同步。"
-            : "舰队已在本地创建，服务器同步稍后会自动重试。";
+            : pushedFleet
+                ? "舰队已创建，正在同步本机状态。"
+                : "舰队已在本地创建，服务器确认失败；会自动重试。";
         ShowOneTimeGuideHint(
             "fleet-created-commander",
             "舰队指挥官引导",
             "舰队已经创建。下一步建议前往“管理舰队”设置公告、行动计划、任务、成员权限和舰船数据库，再邀请成员加入。");
+    }
+
+    private void RollBackFailedFleetCreate(string? selectedLogoPath, string failureText)
+    {
+        _hasFleet = false;
+        _isCreatingFleet = true;
+        _fleetDirectorySyncPending = false;
+        _fleetMembershipChangedAtUtc = DateTimeOffset.MinValue;
+        _lastFleetDirectorySyncAttemptAtUtc = DateTimeOffset.MinValue;
+        _fleetName = "No Fleet";
+        _fleetCode = "N/A";
+        _fleetChiefCommander = "Unassigned";
+        _fleetDeputyCommander = "Unassigned";
+        _fleetDescription = "No fleet description.";
+        _fleetType = "Combat";
+        _fleetJoinPolicy = "Open";
+        _fleetActiveTime = "20:00 - 23:59 UTC+8";
+        _fleetLogoPath = null;
+        _createFleetLogoPath = selectedLogoPath;
+        LocalFleetText.Text = "未加入舰队";
+        CreateFleetValidationText.Text = string.IsNullOrWhiteSpace(failureText)
+            ? "创建失败：服务器没有确认舰队创建。请检查登录状态和网络连接后重试。"
+            : failureText;
+        RefreshFleetHeader();
+        UpdateFleetEntryPanels();
+        LoadCreateFleetLogoPreview();
+        RenderState();
+        RefreshOverlayWindow();
     }
 
     private void CreateFleetField_TextChanged(object sender, TextChangedEventArgs e)
@@ -2959,8 +3006,62 @@ public partial class MainWindow : Window, IAppUpdateUi
         var snapshot = BuildLocalFleetSnapshot();
         try
         {
+            _lastFleetDirectorySyncAttemptAtUtc = DateTimeOffset.UtcNow;
             var response = await PostNetworkJsonAsync("api/fleets", snapshot);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                MarkFleetDirectorySyncPending();
+                var error = await ReadResponseErrorAsync(response);
+                if (!silent)
+                {
+                    NetworkStatusText.Text = $"发布舰队失败：{error}";
+                    AppendOutput($"NETWORK | push fleet failed={error}");
+                }
+
+                return false;
+            }
+
+            NetworkFleetSnapshot? merged = null;
+            try
+            {
+                merged = await response.Content.ReadFromJsonAsync<NetworkFleetSnapshot>();
+            }
+            catch
+            {
+                // A fleet write must return the merged server snapshot so creation cannot look successful locally only.
+            }
+
+            if (merged is null)
+            {
+                MarkFleetDirectorySyncPending();
+                if (!silent)
+                {
+                    NetworkStatusText.Text = "发布舰队失败：服务器没有返回舰队确认数据。";
+                    AppendOutput("NETWORK | push fleet failed=missing server confirmation");
+                }
+
+                return false;
+            }
+
+            if (!string.Equals(merged.Code, snapshot.Code, StringComparison.OrdinalIgnoreCase) ||
+                !FleetSnapshotContainsLocalPlayer(merged))
+            {
+                MarkFleetDirectorySyncPending();
+                var reason = !string.Equals(merged.Code, snapshot.Code, StringComparison.OrdinalIgnoreCase)
+                    ? $"服务器返回了不同的舰队识别码：{merged.Code}"
+                    : "服务器没有确认当前账号属于该舰队";
+                if (!silent)
+                {
+                    NetworkStatusText.Text = $"发布舰队失败：{reason}。";
+                    AppendOutput($"NETWORK | push fleet failed={reason}");
+                }
+
+                return false;
+            }
+
+            _fleetDirectorySyncPending = false;
+            MergeNetworkFleetState(merged);
+
             if (!silent)
             {
                 NetworkStatusText.Text = $"已发布舰队：{snapshot.Name}";
@@ -2976,6 +3077,7 @@ public partial class MainWindow : Window, IAppUpdateUi
                 return false;
             }
 
+            MarkFleetDirectorySyncPending();
             if (!silent)
             {
                 NetworkStatusText.Text = $"发布舰队失败：{ex.Message}";
@@ -3188,13 +3290,13 @@ public partial class MainWindow : Window, IAppUpdateUi
             var snapshots = await _relayClient.GetFromJsonAsync<NetworkFleetSnapshot[]>("api/fleets") ?? [];
             _allNetworkFleets.Clear();
             var currentFleetExistsOnRelay = false;
-            var clearedMissingFleet = false;
             var retainedPendingFleet = false;
             foreach (var snapshot in snapshots)
             {
                 if (IsSameFleet(snapshot.Name) || IsSameFleet(snapshot.Code))
                 {
                     currentFleetExistsOnRelay = true;
+                    _fleetDirectorySyncPending = false;
                     MergeNetworkFleetState(snapshot);
                 }
 
@@ -3203,18 +3305,19 @@ public partial class MainWindow : Window, IAppUpdateUi
 
             if (_hasFleet && !currentFleetExistsOnRelay)
             {
-                if (IsFleetMembershipSyncGraceActive())
+                if (ShouldPreserveLocalFleetDuringServerCatchup())
                 {
                     retainedPendingFleet = true;
+                    MarkFleetDirectorySyncPending();
+                    await RetryPendingFleetDirectorySyncAsync(silent: true);
                     if (!silent)
                     {
-                        NetworkStatusText.Text = "正在等待服务器确认当前舰队";
-                        AppendOutput("NETWORK | current fleet missing on relay; retained during membership sync grace");
+                        NetworkStatusText.Text = "当前舰队正在同步至服务器，已保留本地舰队";
+                        AppendOutput("NETWORK | current fleet missing on relay; retained while directory sync is pending");
                     }
                 }
                 else
                 {
-                    clearedMissingFleet = true;
                     ClearFleetState();
                     _networkSnapshots.Clear();
                     var retainedPlayerNames = string.IsNullOrWhiteSpace(_localPlayer)
@@ -3234,11 +3337,9 @@ public partial class MainWindow : Window, IAppUpdateUi
 
             if (!silent)
             {
-                NetworkStatusText.Text = clearedMissingFleet
-                    ? "服务器中未找到当前舰队，本地舰队缓存已清理"
-                    : retainedPendingFleet
+                NetworkStatusText.Text = retainedPendingFleet
                         ? "正在等待服务器确认当前舰队"
-                    : $"已拉取：{snapshots.Length} 个舰队";
+                        : $"已拉取：{snapshots.Length} 个舰队";
                 AppendOutput($"NETWORK | pulled fleets={snapshots.Length}");
             }
 
@@ -3781,8 +3882,9 @@ public partial class MainWindow : Window, IAppUpdateUi
         {
             if (_hasFleet)
             {
-                if (IsFleetMembershipSyncGraceActive())
+                if (ShouldPreserveLocalFleetDuringServerCatchup())
                 {
+                    MarkFleetDirectorySyncPending();
                     return;
                 }
 
@@ -3792,8 +3894,9 @@ public partial class MainWindow : Window, IAppUpdateUi
         }
         else if (_hasFleet && !IsSameFleet(snapshotFleet))
         {
-            if (IsFleetMembershipSyncGraceActive())
+            if (ShouldPreserveLocalFleetDuringServerCatchup())
             {
+                MarkFleetDirectorySyncPending();
                 return;
             }
 
@@ -3878,10 +3981,84 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetMembershipChangedAtUtc = DateTimeOffset.UtcNow;
     }
 
+    private void MarkFleetDirectorySyncPending()
+    {
+        if (_hasFleet)
+        {
+            _fleetDirectorySyncPending = true;
+        }
+    }
+
     private bool IsFleetMembershipSyncGraceActive()
     {
         return _hasFleet &&
                (DateTimeOffset.UtcNow - _fleetMembershipChangedAtUtc).TotalSeconds <= FleetMembershipSyncGraceSeconds;
+    }
+
+    private bool ShouldPreserveLocalFleetDuringServerCatchup()
+    {
+        return _hasFleet &&
+               (IsFleetMembershipSyncGraceActive() ||
+                _fleetDirectorySyncPending ||
+                HasCurrentFleetMembershipEvidenceOnRelay());
+    }
+
+    private bool HasCurrentFleetMembershipEvidenceOnRelay()
+    {
+        if (!_hasFleet || _allNetworkFleets.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var card in _allNetworkFleets)
+        {
+            var snapshot = card.Snapshot;
+            if (!IsSameFleet(snapshot.Name) && !IsSameFleet(snapshot.Code))
+            {
+                continue;
+            }
+
+            if (FleetSnapshotContainsLocalPlayer(snapshot))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool FleetSnapshotContainsLocalPlayer(NetworkFleetSnapshot snapshot)
+    {
+        var identities = EnumerateLocalIdentities()
+            .Where(identity => !string.IsNullOrWhiteSpace(identity))
+            .Select(identity => identity.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (identities.Count == 0)
+        {
+            return false;
+        }
+
+        return (snapshot.Members ?? [])
+            .Any(member => EnumerateIdentityAliases(member.GameName, member.Callsign)
+                .Any(identities.Contains));
+    }
+
+    private bool ShouldRetryPendingFleetDirectorySync()
+    {
+        return _hasFleet &&
+               _fleetDirectorySyncPending &&
+               IsLoggedIn &&
+               (DateTimeOffset.UtcNow - _lastFleetDirectorySyncAttemptAtUtc).TotalSeconds >= FleetDirectoryRetrySeconds;
+    }
+
+    private async Task RetryPendingFleetDirectorySyncAsync(bool silent = true)
+    {
+        if (!ShouldRetryPendingFleetDirectorySync())
+        {
+            return;
+        }
+
+        await PushFleetDirectoryAsync(silent);
     }
 
     private void MergeNetworkFleetSquads(NetworkFleetSnapshot snapshot)
@@ -4844,6 +5021,8 @@ public partial class MainWindow : Window, IAppUpdateUi
         _fleetName = snapshot.Name;
         _fleetCode = snapshot.Code;
         MarkFleetMembershipChanged();
+        _fleetDirectorySyncPending = false;
+        _lastFleetDirectorySyncAttemptAtUtc = DateTimeOffset.MinValue;
         _fleetChiefCommander = string.IsNullOrWhiteSpace(snapshot.Commander) ? "Unassigned" : snapshot.Commander!;
         _fleetDeputyCommander = "Unassigned";
         _fleetDescription = string.IsNullOrWhiteSpace(snapshot.Description) ? "No fleet description." : snapshot.Description!;
@@ -5065,7 +5244,9 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         _hasFleet = false;
         _isCreatingFleet = false;
+        _fleetDirectorySyncPending = false;
         _fleetMembershipChangedAtUtc = DateTimeOffset.MinValue;
+        _lastFleetDirectorySyncAttemptAtUtc = DateTimeOffset.MinValue;
         _fleetName = "No Fleet";
         _fleetCode = "N/A";
         _fleetChiefCommander = "Unassigned";
@@ -7895,7 +8076,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.16";
+            : "0.3.17";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

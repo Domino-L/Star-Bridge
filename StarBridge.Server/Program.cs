@@ -53,7 +53,7 @@ var playerOnlineTimeout = TimeSpan.FromSeconds(120);
 app.MapGet("/", () => Results.Ok(new
 {
     app = "Star Bridge Relay Server",
-    version = "0.3.16",
+    version = "0.3.17",
     mode = GetRelayMode(serverKey, allowOpenTest),
     accounts = users.Count,
     players = players.Count,
@@ -73,7 +73,7 @@ app.MapGet("/health", () => Results.Ok(new
 }));
 
 app.MapGet("/api/updates/latest", () => Results.Ok(new UpdateManifest(
-    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.16",
+    Environment.GetEnvironmentVariable("STARBRIDGE_LATEST_VERSION") ?? "0.3.17",
     Environment.GetEnvironmentVariable("STARBRIDGE_DOWNLOAD_URL"),
     Environment.GetEnvironmentVariable("STARBRIDGE_PACKAGE_URL"),
     DecodeEnvironmentBase64("STARBRIDGE_RELEASE_NOTES_B64") ??
@@ -494,15 +494,41 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
 
     var authorizedUser = GetAuthorizedUserName(request, users) ?? "";
     users.TryGetValue(authorizedUser, out var authorizedAccount);
+    if (string.IsNullOrWhiteSpace(authorizedUser) || authorizedAccount is null)
+    {
+        return Results.Unauthorized();
+    }
+
     return await WithFleetWriteLockAsync(fleetWriteLocks, normalized.Code, async () =>
     {
-        var normalizedCreate = normalized with
+        if (fleets.TryGetValue(normalized.Code, out var existingFleet))
+        {
+            var canUpdateExistingFleet =
+                IsFleetOwner(existingFleet, authorizedAccount) ||
+                IsFleetMember(existingFleet, authorizedAccount) ||
+                HasFleetPermission(existingFleet, authorizedAccount, permission =>
+                    permission.CanManageFleetInfo ||
+                    permission.CanPublishTasks ||
+                    permission.CanPublishPlans ||
+                    permission.CanRemoveMembers);
+
+            if (!canUpdateExistingFleet)
+            {
+                return Results.Conflict(new
+                {
+                    error = $"舰队识别码 {normalized.Code} 已存在。请更换识别码，或在寻找舰队中申请/加入该舰队。"
+                });
+            }
+        }
+
+        var ownerSafeCreate = EnsureFleetOwnerMembership(normalized, authorizedAccount, authorizedUser);
+        var normalizedCreate = ownerSafeCreate with
         {
             EventLog = AddFleetLog(
                 [],
                 "舰队",
                 "创建舰队",
-                $"{normalized.Name} ({normalized.Code}) 已创建")
+                $"{ownerSafeCreate.Name} ({ownerSafeCreate.Code}) 已创建")
         };
         var merged = fleets.AddOrUpdate(
             normalized.Code,
@@ -533,7 +559,7 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                     authorizedAccount,
                     canManageFleetInfo);
 
-                return normalized with
+                var updated = normalized with
                 {
                     Name = canManageFleetInfo ? normalized.Name : existing.Name,
                     Commander = canOwnFleet ? normalized.Commander : existing.Commander,
@@ -576,6 +602,10 @@ app.MapPost("/api/fleets", async (HttpRequest request, NetworkFleetSnapshot snap
                     OwnerAccount = canOwnFleet ? normalized.OwnerAccount : existing.OwnerAccount,
                     Squads = PruneEmptySquads(mergedSquads, mergedMembers, TimeSpan.FromMinutes(2))
                 };
+
+                return canOwnFleet
+                    ? EnsureFleetOwnerMembership(updated, authorizedAccount, authorizedUser)
+                    : updated;
             });
         await storage.SaveAsync(players, fleets, users, verificationCodes);
         return Results.Ok(merged);
@@ -3233,6 +3263,106 @@ static NetworkFleetMemberSnapshot[] NormalizeFleetMembers(
     }
 
     return rows.Values.ToArray();
+}
+
+static NetworkFleetSnapshot EnsureFleetOwnerMembership(
+    NetworkFleetSnapshot fleet,
+    UserAccount? account,
+    string authorizedUser)
+{
+    var ownerAccount = Normalize(fleet.OwnerAccount, account?.UserName ?? authorizedUser);
+    var gameName = Normalize(account?.GameName, account?.UserName ?? authorizedUser);
+    var callsign = Normalize(account?.Callsign, "");
+    if (string.IsNullOrWhiteSpace(gameName))
+    {
+        return fleet with { OwnerAccount = ownerAccount };
+    }
+
+    var commanderDisplay = !string.IsNullOrWhiteSpace(callsign) &&
+                           !callsign.Equals(gameName, StringComparison.OrdinalIgnoreCase)
+        ? $"{callsign} ({gameName})"
+        : gameName;
+
+    var members = NormalizeFleetMembers(fleet.Members, fleet.MemberPermissions).ToList();
+    var memberAliases = ExpandIdentityAliases(gameName)
+        .Concat(ExpandIdentityAliases(callsign))
+        .Concat(ExpandIdentityAliases(ownerAccount))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var memberIndex = members.FindIndex(member =>
+        IdentityContainsAny(member.GameName, memberAliases) ||
+        IdentityContainsAny(member.Callsign, memberAliases) ||
+        (account is not null &&
+         (MatchesAccountIdentity(member.GameName, account) ||
+          MatchesAccountIdentity(member.Callsign, account))));
+
+    var ownerMember = memberIndex >= 0
+        ? members[memberIndex] with
+        {
+            GameName = Normalize(members[memberIndex].GameName, gameName),
+            Callsign = Normalize(members[memberIndex].Callsign, callsign),
+            RoleTitle = "舰队指挥官",
+            LastUpdated = members[memberIndex].LastUpdated == default
+                ? DateTimeOffset.UtcNow
+                : members[memberIndex].LastUpdated
+        }
+        : new NetworkFleetMemberSnapshot(
+            gameName,
+            callsign,
+            "舰队指挥官",
+            "Unassigned",
+            false,
+            "Unknown",
+            "Unknown",
+            DateTimeOffset.UtcNow,
+            null,
+            "None");
+
+    if (memberIndex >= 0)
+    {
+        members[memberIndex] = ownerMember;
+    }
+    else
+    {
+        members.Add(ownerMember);
+    }
+
+    var permissions = NormalizeFleetMemberPermissions(fleet.MemberPermissions).ToList();
+    var permissionIndex = permissions.FindIndex(permission =>
+        IdentityContainsAny(permission.GameName, memberAliases) ||
+        IdentityContainsAny(permission.Callsign, memberAliases) ||
+        (account is not null &&
+         (MatchesAccountIdentity(permission.GameName, account) ||
+          MatchesAccountIdentity(permission.Callsign, account))));
+    var ownerPermission = new NetworkFleetMemberPermissionSnapshot(
+        gameName,
+        callsign,
+        "舰队指挥官",
+        true,
+        true,
+        true,
+        true,
+        true,
+        DateTimeOffset.UtcNow);
+
+    if (permissionIndex >= 0)
+    {
+        permissions[permissionIndex] = ownerPermission;
+    }
+    else
+    {
+        permissions.Add(ownerPermission);
+    }
+
+    var normalizedMembers = NormalizeFleetMembers(members.ToArray(), permissions.ToArray());
+    return fleet with
+    {
+        Commander = Normalize(fleet.Commander, commanderDisplay),
+        OwnerAccount = ownerAccount,
+        MemberPermissions = NormalizeFleetMemberPermissions(permissions.ToArray()),
+        Members = normalizedMembers,
+        TotalMembers = Math.Max(fleet.TotalMembers, normalizedMembers.Length),
+        OnlineMembers = normalizedMembers.Count(member => member.Online)
+    };
 }
 
 static NetworkFleetMemberSnapshot[] MergeFleetMembers(
