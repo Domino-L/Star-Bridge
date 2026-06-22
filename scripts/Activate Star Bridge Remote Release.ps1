@@ -1,15 +1,15 @@
-param(
+﻿param(
     [string]$ServerHost = "198.13.49.128",
     [string]$ServerUser = "starbridge-deploy",
     [int]$SshPort = 22,
     [string]$SshKeyPath = "",
-    [string]$Version = "0.3.16",
+    [string]$Version = "0.3.18",
     [string]$ApiBaseUrl = "https://api.scstarbridge.com",
-    [string]$DownloadUrl = "https://github.com/Domino-L/Star-Bridge/releases/download/v0.3.16/StarBridge-0.3.16-win-x64-setup.exe",
-    [string]$PackageUrl = "https://github.com/Domino-L/Star-Bridge/releases/download/v0.3.16/StarBridge-0.3.16-win-x64-update.zip",
-    [string]$DownloadSha256 = "06614fb3a5d39326a3ed41a8087aeb82b60101843345eabb80d0ccee0f731f02",
-    [string]$PackageSha256 = "9ef93ded4b81f09998c55a2487e85637baf572727d877ded12cc5069dfc21426",
-    [string]$ReleaseNotes = "StarBridge 0.3.16 update."
+    [string]$DownloadUrl = "https://github.com/Domino-L/Star-Bridge/releases/download/v0.3.18/StarBridge-0.3.18-win-x64-setup.exe",
+    [string]$PackageUrl = "https://github.com/Domino-L/Star-Bridge/releases/download/v0.3.18/StarBridge-0.3.18-win-x64-update.zip",
+    [string]$DownloadSha256 = "",
+    [string]$PackageSha256 = "",
+    [string]$ReleaseNotes = "StarBridge 0.3.18 update."
 )
 
 $ErrorActionPreference = "Stop"

@@ -50,6 +50,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     private const string OverlayPresetCommand = "command";
     private const string OverlayPresetCustom = "custom";
     private const string DefaultRelayUrl = "https://api.scstarbridge.com";
+    private const int FleetSyncImageMaxBytes = 512 * 1024;
     private static readonly TimeSpan LocalSquadEditProtectionWindow = TimeSpan.FromSeconds(45);
     private static readonly Regex JoinPuShardRegex = new(
         @"<Join PU>.*?\bshard\[(?<shard>[^\]]+)\]",
@@ -3003,11 +3004,19 @@ public partial class MainWindow : Window, IAppUpdateUi
             return false;
         }
 
-        var snapshot = BuildLocalFleetSnapshot();
+        var snapshot = BuildLocalFleetSnapshot(includeDirectoryImages: true, includeRepeatedImages: false);
         try
         {
             _lastFleetDirectorySyncAttemptAtUtc = DateTimeOffset.UtcNow;
             var response = await PostNetworkJsonAsync("api/fleets", snapshot);
+            if (!response.IsSuccessStatusCode &&
+                response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+            {
+                response.Dispose();
+                snapshot = BuildLocalFleetSnapshot(includeDirectoryImages: false, includeRepeatedImages: false);
+                response = await PostNetworkJsonAsync("api/fleets", snapshot);
+            }
+
             if (!response.IsSuccessStatusCode)
             {
                 MarkFleetDirectorySyncPending();
@@ -4332,14 +4341,20 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private static async Task<string> ReadResponseErrorAsync(HttpResponseMessage response)
     {
+        if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+        {
+            return "上传内容过大。请使用更小的舰队 Logo、队标或头像后重试。";
+        }
+
         try
         {
             var body = await response.Content.ReadAsStringAsync();
             if (!string.IsNullOrWhiteSpace(body))
             {
+                var trimmedBody = body.Trim();
                 try
                 {
-                    using var document = JsonDocument.Parse(body);
+                    using var document = JsonDocument.Parse(trimmedBody);
                     if (document.RootElement.ValueKind == JsonValueKind.Object &&
                         document.RootElement.TryGetProperty("error", out var errorElement) &&
                         errorElement.ValueKind == JsonValueKind.String)
@@ -4357,7 +4372,12 @@ public partial class MainWindow : Window, IAppUpdateUi
                     // The relay may return plain text for proxy or platform errors.
                 }
 
-                return body.Trim();
+                if (trimmedBody.StartsWith("<", StringComparison.Ordinal))
+                {
+                    return $"{(int)response.StatusCode} {response.ReasonPhrase}";
+                }
+
+                return trimmedBody;
             }
         }
         catch
@@ -4368,10 +4388,12 @@ public partial class MainWindow : Window, IAppUpdateUi
         return $"{(int)response.StatusCode} {response.ReasonPhrase}";
     }
 
-    private NetworkFleetSnapshot BuildLocalFleetSnapshot()
+    private NetworkFleetSnapshot BuildLocalFleetSnapshot(
+        bool includeDirectoryImages = true,
+        bool includeRepeatedImages = false)
     {
-        var squads = BuildSquadSnapshots();
-        var actionPlans = BuildActionPlanSnapshots();
+        var squads = BuildSquadSnapshots(includeDirectoryImages);
+        var actionPlans = BuildActionPlanSnapshots(includeRepeatedImages);
 
         return new NetworkFleetSnapshot(
             _fleetName,
@@ -4382,7 +4404,7 @@ public partial class MainWindow : Window, IAppUpdateUi
             _fleetActiveTime,
             _fleetJoinPolicy,
             string.IsNullOrWhiteSpace(_fleetCode) ? "LOGO" : _fleetCode,
-            BuildFleetLogoImageData(),
+            includeDirectoryImages ? BuildFleetLogoImageData() : null,
             squads,
             _players.Count(player => player.Status.Equals("Online", StringComparison.OrdinalIgnoreCase)),
             Math.Max(1, _players.Count),
@@ -4398,15 +4420,15 @@ public partial class MainWindow : Window, IAppUpdateUi
             DateTimeOffset.UtcNow,
             _accountName,
             BuildFleetMemberPermissionSnapshots(),
-            BuildFleetMemberSnapshots(),
+            BuildFleetMemberSnapshots(includeRepeatedImages),
             BuildFleetEventLogSnapshots(),
             _fleetCurrentTaskNoticeRevision,
-            BuildFleetShipSnapshots(),
+            BuildFleetShipSnapshots(includeRepeatedImages),
             BuildFleetTaskHistorySnapshots(),
             _fleetApplicationSnapshots);
     }
 
-    private NetworkSquadSnapshot[] BuildSquadSnapshots()
+    private NetworkSquadSnapshot[] BuildSquadSnapshots(bool includeImages = true)
     {
         RepairLocalSquadLifecycle();
 
@@ -4418,19 +4440,21 @@ public partial class MainWindow : Window, IAppUpdateUi
                 squad.Description,
                 squad.Mission,
                 squad.RallyPoint,
-                BuildImageDataFromPath(squad.EmblemPath, 512 * 1024),
+                includeImages ? BuildImageDataFromPath(squad.EmblemPath, FleetSyncImageMaxBytes) : null,
                 squad.UpdatedAt))
             .ToArray();
     }
 
-    private NetworkActionPlanSnapshot[] BuildActionPlanSnapshots()
+    private NetworkActionPlanSnapshot[] BuildActionPlanSnapshots(bool includeParticipantImages = false)
     {
         return _fleetActionPlans
-            .Select(BuildActionPlanSnapshot)
+            .Select(plan => BuildActionPlanSnapshot(plan, includeParticipantImages))
             .ToArray();
     }
 
-    private NetworkActionPlanSnapshot BuildActionPlanSnapshot(FleetActionPlanRow plan)
+    private NetworkActionPlanSnapshot BuildActionPlanSnapshot(
+        FleetActionPlanRow plan,
+        bool includeParticipantImages = false)
     {
         return new NetworkActionPlanSnapshot(
             plan.Id,
@@ -4439,18 +4463,20 @@ public partial class MainWindow : Window, IAppUpdateUi
             plan.StartTime,
             plan.NotifyMembers,
             plan.Participants
-                .Select(BuildActionPlanParticipantSnapshot)
+                .Select(participant => BuildActionPlanParticipantSnapshot(participant, includeParticipantImages))
                 .ToArray());
     }
 
-    private NetworkActionPlanParticipantSnapshot BuildActionPlanParticipantSnapshot(ActionPlanParticipantRow participant)
+    private NetworkActionPlanParticipantSnapshot BuildActionPlanParticipantSnapshot(
+        ActionPlanParticipantRow participant,
+        bool includeImage = false)
     {
         return new NetworkActionPlanParticipantSnapshot(
             participant.Callsign,
             participant.GameName,
             participant.AvatarPath,
             participant.Initials,
-            ResolveParticipantAvatarImageData(participant));
+            includeImage ? ResolveParticipantAvatarImageData(participant) : null);
     }
 
     private NetworkFleetMemberPermissionSnapshot[] BuildFleetMemberPermissionSnapshots()
@@ -4515,7 +4541,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         return rows.ToArray();
     }
 
-    private NetworkFleetMemberSnapshot[] BuildFleetMemberSnapshots()
+    private NetworkFleetMemberSnapshot[] BuildFleetMemberSnapshots(bool includeAvatarImage = false)
     {
         if (string.IsNullOrWhiteSpace(_localPlayer))
         {
@@ -4540,7 +4566,7 @@ public partial class MainWindow : Window, IAppUpdateUi
                 string.IsNullOrWhiteSpace(local?.RawShip) ? local?.Ship ?? "Unknown" : local.RawShip,
                 string.IsNullOrWhiteSpace(local?.RawLocation) ? "Unknown" : local.RawLocation,
                 DateTimeOffset.UtcNow,
-                BuildAvatarImageData(),
+                includeAvatarImage ? BuildAvatarImageData() : null,
                 local?.LocationConfidence ?? "None")
         ];
     }
@@ -4586,13 +4612,13 @@ public partial class MainWindow : Window, IAppUpdateUi
             .ToArray();
     }
 
-    private NetworkFleetShipSnapshot[] BuildFleetShipSnapshots()
+    private NetworkFleetShipSnapshot[] BuildFleetShipSnapshots(bool includeOwnerAvatarImage = false)
     {
         var ownerName = string.IsNullOrWhiteSpace(_localPlayer)
             ? _accountName ?? "Unknown"
             : _localPlayer;
         var ownerSquad = _joinedSquad?.Name ?? "未加入小队";
-        var avatarImageData = BuildAvatarImageData();
+        var avatarImageData = includeOwnerAvatarImage ? BuildAvatarImageData() : null;
 
         return _ownedShips
             .Select(ship => new NetworkFleetShipSnapshot(
@@ -4699,7 +4725,7 @@ public partial class MainWindow : Window, IAppUpdateUi
 
     private string? BuildFleetLogoImageData()
     {
-        return BuildImageDataFromPath(_fleetLogoPath, 768 * 1024);
+        return BuildImageDataFromPath(_fleetLogoPath, FleetSyncImageMaxBytes);
     }
 
     private static string? BuildImageDataFromPath(string? path, int maxBytes)
@@ -8076,7 +8102,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.17";
+            : "0.3.18";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

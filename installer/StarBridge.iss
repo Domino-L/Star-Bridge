@@ -1,7 +1,7 @@
 ﻿#define MyAppName "Star Bridge"
 #define MyAppNameCn "星海舰桥"
 #ifndef MyAppVersion
-#define MyAppVersion "0.3.17"
+#define MyAppVersion "0.3.18"
 #endif
 #define MyAppPublisher "Domino-L"
 #define MyAppExeName "Star Bridge.exe"
