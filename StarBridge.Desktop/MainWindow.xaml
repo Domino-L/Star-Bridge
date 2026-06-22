@@ -80,7 +80,7 @@
                             VerticalAlignment="Center"
                             Margin="18,0,0,0">
                     <TextBlock x:Name="WindowTitleText"
-                               Text="星海舰桥 V0.3.15"
+                               Text="星海舰桥 V0.3.16"
                                VerticalAlignment="Center"
                                FontSize="14"
                                FontWeight="SemiBold"
@@ -3266,7 +3266,8 @@
                     </Border>
 
                     <Border x:Name="FleetEmptyPanel"
-                            Grid.RowSpan="2"
+                            Grid.Row="0"
+                            Grid.RowSpan="3"
                             Panel.ZIndex="20"
                             Background="{StaticResource PageBackgroundBrush}"
                             BorderBrush="{StaticResource AccentDimBrush}"
@@ -3364,14 +3365,17 @@
                     </Border>
 
                     <Border x:Name="FleetCreatePanel"
-                            Grid.RowSpan="2"
+                            Grid.Row="0"
+                            Grid.RowSpan="3"
                             Panel.ZIndex="30"
                             Visibility="Collapsed"
                             Background="{StaticResource PageBackgroundBrush}"
                             BorderBrush="{StaticResource AccentBrush}"
                             BorderThickness="1"
                             Padding="0">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      CanContentScroll="False">
                             <StackPanel Margin="42,36,42,42">
                                 <TextBlock x:Name="CreateFleetTitleText"
                                            Text="创建舰队"

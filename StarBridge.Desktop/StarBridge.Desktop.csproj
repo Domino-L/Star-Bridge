@@ -12,9 +12,9 @@
     <OutputType>WinExe</OutputType>
     <AssemblyName>Star Bridge</AssemblyName>
     <Product>Star Bridge</Product>
-    <Version>0.3.15</Version>
-    <FileVersion>0.3.15.0</FileVersion>
-    <AssemblyVersion>0.3.15.0</AssemblyVersion>
+    <Version>0.3.16</Version>
+    <FileVersion>0.3.16.0</FileVersion>
+    <AssemblyVersion>0.3.16.0</AssemblyVersion>
     <TargetFramework>net8.0-windows</TargetFramework>
     <TargetPlatformVersion>10.0</TargetPlatformVersion>
     <TargetPlatformMoniker>Windows,Version=10.0</TargetPlatformMoniker>

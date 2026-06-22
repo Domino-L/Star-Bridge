@@ -171,6 +171,8 @@ public partial class MainWindow : Window, IAppUpdateUi
     private bool _hotkeyRegistered;
     private bool _hasFleet;
     private bool _isCreatingFleet;
+    private DateTimeOffset _fleetMembershipChangedAtUtc = DateTimeOffset.MinValue;
+    private const int FleetMembershipSyncGraceSeconds = 45;
 
     public MainWindow()
     {
@@ -714,6 +716,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         _isCreatingFleet = false;
         _fleetName = CreateFleetNameBox.Text.Trim();
         _fleetCode = CreateFleetCodeBox.Text.Trim();
+        MarkFleetMembershipChanged();
         _fleetChiefCommander = FormatCommanderName(_callsign, _localPlayer);
         _fleetDeputyCommander = "Unassigned";
         _fleetDescription = NormalizeOptionalField(CreateFleetIntroBox.Text);
@@ -727,8 +730,11 @@ public partial class MainWindow : Window, IAppUpdateUi
         UpdateFleetEntryPanels();
         AddFleetLog("舰队", "创建舰队", $"{FormatCommanderName(_callsign, _localPlayer)} 创建 {_fleetName}");
         SaveCurrentConfig();
-        await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
-        await PushFleetDirectoryAsync(silent: true);
+        var pushedLocal = await PushLocalSnapshotAsync(silent: true, pushFleetDirectory: false);
+        var pushedFleet = await PushFleetDirectoryAsync(silent: true);
+        NetworkStatusText.Text = pushedLocal && pushedFleet
+            ? "舰队已创建并同步。"
+            : "舰队已在本地创建，服务器同步稍后会自动重试。";
         ShowOneTimeGuideHint(
             "fleet-created-commander",
             "舰队指挥官引导",
@@ -3183,6 +3189,7 @@ public partial class MainWindow : Window, IAppUpdateUi
             _allNetworkFleets.Clear();
             var currentFleetExistsOnRelay = false;
             var clearedMissingFleet = false;
+            var retainedPendingFleet = false;
             foreach (var snapshot in snapshots)
             {
                 if (IsSameFleet(snapshot.Name) || IsSameFleet(snapshot.Code))
@@ -3196,18 +3203,30 @@ public partial class MainWindow : Window, IAppUpdateUi
 
             if (_hasFleet && !currentFleetExistsOnRelay)
             {
-                clearedMissingFleet = true;
-                ClearFleetState();
-                _networkSnapshots.Clear();
-                var retainedPlayerNames = string.IsNullOrWhiteSpace(_localPlayer)
-                    ? Array.Empty<string?>()
-                    : new string?[] { _localPlayer };
-                _fleetState.RemovePlayersExcept(retainedPlayerNames);
-                SaveCurrentConfig();
-                if (!silent)
+                if (IsFleetMembershipSyncGraceActive())
                 {
-                    NetworkStatusText.Text = "服务器中未找到当前舰队，本地舰队缓存已清理";
-                    AppendOutput("NETWORK | current fleet missing on relay; local fleet cache cleared");
+                    retainedPendingFleet = true;
+                    if (!silent)
+                    {
+                        NetworkStatusText.Text = "正在等待服务器确认当前舰队";
+                        AppendOutput("NETWORK | current fleet missing on relay; retained during membership sync grace");
+                    }
+                }
+                else
+                {
+                    clearedMissingFleet = true;
+                    ClearFleetState();
+                    _networkSnapshots.Clear();
+                    var retainedPlayerNames = string.IsNullOrWhiteSpace(_localPlayer)
+                        ? Array.Empty<string?>()
+                        : new string?[] { _localPlayer };
+                    _fleetState.RemovePlayersExcept(retainedPlayerNames);
+                    SaveCurrentConfig();
+                    if (!silent)
+                    {
+                        NetworkStatusText.Text = "服务器中未找到当前舰队，本地舰队缓存已清理";
+                        AppendOutput("NETWORK | current fleet missing on relay; local fleet cache cleared");
+                    }
                 }
             }
 
@@ -3217,6 +3236,8 @@ public partial class MainWindow : Window, IAppUpdateUi
             {
                 NetworkStatusText.Text = clearedMissingFleet
                     ? "服务器中未找到当前舰队，本地舰队缓存已清理"
+                    : retainedPendingFleet
+                        ? "正在等待服务器确认当前舰队"
                     : $"已拉取：{snapshots.Length} 个舰队";
                 AppendOutput($"NETWORK | pulled fleets={snapshots.Length}");
             }
@@ -3760,12 +3781,22 @@ public partial class MainWindow : Window, IAppUpdateUi
         {
             if (_hasFleet)
             {
+                if (IsFleetMembershipSyncGraceActive())
+                {
+                    return;
+                }
+
                 ClearFleetState();
                 changed = true;
             }
         }
         else if (_hasFleet && !IsSameFleet(snapshotFleet))
         {
+            if (IsFleetMembershipSyncGraceActive())
+            {
+                return;
+            }
+
             var resolvedSnapshotFleet = snapshotFleet!;
             var fleetCard = _allNetworkFleets.FirstOrDefault(card =>
                 resolvedSnapshotFleet.Equals(card.Snapshot.Name, StringComparison.OrdinalIgnoreCase) ||
@@ -3840,6 +3871,17 @@ public partial class MainWindow : Window, IAppUpdateUi
 
         return fleet.Equals(_fleetName, StringComparison.OrdinalIgnoreCase) ||
                fleet.Equals(_fleetCode, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void MarkFleetMembershipChanged()
+    {
+        _fleetMembershipChangedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    private bool IsFleetMembershipSyncGraceActive()
+    {
+        return _hasFleet &&
+               (DateTimeOffset.UtcNow - _fleetMembershipChangedAtUtc).TotalSeconds <= FleetMembershipSyncGraceSeconds;
     }
 
     private void MergeNetworkFleetSquads(NetworkFleetSnapshot snapshot)
@@ -4801,6 +4843,7 @@ public partial class MainWindow : Window, IAppUpdateUi
         _isCreatingFleet = false;
         _fleetName = snapshot.Name;
         _fleetCode = snapshot.Code;
+        MarkFleetMembershipChanged();
         _fleetChiefCommander = string.IsNullOrWhiteSpace(snapshot.Commander) ? "Unassigned" : snapshot.Commander!;
         _fleetDeputyCommander = "Unassigned";
         _fleetDescription = string.IsNullOrWhiteSpace(snapshot.Description) ? "No fleet description." : snapshot.Description!;
@@ -5022,6 +5065,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         _hasFleet = false;
         _isCreatingFleet = false;
+        _fleetMembershipChangedAtUtc = DateTimeOffset.MinValue;
         _fleetName = "No Fleet";
         _fleetCode = "N/A";
         _fleetChiefCommander = "Unassigned";
@@ -7851,7 +7895,7 @@ public partial class MainWindow : Window, IAppUpdateUi
     {
         return Assembly.GetExecutingAssembly().GetName().Version is { } version
             ? $"{version.Major}.{version.Minor}.{version.Build}"
-            : "0.3.15";
+            : "0.3.16";
     }
 
     private void FleetActionPlanCard_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
